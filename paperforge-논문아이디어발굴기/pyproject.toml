@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "paperforge"
+version = "0.1.0"
+description = "보유 데이터 매니페스트에서 멀티모달 논문 아이디어 매트릭스를 생성하는 CLI"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "hyeonjoong", email = "hyeonjoongk@gmail.com" }]
+keywords = ["research", "ideation", "multimodal", "EEG", "HRV", "power-analysis"]
+
+[project.scripts]
+paperforge = "paperforge.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["paperforge*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

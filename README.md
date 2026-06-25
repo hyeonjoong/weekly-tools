@@ -10,6 +10,7 @@
 
 | 툴 (폴더) | 한 줄 설명 | 바로 실행 | 추가일 |
 |----------|-----------|----------|--------|
+| [paperforge-논문아이디어발굴기](paperforge-논문아이디어발굴기) | 보유 데이터(EEG·워치·호흡·설문·MoA) 매니페스트에서 멀티모달 논문 아이디어 매트릭스 생성 — 가설·변수·분석법·저널·표본 실현가능성 | `실행.command` 더블클릭 · 또는 `paperforge manifest.json` | 2026-06-25 (목) |
 | [citecheck-인용DOI검증](citecheck-인용DOI검증) | 원고 인용/DOI를 Crossref로 검증 — 깨진 DOI·메타데이터 불일치·철회 탐지 | `실행.command` 더블클릭 · 또는 `citecheck refs.bib` | 2026-06-25 (목) |
 
 > `citecheck`는 단독 저장소([github.com/hyeonjoong/citecheck](https://github.com/hyeonjoong/citecheck))로도 공개돼 있습니다. 이후 만드는 툴은 이 모노레포 하위 폴더로 쌓입니다.
