@@ -39,9 +39,27 @@ def test_required_total_n_two_group_is_double():
     assert power.required_total_n({"type": "two_group", "d": 0.5}) == 2 * per == 126
 
 
-def test_regression_medium_effect():
-    # f2=0.15 (medium), k=3 -> normal approx 56.33 -> 57.
-    assert power.n_for_regression(0.15, 3) == 57
+def test_regression_exact_noncentral_f():
+    # Exact non-central F (matches G*Power "R^2 deviation from zero").
+    # f2=0.15 (medium): N grows with the number of predictors k.
+    assert power.n_for_regression(0.15, 1) == 55
+    assert power.n_for_regression(0.15, 3) == 77
+    assert power.n_for_regression(0.15, 5) == 92
+    # A naive z-approximation that ignores numerator df would give ~57 for k=3
+    # and dangerously under-state N — guard against regressing to it.
+    assert power.n_for_regression(0.15, 3) > 70
+
+
+def test_regression_small_and_large_effects():
+    # Independently checked against G*Power.
+    assert power.n_for_regression(0.02, 1) == 395   # small effect, 1 predictor
+    assert power.n_for_regression(0.35, 3) == 36     # large effect, 3 predictors
+    # More predictors at the same effect size require a larger sample.
+    assert power.n_for_regression(0.15, 4) > power.n_for_regression(0.15, 2)
+
+
+def test_regression_higher_power_needs_more():
+    assert power.n_for_regression(0.15, 3, power=0.90) > power.n_for_regression(0.15, 3)
 
 
 def test_power_090_needs_more_than_080():
