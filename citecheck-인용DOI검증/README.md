@@ -17,6 +17,12 @@ build when a citation is wrong.
 > Built as a weekly automation tool. Pure standard library — no `pip install`
 > of third-party packages required to run.
 
+## 목적 / Why this exists
+
+**한글:** 논문을 제출하기 직전, 참고문헌의 DOI를 손으로 하나씩 Crossref·PubMed에 대조하는 일은 지루하고 실수가 잦습니다. 잘못 붙여넣은 DOI, 다른 논문의 메타데이터, 심지어 이미 **철회된 논문**이 그대로 제출되면 리뷰어 지적이나 게재 후 정정 사유가 됩니다. `citecheck`는 그 Crossref 대조 과정을 자동화해, 임상·약리 연구자가 원고를 제출하기 전에 인용 오류를 빠르게 잡도록 돕습니다.
+
+**English:** Right before submission, manually checking every reference DOI against Crossref/PubMed is tedious and error-prone. A mistyped DOI, metadata from the wrong paper, or a **retracted** source can slip into a manuscript and trigger reviewer complaints or post-publication corrections. `citecheck` automates the Crossref half of that verification pass so a researcher can catch citation errors before submitting — and can even wire it into CI as a submission gate.
+
 ## Install
 
 ```bash
