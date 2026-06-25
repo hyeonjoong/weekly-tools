@@ -1,0 +1,11 @@
+# Per-tool build artifacts (each tool is a subfolder)
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.venv/
+venv/
+.DS_Store
