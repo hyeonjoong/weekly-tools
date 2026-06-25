@@ -1,0 +1,39 @@
+{
+  "study": "수면 MoA 코호트 (예시 데이터)",
+  "datasets": [
+    {
+      "name": "MoA EEG",
+      "modality": "eeg",
+      "n": 92,
+      "variables": ["delta_power", "theta_power", "alpha_power", "beta_power", "frontal_alpha_asymmetry"],
+      "sampling_hz": 256,
+      "notes": "이완 전/후 5분 안정상태"
+    },
+    {
+      "name": "스마트워치 야간",
+      "modality": "watch",
+      "n": 90,
+      "variables": ["rmssd", "sdnn", "lf_hf", "mean_hr", "sleep_minutes"],
+      "notes": "수면 중 1Hz HR에서 산출"
+    },
+    {
+      "name": "호흡밴드",
+      "modality": "respiration",
+      "n": 92,
+      "variables": ["resp_rate", "rsa", "resp_variability"],
+      "sampling_hz": 50
+    },
+    {
+      "name": "수면/스트레스 설문",
+      "modality": "questionnaire",
+      "n": 95,
+      "variables": ["psqi_total", "stress_score", "recovery_score"]
+    },
+    {
+      "name": "MoA 반응 라벨",
+      "modality": "moa",
+      "n": 90,
+      "variables": ["responder_flag", "response_magnitude"]
+    }
+  ]
+}
