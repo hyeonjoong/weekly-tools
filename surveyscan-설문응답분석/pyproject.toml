@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "surveyscan"
+version = "0.1.0"
+description = "설문 응답 CSV 분석: 문항 기술통계 · Cronbach α · 하위척도 · 역문항 · 결측 요약 (표준 라이브러리만)"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "hyeonjoong", email = "hyeonjoongk@gmail.com" }]
+keywords = ["survey", "questionnaire", "cronbach", "reliability", "psychometrics", "clinical"]
+dependencies = []
+
+[project.optional-dependencies]
+test = ["pytest>=7.0"]
+
+[project.scripts]
+surveyscan = "surveyscan.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["surveyscan*"]

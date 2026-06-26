@@ -1,0 +1,10 @@
+{
+  "scale_min": 0,
+  "scale_max": 4,
+  "subscales": {
+    "불면증상(ISI)": ["ISI1", "ISI2", "ISI3", "ISI4", "ISI5", "ISI6", "ISI7"],
+    "주간기능": ["DAY1", "DAY2", "DAY3"]
+  },
+  "reverse_items": ["DAY3"],
+  "min_valid_ratio": 0.5
+}
