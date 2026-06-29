@@ -10,6 +10,7 @@
 
 | 툴 (폴더) | 한 줄 설명 | 바로 실행 | 추가일 |
 |----------|-----------|----------|--------|
+| [logflow-사용자로그분석](logflow-사용자로그분석) | 사용자 이벤트 로그 CSV → 세션화·이벤트/사용자별 집계·DAU/WAU/MAU·리텐션(코호트 day-N)·퍼널 전환율을 한 번에 요약 (표준 라이브러리만, tz 보정·결측 처리 지원) | `실행.command` 더블클릭 · 또는 `python3 -m logflow.cli 로그.csv --funnel 단계1,단계2` | 2026-06-29 (월) |
 | [surveyscan-설문응답분석](surveyscan-설문응답분석) | 설문 응답 CSV → 문항별 기술통계·결측 요약·역문항 자동 재코딩·하위척도 점수·Cronbach α(신뢰도)·문항-총점 상관·문항제거시 α (표준 라이브러리만) | `실행.command` 더블클릭 · 또는 `surveyscan 설문.csv -c 설정.json` | 2026-06-26 (금) |
 | [paperforge-논문아이디어발굴기](paperforge-논문아이디어발굴기) | 보유 데이터(EEG·워치·호흡·설문·MoA) 매니페스트에서 멀티모달 논문 아이디어 매트릭스 생성 — 가설·변수·분석법·저널·표본 실현가능성 | `실행.command` 더블클릭 · 또는 `paperforge manifest.json` | 2026-06-25 (목) |
 | [citecheck-인용DOI검증](citecheck-인용DOI검증) | 원고 인용/DOI를 Crossref로 검증 — 깨진 DOI·메타데이터 불일치·철회 탐지 | `실행.command` 더블클릭 · 또는 `citecheck refs.bib` | 2026-06-25 (목) |
