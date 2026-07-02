@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "factorscan"
+version = "0.1.0"
+description = "설문 척도 요인분석·타당도 진단: KMO · Bartlett · 고유값/평행분석 · 요인적재량(Varimax) · 공통성 · 문항-총점 상관"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "hyeonjoong", email = "hyeonjoongk@gmail.com" }]
+keywords = ["factor-analysis", "EFA", "KMO", "Bartlett", "psychometrics", "survey", "validity", "clinical"]
+dependencies = ["numpy>=1.21"]
+
+[project.optional-dependencies]
+test = ["pytest>=7.0"]
+
+[project.scripts]
+factorscan = "factorscan.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["factorscan*"]
