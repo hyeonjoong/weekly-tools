@@ -10,6 +10,7 @@
 
 | 툴 (폴더) | 한 줄 설명 | 바로 실행 | 추가일 |
 |----------|-----------|----------|--------|
+| [pubgap-논문공백탐색](pubgap-논문공백탐색) | 키워드 → PubMed 최근 동향 요약(연도별 발행량·주요 저널/주제·부상/쇠퇴)과 **덜 연구된 각도(연구공백)** 제안 — MeSH 공동출현 lift + 초기하 p값으로 "개별로는 흔한데 함께는 드문" 조합을 논문 주제 후보로 (외부 의존성 0, 오프라인 데모 포함) | `실행.command` 더블클릭 · 또는 `python3 -m pubgap.cli "slow breathing AND sleep" --email 내메일` | 2026-07-09 (목) |
 | [factorscan-설문요인분석](factorscan-설문요인분석) | 설문 척도 CSV → 요인분석 적합성(KMO·Bartlett)·요인 수(고유값/Kaiser/평행분석)·요인적재량(Varimax)·공통성·수정된 문항-총점 상관을 한 번에 진단 (numpy만; SPSS식 척도 타당도 표를 재현가능하게) | `실행.command` 더블클릭 · 또는 `python3 -m factorscan.cli 설문.csv --config 설정.json` | 2026-07-02 (목) |
 | [logflow-사용자로그분석](logflow-사용자로그분석) | 사용자 이벤트 로그 CSV → 세션화·이벤트/사용자별 집계·DAU/WAU/MAU·리텐션(코호트 day-N)·퍼널 전환율을 한 번에 요약 (표준 라이브러리만, tz 보정·결측 처리 지원) | `실행.command` 더블클릭 · 또는 `python3 -m logflow.cli 로그.csv --funnel 단계1,단계2` | 2026-06-29 (월) |
 | [surveyscan-설문응답분석](surveyscan-설문응답분석) | 설문 응답 CSV → 문항별 기술통계·결측 요약·역문항 자동 재코딩·하위척도 점수·Cronbach α(신뢰도)·문항-총점 상관·문항제거시 α (표준 라이브러리만) | `실행.command` 더블클릭 · 또는 `surveyscan 설문.csv -c 설정.json` | 2026-06-26 (금) |
