@@ -1,0 +1,582 @@
+<?xml version="1.0" ?>
+<!-- 합성(synthetic) 예시 데이터입니다. 실제 PubMed 논문이 아니며(PMID 3000000x는 가짜),
+     pubgap 의 동향/공백 분석을 오프라인으로 시연하기 위해 만든 것입니다.
+     EEG 가 호흡/심박과 일부러 함께 나오지 않도록 구성해 '공백' 출력을 보여줍니다. -->
+<PubmedArticleSet>
+  <PubmedArticle>
+    <MedlineCitation>
+      <PMID Version="1">30000001</PMID>
+      <Article>
+        <Journal>
+          <JournalIssue>
+            <PubDate>
+              <Year>2015</Year>
+              <Month>Jan</Month>
+            </PubDate>
+          </JournalIssue>
+          <Title>Sleep Med (full title)</Title>
+          <ISOAbbreviation>Sleep Med</ISOAbbreviation>
+        </Journal>
+        <ArticleTitle>Slow breathing and heart rate variability in healthy adults</ArticleTitle>
+        <Abstract>
+          <AbstractText>Synthetic abstract for the bundled pubgap example.</AbstractText>
+        </Abstract>
+      </Article>
+      <MeshHeadingList>
+        <MeshHeading>
+          <DescriptorName UI="D00010" MajorTopicYN="N">Respiration</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D00011" MajorTopicYN="N">Heart Rate</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D00012" MajorTopicYN="N">Autonomic Nervous System</DescriptorName>
+        </MeshHeading>
+      </MeshHeadingList>
+    </MedlineCitation>
+  </PubmedArticle>
+  <PubmedArticle>
+    <MedlineCitation>
+      <PMID Version="1">30000002</PMID>
+      <Article>
+        <Journal>
+          <JournalIssue>
+            <PubDate>
+              <Year>2016</Year>
+              <Month>Jan</Month>
+            </PubDate>
+          </JournalIssue>
+          <Title>J Sleep Res (full title)</Title>
+          <ISOAbbreviation>J Sleep Res</ISOAbbreviation>
+        </Journal>
+        <ArticleTitle>EEG slow-wave activity in patients with insomnia</ArticleTitle>
+        <Abstract>
+          <AbstractText>Synthetic abstract for the bundled pubgap example.</AbstractText>
+        </Abstract>
+      </Article>
+      <MeshHeadingList>
+        <MeshHeading>
+          <DescriptorName UI="D00020" MajorTopicYN="N">Electroencephalography</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D00021" MajorTopicYN="N">Sleep</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D00022" MajorTopicYN="N">Sleep Initiation and Maintenance Disorders</DescriptorName>
+        </MeshHeading>
+      </MeshHeadingList>
+    </MedlineCitation>
+  </PubmedArticle>
+  <PubmedArticle>
+    <MedlineCitation>
+      <PMID Version="1">30000003</PMID>
+      <Article>
+        <Journal>
+          <JournalIssue>
+            <PubDate>
+              <Year>2016</Year>
+              <Month>Jan</Month>
+            </PubDate>
+          </JournalIssue>
+          <Title>Chest (full title)</Title>
+          <ISOAbbreviation>Chest</ISOAbbreviation>
+        </Journal>
+        <ArticleTitle>Respiratory rate monitoring during sleep</ArticleTitle>
+        <Abstract>
+          <AbstractText>Synthetic abstract for the bundled pubgap example.</AbstractText>
+        </Abstract>
+      </Article>
+      <MeshHeadingList>
+        <MeshHeading>
+          <DescriptorName UI="D00030" MajorTopicYN="N">Respiration</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D00031" MajorTopicYN="N">Sleep</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D00032" MajorTopicYN="N">Respiratory Rate</DescriptorName>
+        </MeshHeading>
+      </MeshHeadingList>
+    </MedlineCitation>
+  </PubmedArticle>
+  <PubmedArticle>
+    <MedlineCitation>
+      <PMID Version="1">30000004</PMID>
+      <Article>
+        <Journal>
+          <JournalIssue>
+            <PubDate>
+              <Year>2017</Year>
+              <Month>Jan</Month>
+            </PubDate>
+          </JournalIssue>
+          <Title>Psychophysiology (full title)</Title>
+          <ISOAbbreviation>Psychophysiology</ISOAbbreviation>
+        </Journal>
+        <ArticleTitle>Parasympathetic activation via paced breathing</ArticleTitle>
+        <Abstract>
+          <AbstractText>Synthetic abstract for the bundled pubgap example.</AbstractText>
+        </Abstract>
+      </Article>
+      <MeshHeadingList>
+        <MeshHeading>
+          <DescriptorName UI="D00040" MajorTopicYN="N">Respiration</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D00041" MajorTopicYN="N">Parasympathetic Nervous System</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D00042" MajorTopicYN="N">Heart Rate</DescriptorName>
+        </MeshHeading>
+      </MeshHeadingList>
+    </MedlineCitation>
+  </PubmedArticle>
+  <PubmedArticle>
+    <MedlineCitation>
+      <PMID Version="1">30000005</PMID>
+      <Article>
+        <Journal>
+          <JournalIssue>
+            <PubDate>
+              <Year>2017</Year>
+              <Month>Jan</Month>
+            </PubDate>
+          </JournalIssue>
+          <Title>Sleep (full title)</Title>
+          <ISOAbbreviation>Sleep</ISOAbbreviation>
+        </Journal>
+        <ArticleTitle>Cortical arousal and EEG markers of fragmented sleep</ArticleTitle>
+        <Abstract>
+          <AbstractText>Synthetic abstract for the bundled pubgap example.</AbstractText>
+        </Abstract>
+      </Article>
+      <MeshHeadingList>
+        <MeshHeading>
+          <DescriptorName UI="D00050" MajorTopicYN="N">Electroencephalography</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D00051" MajorTopicYN="N">Sleep</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D00052" MajorTopicYN="N">Arousal</DescriptorName>
+        </MeshHeading>
+      </MeshHeadingList>
+    </MedlineCitation>
+  </PubmedArticle>
+  <PubmedArticle>
+    <MedlineCitation>
+      <PMID Version="1">30000006</PMID>
+      <Article>
+        <Journal>
+          <JournalIssue>
+            <PubDate>
+              <Year>2018</Year>
+              <Month>Jan</Month>
+            </PubDate>
+          </JournalIssue>
+          <Title>Front Neurosci (full title)</Title>
+          <ISOAbbreviation>Front Neurosci</ISOAbbreviation>
+        </Journal>
+        <ArticleTitle>Heart rate variability biofeedback for stress</ArticleTitle>
+        <Abstract>
+          <AbstractText>Synthetic abstract for the bundled pubgap example.</AbstractText>
+        </Abstract>
+      </Article>
+      <MeshHeadingList>
+        <MeshHeading>
+          <DescriptorName UI="D00060" MajorTopicYN="N">Heart Rate</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D00061" MajorTopicYN="N">Biofeedback, Psychology</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D00062" MajorTopicYN="N">Autonomic Nervous System</DescriptorName>
+        </MeshHeading>
+      </MeshHeadingList>
+    </MedlineCitation>
+  </PubmedArticle>
+  <PubmedArticle>
+    <MedlineCitation>
+      <PMID Version="1">30000007</PMID>
+      <Article>
+        <Journal>
+          <JournalIssue>
+            <PubDate>
+              <Year>2018</Year>
+              <Month>Jan</Month>
+            </PubDate>
+          </JournalIssue>
+          <Title>J Clin Sleep Med (full title)</Title>
+          <ISOAbbreviation>J Clin Sleep Med</ISOAbbreviation>
+        </Journal>
+        <ArticleTitle>Insomnia severity and autonomic function</ArticleTitle>
+        <Abstract>
+          <AbstractText>Synthetic abstract for the bundled pubgap example.</AbstractText>
+        </Abstract>
+      </Article>
+      <MeshHeadingList>
+        <MeshHeading>
+          <DescriptorName UI="D00070" MajorTopicYN="N">Sleep Initiation and Maintenance Disorders</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D00071" MajorTopicYN="N">Autonomic Nervous System</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D00072" MajorTopicYN="N">Heart Rate</DescriptorName>
+        </MeshHeading>
+      </MeshHeadingList>
+    </MedlineCitation>
+  </PubmedArticle>
+  <PubmedArticle>
+    <MedlineCitation>
+      <PMID Version="1">30000008</PMID>
+      <Article>
+        <Journal>
+          <JournalIssue>
+            <PubDate>
+              <Year>2019</Year>
+              <Month>Jan</Month>
+            </PubDate>
+          </JournalIssue>
+          <Title>Sleep Med (full title)</Title>
+          <ISOAbbreviation>Sleep Med</ISOAbbreviation>
+        </Journal>
+        <ArticleTitle>Non-contact respiration sensing during sleep</ArticleTitle>
+        <Abstract>
+          <AbstractText>Synthetic abstract for the bundled pubgap example.</AbstractText>
+        </Abstract>
+      </Article>
+      <MeshHeadingList>
+        <MeshHeading>
+          <DescriptorName UI="D00080" MajorTopicYN="N">Respiration</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D00081" MajorTopicYN="N">Monitoring, Physiologic</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D00082" MajorTopicYN="N">Sleep</DescriptorName>
+        </MeshHeading>
+      </MeshHeadingList>
+    </MedlineCitation>
+  </PubmedArticle>
+  <PubmedArticle>
+    <MedlineCitation>
+      <PMID Version="1">30000009</PMID>
+      <Article>
+        <Journal>
+          <JournalIssue>
+            <PubDate>
+              <Year>2019</Year>
+              <Month>Jan</Month>
+            </PubDate>
+          </JournalIssue>
+          <Title>Psychophysiology (full title)</Title>
+          <ISOAbbreviation>Psychophysiology</ISOAbbreviation>
+        </Journal>
+        <ArticleTitle>EEG spectral power during relaxation</ArticleTitle>
+        <Abstract>
+          <AbstractText>Synthetic abstract for the bundled pubgap example.</AbstractText>
+        </Abstract>
+      </Article>
+      <MeshHeadingList>
+        <MeshHeading>
+          <DescriptorName UI="D00090" MajorTopicYN="N">Electroencephalography</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D00091" MajorTopicYN="N">Relaxation</DescriptorName>
+        </MeshHeading>
+      </MeshHeadingList>
+    </MedlineCitation>
+  </PubmedArticle>
+  <PubmedArticle>
+    <MedlineCitation>
+      <PMID Version="1">30000010</PMID>
+      <Article>
+        <Journal>
+          <JournalIssue>
+            <PubDate>
+              <Year>2020</Year>
+              <Month>Jan</Month>
+            </PubDate>
+          </JournalIssue>
+          <Title>Front Physiol (full title)</Title>
+          <ISOAbbreviation>Front Physiol</ISOAbbreviation>
+        </Journal>
+        <ArticleTitle>Respiratory sinus arrhythmia and vagal tone</ArticleTitle>
+        <Abstract>
+          <AbstractText>Synthetic abstract for the bundled pubgap example.</AbstractText>
+        </Abstract>
+      </Article>
+      <MeshHeadingList>
+        <MeshHeading>
+          <DescriptorName UI="D00100" MajorTopicYN="N">Respiration</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D00101" MajorTopicYN="N">Heart Rate</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D00102" MajorTopicYN="N">Parasympathetic Nervous System</DescriptorName>
+        </MeshHeading>
+      </MeshHeadingList>
+    </MedlineCitation>
+  </PubmedArticle>
+  <PubmedArticle>
+    <MedlineCitation>
+      <PMID Version="1">30000011</PMID>
+      <Article>
+        <Journal>
+          <JournalIssue>
+            <PubDate>
+              <Year>2020</Year>
+              <Month>Jan</Month>
+            </PubDate>
+          </JournalIssue>
+          <Title>Sleep (full title)</Title>
+          <ISOAbbreviation>Sleep</ISOAbbreviation>
+        </Journal>
+        <ArticleTitle>Slow-wave sleep and memory consolidation</ArticleTitle>
+        <Abstract>
+          <AbstractText>Synthetic abstract for the bundled pubgap example.</AbstractText>
+        </Abstract>
+      </Article>
+      <MeshHeadingList>
+        <MeshHeading>
+          <DescriptorName UI="D00110" MajorTopicYN="N">Sleep</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D00111" MajorTopicYN="N">Electroencephalography</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D00112" MajorTopicYN="N">Memory</DescriptorName>
+        </MeshHeading>
+      </MeshHeadingList>
+    </MedlineCitation>
+  </PubmedArticle>
+  <PubmedArticle>
+    <MedlineCitation>
+      <PMID Version="1">30000012</PMID>
+      <Article>
+        <Journal>
+          <JournalIssue>
+            <PubDate>
+              <Year>2021</Year>
+              <Month>Jan</Month>
+            </PubDate>
+          </JournalIssue>
+          <Title>J Sleep Res (full title)</Title>
+          <ISOAbbreviation>J Sleep Res</ISOAbbreviation>
+        </Journal>
+        <ArticleTitle>Acoustic stimulation of slow oscillations during sleep</ArticleTitle>
+        <Abstract>
+          <AbstractText>Synthetic abstract for the bundled pubgap example.</AbstractText>
+        </Abstract>
+      </Article>
+      <MeshHeadingList>
+        <MeshHeading>
+          <DescriptorName UI="D00120" MajorTopicYN="N">Electroencephalography</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D00121" MajorTopicYN="N">Sleep</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D00122" MajorTopicYN="N">Acoustic Stimulation</DescriptorName>
+        </MeshHeading>
+      </MeshHeadingList>
+    </MedlineCitation>
+  </PubmedArticle>
+  <PubmedArticle>
+    <MedlineCitation>
+      <PMID Version="1">30000013</PMID>
+      <Article>
+        <Journal>
+          <JournalIssue>
+            <PubDate>
+              <Year>2021</Year>
+              <Month>Jan</Month>
+            </PubDate>
+          </JournalIssue>
+          <Title>Front Neurosci (full title)</Title>
+          <ISOAbbreviation>Front Neurosci</ISOAbbreviation>
+        </Journal>
+        <ArticleTitle>Biofeedback for insomnia: a randomized trial</ArticleTitle>
+        <Abstract>
+          <AbstractText>Synthetic abstract for the bundled pubgap example.</AbstractText>
+        </Abstract>
+      </Article>
+      <MeshHeadingList>
+        <MeshHeading>
+          <DescriptorName UI="D00130" MajorTopicYN="N">Biofeedback, Psychology</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D00131" MajorTopicYN="N">Sleep Initiation and Maintenance Disorders</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D00132" MajorTopicYN="N">Heart Rate</DescriptorName>
+        </MeshHeading>
+      </MeshHeadingList>
+    </MedlineCitation>
+  </PubmedArticle>
+  <PubmedArticle>
+    <MedlineCitation>
+      <PMID Version="1">30000014</PMID>
+      <Article>
+        <Journal>
+          <JournalIssue>
+            <PubDate>
+              <Year>2022</Year>
+              <Month>Jan</Month>
+            </PubDate>
+          </JournalIssue>
+          <Title>Sleep Med (full title)</Title>
+          <ISOAbbreviation>Sleep Med</ISOAbbreviation>
+        </Journal>
+        <ArticleTitle>Wearable HRV monitoring across the night</ArticleTitle>
+        <Abstract>
+          <AbstractText>Synthetic abstract for the bundled pubgap example.</AbstractText>
+        </Abstract>
+      </Article>
+      <MeshHeadingList>
+        <MeshHeading>
+          <DescriptorName UI="D00140" MajorTopicYN="N">Heart Rate</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D00141" MajorTopicYN="N">Sleep</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D00142" MajorTopicYN="N">Monitoring, Physiologic</DescriptorName>
+        </MeshHeading>
+      </MeshHeadingList>
+    </MedlineCitation>
+  </PubmedArticle>
+  <PubmedArticle>
+    <MedlineCitation>
+      <PMID Version="1">30000015</PMID>
+      <Article>
+        <Journal>
+          <JournalIssue>
+            <PubDate>
+              <Year>2022</Year>
+              <Month>Jan</Month>
+            </PubDate>
+          </JournalIssue>
+          <Title>Psychophysiology (full title)</Title>
+          <ISOAbbreviation>Psychophysiology</ISOAbbreviation>
+        </Journal>
+        <ArticleTitle>Paced breathing and parasympathetic tone</ArticleTitle>
+        <Abstract>
+          <AbstractText>Synthetic abstract for the bundled pubgap example.</AbstractText>
+        </Abstract>
+      </Article>
+      <MeshHeadingList>
+        <MeshHeading>
+          <DescriptorName UI="D00150" MajorTopicYN="N">Respiration</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D00151" MajorTopicYN="N">Parasympathetic Nervous System</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D00152" MajorTopicYN="N">Autonomic Nervous System</DescriptorName>
+        </MeshHeading>
+      </MeshHeadingList>
+    </MedlineCitation>
+  </PubmedArticle>
+  <PubmedArticle>
+    <MedlineCitation>
+      <PMID Version="1">30000016</PMID>
+      <Article>
+        <Journal>
+          <JournalIssue>
+            <PubDate>
+              <Year>2023</Year>
+              <Month>Jan</Month>
+            </PubDate>
+          </JournalIssue>
+          <Title>Front Physiol (full title)</Title>
+          <ISOAbbreviation>Front Physiol</ISOAbbreviation>
+        </Journal>
+        <ArticleTitle>Non-contact monitoring of respiration and heart rate</ArticleTitle>
+        <Abstract>
+          <AbstractText>Synthetic abstract for the bundled pubgap example.</AbstractText>
+        </Abstract>
+      </Article>
+      <MeshHeadingList>
+        <MeshHeading>
+          <DescriptorName UI="D00160" MajorTopicYN="N">Respiration</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D00161" MajorTopicYN="N">Heart Rate</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D00162" MajorTopicYN="N">Monitoring, Physiologic</DescriptorName>
+        </MeshHeading>
+      </MeshHeadingList>
+    </MedlineCitation>
+  </PubmedArticle>
+  <PubmedArticle>
+    <MedlineCitation>
+      <PMID Version="1">30000017</PMID>
+      <Article>
+        <Journal>
+          <JournalIssue>
+            <PubDate>
+              <Year>2023</Year>
+              <Month>Jan</Month>
+            </PubDate>
+          </JournalIssue>
+          <Title>J Clin Sleep Med (full title)</Title>
+          <ISOAbbreviation>J Clin Sleep Med</ISOAbbreviation>
+        </Journal>
+        <ArticleTitle>Biofeedback-assisted breathing for sleep onset</ArticleTitle>
+        <Abstract>
+          <AbstractText>Synthetic abstract for the bundled pubgap example.</AbstractText>
+        </Abstract>
+      </Article>
+      <MeshHeadingList>
+        <MeshHeading>
+          <DescriptorName UI="D00170" MajorTopicYN="N">Biofeedback, Psychology</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D00171" MajorTopicYN="N">Respiration</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D00172" MajorTopicYN="N">Sleep</DescriptorName>
+        </MeshHeading>
+      </MeshHeadingList>
+    </MedlineCitation>
+  </PubmedArticle>
+  <PubmedArticle>
+    <MedlineCitation>
+      <PMID Version="1">30000018</PMID>
+      <Article>
+        <Journal>
+          <JournalIssue>
+            <PubDate>
+              <Year>2024</Year>
+              <Month>Jan</Month>
+            </PubDate>
+          </JournalIssue>
+          <Title>Sleep (full title)</Title>
+          <ISOAbbreviation>Sleep</ISOAbbreviation>
+        </Journal>
+        <ArticleTitle>Acoustic enhancement of slow-wave sleep and its autonomic effect</ArticleTitle>
+        <Abstract>
+          <AbstractText>Synthetic abstract for the bundled pubgap example.</AbstractText>
+        </Abstract>
+      </Article>
+      <MeshHeadingList>
+        <MeshHeading>
+          <DescriptorName UI="D00180" MajorTopicYN="N">Electroencephalography</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D00181" MajorTopicYN="N">Sleep</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D00182" MajorTopicYN="N">Acoustic Stimulation</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D00183" MajorTopicYN="N">Autonomic Nervous System</DescriptorName>
+        </MeshHeading>
+      </MeshHeadingList>
+    </MedlineCitation>
+  </PubmedArticle>
+</PubmedArticleSet>

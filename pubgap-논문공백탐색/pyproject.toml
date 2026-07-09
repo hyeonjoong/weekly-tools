@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pubgap"
+version = "0.1.0"
+description = "PubMed 최근 동향 요약 + 덜 연구된 각도(연구공백) 제안 — 논문 주제 발굴기"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "hyeonjoong", email = "hyeonjoongk@gmail.com" }]
+keywords = ["pubmed", "research-gap", "bibliometrics", "literature-review", "MeSH", "clinical", "trend"]
+dependencies = []
+
+[project.optional-dependencies]
+test = ["pytest>=7.0"]
+
+[project.scripts]
+pubgap = "pubgap.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["pubgap*"]
