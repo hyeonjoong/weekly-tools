@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "statwise"
+version = "0.1.0"
+description = "그룹 비교 통계 자동 선택기 — 정규성/등분산 점검 후 t-검정·Welch·Mann-Whitney·ANOVA·Kruskal-Wallis를 골라 실행하고 효과크기와 논문용 문장까지 출력 (표준 라이브러리만)"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "hyeonjoong", email = "hyeonjoongk@gmail.com" }]
+keywords = ["statistics", "t-test", "anova", "mann-whitney", "kruskal-wallis",
+            "effect-size", "clinical", "shapiro-wilk"]
+
+# No third-party dependencies — everything (distribution CDFs, Shapiro-Wilk,
+# effect sizes) is implemented in the standard library.
+dependencies = []
+
+[project.scripts]
+statwise = "statwise.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["statwise*"]
