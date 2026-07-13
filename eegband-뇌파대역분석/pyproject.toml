@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "eegband"
+version = "0.1.0"
+description = "단일채널 EEG 대역파워 분석기 — Welch PSD로 delta/theta/alpha/beta/gamma 절대·상대 파워, 슬로우파(SWA), SEF95, 피크주파수, 대역비를 계산 (FFT까지 표준 라이브러리만 자체 구현)"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "hyeonjoong", email = "hyeonjoongk@gmail.com" }]
+keywords = ["eeg", "psd", "welch", "band-power", "slow-wave-activity", "swa",
+            "spectral-edge-frequency", "fft", "sleep", "delta", "alpha"]
+
+# No third-party dependencies — the FFT (radix-2 Cooley–Tukey), Hann window,
+# Welch PSD and all band-power features are implemented in the standard library.
+dependencies = []
+
+[project.scripts]
+eegband = "eegband.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["eegband*"]
