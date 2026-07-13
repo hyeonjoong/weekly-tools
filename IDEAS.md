@@ -12,6 +12,7 @@
 <!-- 여기에 자유롭게 추가하세요 -->
 
 ## 완료 (자동 실행이 채워 넣음)
+- [x] 2026-07-13 심박변이도(HRV) 분석기 — RR/IBI→시간·주파수(자체 FFT/Welch)·비선형(Poincaré/SampEn)+이소성 보정 (BELL-001 RSA/HRV 기전 정량화, stdlib 전용) → `hrvkit-심박변이도분석`
 - [x] 2026-07-10 그룹 비교 통계 자동 선택기(Shapiro/Levene 점검→t·Welch·Mann-Whitney·ANOVA·Kruskal 자동선택+효과크기·95% CI+Holm 사후검정+논문용 APA 문장; scipy와 p값 ≤1e-9 일치, stdlib 전용) → `statwise-그룹비교통계`
 - [x] 2026-07-09 논문 주제/연구공백 탐색(PubMed 동향 요약+MeSH 공동출현 lift·초기하 p값으로 저조 조합 제안) → `pubgap-논문공백탐색`
 - [x] 2026-07-02 설문 척도 요인분석/타당도(KMO·Bartlett·고유값/평행분석·Varimax 적재량·공통성·문항-총점 상관) → `factorscan-설문요인분석`
