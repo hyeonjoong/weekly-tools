@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hrvkit"
+version = "0.1.0"
+description = "심박변이도(HRV) 분석기 — RR/IBI(ms) 또는 순간 HR(bpm) CSV로부터 이상박동 보정 후 시간영역·주파수영역(Welch/직접구현 FFT)·비선형(Poincaré/SampEn) 지표를 계산 (표준 라이브러리만)"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "hyeonjoong", email = "hyeonjoongk@gmail.com" }]
+keywords = ["hrv", "heart-rate-variability", "rmssd", "sdnn", "poincare",
+            "welch", "fft", "rsa", "parasympathetic", "sleep", "ppg", "ecg"]
+
+# No third-party dependencies — FFT(radix-2 Cooley–Tukey), Welch PSD, 보간,
+# SampEn 등 모든 수치 계산을 표준 라이브러리로 직접 구현했습니다.
+dependencies = []
+
+[project.scripts]
+hrvkit = "hrvkit.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["hrvkit*"]

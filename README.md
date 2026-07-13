@@ -10,6 +10,7 @@
 
 | 툴 (폴더) | 한 줄 설명 | 바로 실행 | 추가일 |
 |----------|-----------|----------|--------|
+| [hrvkit-심박변이도분석](hrvkit-심박변이도분석) | RR/IBI(또는 HR) CSV → **HRV 지표 한 번에**: 시간영역(SDNN·RMSSD·pNN50)+주파수영역(LF/HF, 직접 구현한 FFT·Welch PSD)+비선형(Poincaré SD1/SD2·SampEn), 이소성박동 자동 보정 — BELL-001 호흡→부교감→RSA/HRV 기전 정량화 (외부 의존성 0, scipy와 ≤1e-6 일치) | `실행.command` 더블클릭 · 또는 `python3 -m hrvkit.cli rr.csv` (또는 `--json`) | 2026-07-13 (월) |
 | [statwise-그룹비교통계](statwise-그룹비교통계) | 두 그룹/여러 그룹 CSV → **정규성(Shapiro-Wilk)·등분산(Levene) 자동 점검** 후 알맞은 검정(Student t·Welch·Mann-Whitney·ANOVA·Kruskal-Wallis)을 골라 실행 — 효과크기(Hedges g·rank-biserial·η²)+95% CI+Holm 보정 사후검정+**논문용 APA 문장**까지 (외부 의존성 0, scipy와 p값 ≤1e-9 일치, 오프라인 예제 포함) | `실행.command` 더블클릭 · 또는 `statwise 데이터.csv --value 값열 --group 그룹열` (또는 `--wide`) | 2026-07-10 (금) |
 | [pubgap-논문공백탐색](pubgap-논문공백탐색) | 키워드 → PubMed 최근 동향 요약(연도별 발행량·주요 저널/주제·부상/쇠퇴)과 **덜 연구된 각도(연구공백)** 제안 — MeSH 공동출현 lift + 초기하 p값으로 "개별로는 흔한데 함께는 드문" 조합을 논문 주제 후보로 (외부 의존성 0, 오프라인 데모 포함) | `실행.command` 더블클릭 · 또는 `python3 -m pubgap.cli "slow breathing AND sleep" --email 내메일` | 2026-07-09 (목) |
 | [factorscan-설문요인분석](factorscan-설문요인분석) | 설문 척도 CSV → 요인분석 적합성(KMO·Bartlett)·요인 수(고유값/Kaiser/평행분석)·요인적재량(Varimax)·공통성·수정된 문항-총점 상관을 한 번에 진단 (numpy만; SPSS식 척도 타당도 표를 재현가능하게) | `실행.command` 더블클릭 · 또는 `python3 -m factorscan.cli 설문.csv --config 설정.json` | 2026-07-02 (목) |
