@@ -12,6 +12,7 @@
 <!-- 여기에 자유롭게 추가하세요 -->
 
 ## 완료 (자동 실행이 채워 넣음)
+- [x] 2026-07-13 측정 방법 일치도 분석기 — Bland–Altman·ICC(2,1)/(3,1)·Lin CCC·반복측정 CV (비접촉 호흡/HRV vs PSG 검증, stdlib 전용) → `agreestat-측정일치도`
 - [x] 2026-07-13 단일채널 EEG 대역파워 분석기 — delta~gamma 절대/상대 파워+SWA+SEF, 자체 Welch PSD (BELL-001 서파수면 지표, stdlib 전용) → `eegband-뇌파대역분석`
 - [x] 2026-07-13 심박변이도(HRV) 분석기 — RR/IBI→시간·주파수(자체 FFT/Welch)·비선형(Poincaré/SampEn)+이소성 보정 (BELL-001 RSA/HRV 기전 정량화, stdlib 전용) → `hrvkit-심박변이도분석`
 - [x] 2026-07-10 그룹 비교 통계 자동 선택기(Shapiro/Levene 점검→t·Welch·Mann-Whitney·ANOVA·Kruskal 자동선택+효과크기·95% CI+Holm 사후검정+논문용 APA 문장; scipy와 p값 ≤1e-9 일치, stdlib 전용) → `statwise-그룹비교통계`

@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agreestat"
+version = "0.1.0"
+description = "측정 방법 일치도(method comparison / agreement) 분석기 — Bland–Altman(LoA·CI), ICC(2,1)/ICC(3,1), Lin's CCC, 반복성, 상관/차이 검정을 한 번에 계산하고 논문용 문장까지 출력 (표준 라이브러리만)"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "hyeonjoong", email = "hyeonjoongk@gmail.com" }]
+keywords = ["agreement", "bland-altman", "icc", "concordance", "lin-ccc",
+            "method-comparison", "repeatability", "validation", "clinical"]
+
+# No third-party dependencies — every statistic (distribution quantiles,
+# incomplete beta/gamma, ICC/CCC/Bland–Altman) is implemented in the standard
+# library so the tool runs anywhere Python 3.9+ is installed.
+dependencies = []
+
+[project.scripts]
+agreestat = "agreestat.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["agreestat*"]
