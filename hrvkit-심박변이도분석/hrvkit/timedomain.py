@@ -8,7 +8,95 @@ from __future__ import annotations
 
 import math
 import statistics
-from typing import Dict, Sequence
+from typing import Dict, List, Sequence
+
+# 기하학적 지표용 히스토그램 빈 폭 — Task Force(1996) 표준: 1/128 초 ≈ 7.8125 ms.
+_HIST_BIN_MS = 1000.0 / 128.0
+
+
+def _histogram(nn: Sequence[float], bin_width: float
+               ) -> "tuple[List[float], List[int]]":
+    """NN 히스토그램 (빈 중심(ms) 리스트, 카운트 리스트)를 반환."""
+    lo = min(nn)
+    # 빈 인덱스 = floor((v - lo)/bin_width). 중심 = lo + (idx+0.5)*bin_width.
+    counts: Dict[int, int] = {}
+    for v in nn:
+        idx = int(math.floor((v - lo) / bin_width))
+        counts[idx] = counts.get(idx, 0) + 1
+    max_idx = max(counts)
+    centers = [lo + (i + 0.5) * bin_width for i in range(max_idx + 1)]
+    hist = [counts.get(i, 0) for i in range(max_idx + 1)]
+    return centers, hist
+
+
+def geometric_indices(nn: Sequence[float],
+                      bin_width: float = _HIST_BIN_MS) -> Dict[str, float]:
+    """기하학적 HRV 지표 — HRV 삼각지수(HTI)와 TINN.
+
+    HTI  = 전체 NN 개수 / 히스토그램 최빈 빈의 높이 (무차원). 클수록 변동성 큼.
+    TINN = NN 히스토그램을 삼각형으로 보간했을 때 밑변 폭(ms).
+
+    둘 다 이상값(artifact)에 강건해 임상에서 널리 쓰입니다(Task Force 1996).
+    삼각형 정점은 최빈 빈에 고정하고, 좌/우 밑변 지점 N, M을 각각 잔차
+    제곱합이 최소가 되도록 독립적으로 탐색합니다(정점 좌우로 오차가 분리됨).
+    """
+    nn = [float(x) for x in nn]
+    n = len(nn)
+    if n < 2:
+        return {"hti": float("nan"), "tinn": float("nan")}
+
+    centers, hist = _histogram(nn, bin_width)
+    peak = max(hist)
+    if peak <= 0:
+        return {"hti": float("nan"), "tinn": float("nan")}
+
+    hti = n / peak
+
+    # 여러 최빈 빈이 있으면 첫 번째를 정점으로.
+    x_idx = hist.index(peak)
+    x = centers[x_idx]
+    y = float(peak)
+
+    def _left_error(n_idx: int) -> float:
+        """정점 왼쪽 밑변을 centers[n_idx]에 둘 때 좌측 잔차 제곱합."""
+        xn = centers[n_idx]
+        err = 0.0
+        for t in range(0, x_idx):
+            ct = centers[t]
+            q = 0.0
+            if ct > xn:
+                q = y * (ct - xn) / (x - xn) if x > xn else 0.0
+            err += (hist[t] - q) ** 2
+        return err
+
+    def _right_error(m_idx: int) -> float:
+        xm = centers[m_idx]
+        err = 0.0
+        for t in range(x_idx + 1, len(centers)):
+            ct = centers[t]
+            q = 0.0
+            if ct < xm:
+                q = y * (xm - ct) / (xm - x) if xm > x else 0.0
+            err += (hist[t] - q) ** 2
+        return err
+
+    # N은 정점 왼쪽(정점 포함 왼쪽 끝), M은 정점 오른쪽에서 탐색.
+    best_n = x_idx
+    best_ne = _left_error(x_idx)
+    for cand in range(0, x_idx):
+        e = _left_error(cand)
+        if e < best_ne:
+            best_ne, best_n = e, cand
+
+    best_m = x_idx
+    best_me = _right_error(x_idx)
+    for cand in range(x_idx + 1, len(centers)):
+        e = _right_error(cand)
+        if e < best_me:
+            best_me, best_m = e, cand
+
+    tinn = centers[best_m] - centers[best_n]
+    return {"hti": hti, "tinn": tinn}
 
 
 def time_domain(nn: Sequence[float]) -> Dict[str, float]:
@@ -31,6 +119,9 @@ def time_domain(nn: Sequence[float]) -> Dict[str, float]:
     n = len(nn)
     if n < 2:
         raise ValueError("시간영역 지표는 최소 2개의 박동이 필요합니다.")
+    if any(not math.isfinite(x) or x <= 0 for x in nn):
+        raise ValueError("NN 간격은 유한한 양수여야 합니다 "
+                         "(0/음수/NaN이 정제 후에도 남아 있습니다).")
 
     diffs = [nn[i + 1] - nn[i] for i in range(n - 1)]
 
@@ -48,9 +139,17 @@ def time_domain(nn: Sequence[float]) -> Dict[str, float]:
     mean_hr = statistics.fmean(inst_hr)
     std_hr = statistics.stdev(inst_hr)
 
+    # 강건(로버스트) 통계 — 이상값에 덜 민감. 임상 실측 RR에 유용.
+    median_nn = statistics.median(nn)
+    mad_nn = statistics.median([abs(v - median_nn) for v in nn])
+
+    geom = geometric_indices(nn)
+
     return {
         "n_beats": n,
         "mean_nn": mean_nn,
+        "median_nn": median_nn,
+        "mad_nn": mad_nn,
         "sdnn": sdnn,
         "rmssd": rmssd,
         "sdsd": sdsd,
@@ -63,4 +162,6 @@ def time_domain(nn: Sequence[float]) -> Dict[str, float]:
         "min_hr": min(inst_hr),
         "max_hr": max(inst_hr),
         "cvnn": sdnn / mean_nn,
+        "hti": geom["hti"],
+        "tinn": geom["tinn"],
     }
