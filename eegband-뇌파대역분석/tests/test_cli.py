@@ -168,5 +168,165 @@ class TestCsvOutput(unittest.TestCase):
                 self.assertTrue(0.0 <= float(r["delta_rel"]) <= 1.0)
 
 
+class TestNewCliOptions(unittest.TestCase):
+    def test_detrend_and_average_flow(self):
+        with _TmpCSV(_sine_csv(128.0, 20.0, 10.0, 5.0)) as p:
+            code, out, _ = _run([p, "--fs", "128", "--detrend", "linear",
+                                 "--average", "median"])
+            self.assertEqual(code, 0)
+            self.assertIn("detrend = linear, average = median", out)
+
+    def test_bad_detrend_choice_exit_2(self):
+        # argparse rejects invalid choices by raising SystemExit(2).
+        with _TmpCSV(_sine_csv(128.0, 10.0, 10.0, 5.0)) as p:
+            for bad in (["--detrend", "cubic"], ["--average", "max"]):
+                with self.assertRaises(SystemExit) as cm:
+                    _run([p, "--fs", "128", *bad])
+                self.assertEqual(cm.exception.code, 2)
+
+    def test_signal_quality_section_rendered(self):
+        with _TmpCSV(_sine_csv(128.0, 10.0, 10.0, 5.0)) as p:
+            _, out, _ = _run([p, "--fs", "128"])
+            self.assertIn("신호 품질", out)
+            self.assertIn("RMS", out)
+            self.assertIn("clipped(rail)", out)
+
+    def test_entropy_and_iaf_in_summary(self):
+        with _TmpCSV(_sine_csv(128.0, 20.0, 10.0, 20.0)) as p:
+            _, out, _ = _run([p, "--fs", "128"])
+            self.assertIn("spectral entropy", out)
+            self.assertIn("alpha peak (IAF)", out)
+
+    def test_json_has_quality_entropy_bandpeak(self):
+        with _TmpCSV(_sine_csv(128.0, 20.0, 10.0, 20.0)) as p:
+            _, out, _ = _run([p, "--fs", "128", "--json"])
+            d = json.loads(out)
+            self.assertIn("signal_quality", d)
+            self.assertIn("n_clipped", d["signal_quality"])
+            self.assertIsNotNone(d["overall"]["spectral_entropy"])
+            self.assertIn("peak_freq_hz", d["overall"]["band_power"][0])
+            self.assertEqual(d["welch"]["detrend"], "constant")
+
+    def test_json_epoch_summary_ci(self):
+        with _TmpCSV(_sine_csv(128.0, 40.0, 1.5, 40.0)) as p:
+            _, out, _ = _run([p, "--fs", "128", "--epoch", "10", "--json"])
+            d = json.loads(out)
+            es = d["epoch_summary"]["swa_relative"]
+            self.assertLessEqual(es["ci_lo"], es["mean"])
+            self.assertLessEqual(es["mean"], es["ci_hi"])
+            self.assertIn("median", es)
+            self.assertIn("q1", es)
+
+    def test_csv_has_entropy_and_bandpeak_columns(self):
+        with _TmpCSV(_sine_csv(128.0, 20.0, 1.5, 40.0)) as p:
+            _, out, _ = _run([p, "--fs", "128", "--csv"])
+            header = [l for l in out.splitlines() if l and not l.startswith("#")][0]
+            self.assertIn("entropy", header)
+            self.assertIn("delta_peak_hz", header)
+            self.assertIn("slowing_ratio", header)
+            self.assertIn("theta_alpha_ratio", header)
+            # provenance carries detrend/average now
+            first = out.splitlines()[0]
+            self.assertIn("detrend=constant", first)
+            self.assertIn("average=mean", first)
+
+
+def _multi_epoch_artifact_csv():
+    """5 epochs of 10 s @128 Hz delta; epoch 2 has a huge artifact."""
+    import math as _m
+    rows = ["eeg_uv"]
+    for e in range(5):
+        for k in range(1280):
+            v = 40 * _m.sin(2 * _m.pi * 1.5 * k / 128)
+            if e == 2:
+                v += 500
+            rows.append(f"{v}")
+    return "\n".join(rows) + "\n"
+
+
+class TestArtifactRejectionCli(unittest.TestCase):
+    def test_max_amp_rejects_epoch_text(self):
+        with _TmpCSV(_multi_epoch_artifact_csv()) as p:
+            code, out, _ = _run([p, "--fs", "128", "--epoch", "10",
+                                 "--max-amp", "150"])
+            self.assertEqual(code, 0)
+            self.assertIn("✗REJ", out)
+            self.assertIn("artifact rejection", out)
+            self.assertIn("kept 4/5", out)
+
+    def test_max_amp_json(self):
+        with _TmpCSV(_multi_epoch_artifact_csv()) as p:
+            _, out, _ = _run([p, "--fs", "128", "--epoch", "10",
+                              "--max-amp", "150", "--json"])
+            d = json.loads(out)
+            self.assertEqual(d["artifact_rejection"]["n_rejected"], 1)
+            self.assertEqual(d["artifact_rejection"]["n_kept"], 4)
+            self.assertTrue(d["epochs"][2]["rejected"])
+            self.assertEqual(d["epoch_summary"]["n"], 4)
+            self.assertIn("within-recording", d["epoch_summary"]["note"])
+
+    def test_max_amp_csv_columns(self):
+        with _TmpCSV(_multi_epoch_artifact_csv()) as p:
+            _, out, _ = _run([p, "--fs", "128", "--epoch", "10",
+                              "--max-amp", "150", "--csv"])
+            data = [l for l in out.splitlines() if l and not l.startswith("#")]
+            self.assertIn("peak_amp_uv", data[0])
+            self.assertIn("rejected", data[0])
+            import csv as _csv
+            rows = list(_csv.DictReader(data))
+            self.assertEqual(rows[2]["rejected"], "1")
+            self.assertEqual(rows[0]["rejected"], "0")
+
+
+class TestNoComment(unittest.TestCase):
+    def test_no_comment_omits_provenance_line(self):
+        with _TmpCSV(_sine_csv(128.0, 20.0, 1.5, 40.0)) as p:
+            _, out, _ = _run([p, "--fs", "128", "--csv", "--no-comment"])
+            self.assertFalse(out.startswith("#"))
+            # first line is the header, directly parseable by base-R/SAS
+            self.assertTrue(out.splitlines()[0].startswith("epoch,"))
+
+    def test_comment_present_by_default(self):
+        with _TmpCSV(_sine_csv(128.0, 20.0, 1.5, 40.0)) as p:
+            _, out, _ = _run([p, "--fs", "128", "--csv"])
+            self.assertTrue(out.startswith("# eegband"))
+
+    def test_max_amp_without_epoch_no_rej_columns(self):
+        # --max-amp without --epoch is a no-op; the overall CSV must NOT gain empty
+        # peak_amp_uv/rejected columns.
+        with _TmpCSV(_sine_csv(128.0, 20.0, 1.5, 40.0)) as p:
+            _, out, _ = _run([p, "--fs", "128", "--max-amp", "150", "--csv"])
+            header = [l for l in out.splitlines() if l and not l.startswith("#")][0]
+            self.assertNotIn("peak_amp_uv", header)
+            self.assertNotIn("rejected", header)
+
+
+class TestManyEpochCI(unittest.TestCase):
+    def test_df_over_30_ci_reasonable(self):
+        # 40 epochs (df=39) -> t-crit ~2.02, CI must be finite and ordered, and
+        # the df>30 Cornish-Fisher path must NOT collapse to 1.96 discontinuously.
+        with _TmpCSV(_sine_csv(128.0, 400.0, 1.5, 40.0)) as p:
+            _, out, _ = _run([p, "--fs", "128", "--epoch", "10", "--json"])
+            d = json.loads(out)
+            self.assertEqual(len(d["epochs"]), 40)
+            es = d["epoch_summary"]["swa_relative"]
+            self.assertLessEqual(es["ci_lo"], es["mean"])
+            self.assertLessEqual(es["mean"], es["ci_hi"])
+
+
+class TestEpochConstantPeakNa(unittest.TestCase):
+    def test_constant_epoch_shows_na_not_zero(self):
+        # first 2 s constant, rest a sine -> first epoch has no power -> n/a not 0.00
+        import math as _m
+        rows = ["eeg_uv"] + ["3.0"] * 256 + [
+            f"{5 * _m.sin(2 * _m.pi * 10 * k / 128)}" for k in range(256)]
+        with _TmpCSV("\n".join(rows) + "\n") as p:
+            _, out, _ = _run([p, "--fs", "128", "--epoch", "2"])
+            # the constant epoch row should contain n/a for peak & SEF
+            ep_lines = [l for l in out.splitlines() if l.strip().startswith("0")
+                        and "delta" not in l]
+            self.assertTrue(any("n/a" in l for l in ep_lines))
+
+
 if __name__ == "__main__":
     unittest.main()

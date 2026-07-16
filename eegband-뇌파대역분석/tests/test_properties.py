@@ -16,12 +16,15 @@ import unittest
 from eegband import analyze, load_signal, render_text, to_dict
 from eegband.analyze import resolve_fs
 from eegband.dataio import infer_fs
+from eegband.analyze import signal_quality
 from eegband.spectral import (
     DEFAULT_BANDS,
     band_ratios,
     integrate_psd,
+    median_bias,
     peak_frequency,
     spectral_edge_frequency,
+    spectral_entropy,
     welch_psd,
 )
 
@@ -134,9 +137,9 @@ class TestDominantTie(unittest.TestCase):
         x = [a + b for a, b in zip(_sine(128.0, 20.0, 2.0, 10.0),
                                    _sine(128.0, 20.0, 10.0, 10.0))]
         res = analyze(x, fs=128.0)
-        # not asserting which wins, only that closeness is detectable / renders
-        txt = render_text(res)
-        self.assertIsInstance(txt, str)
+        # equal-power delta+alpha must actually SET the near-tie flag
+        self.assertTrue(res.overall.dominant_tie)
+        self.assertIn("near-tie", render_text(res))
 
     def test_clear_winner_not_tie(self):
         res = analyze(_sine(128.0, 20.0, 1.5, 40.0), fs=128.0)
@@ -206,6 +209,92 @@ class TestEncodingFallback(unittest.TestCase):
             sig = load_signal(p)
             self.assertEqual(sig.values, [1.0, 2.0, 3.0])
             self.assertTrue(any("UTF-8" in w for w in sig.warnings))
+
+
+class TestSpectralEntropyProperty(unittest.TestCase):
+    """Normalized spectral entropy stays in [0, 1] on random spectra and is
+    maximised (=1) by a flat spectrum, minimised by concentration."""
+
+    def test_bounds_random(self):
+        rng = random.Random(31)
+        for _ in range(300):
+            m = rng.randint(2, 40)
+            freqs = [float(k) for k in range(m)]
+            psd = [rng.random() * 10 for _ in range(m)]
+            h = spectral_entropy(freqs, psd, 0.0, m - 1)
+            if h is not None:
+                self.assertGreaterEqual(h, -1e-12)
+                self.assertLessEqual(h, 1.0 + 1e-12)
+
+    def test_flat_maximises(self):
+        rng = random.Random(5)
+        for _ in range(50):
+            m = rng.randint(3, 30)
+            freqs = [float(k) for k in range(m)]
+            flat = spectral_entropy(freqs, [7.0] * m, 0.0, m - 1)
+            skew = spectral_entropy(
+                freqs, [rng.random() ** 3 + 1e-6 for _ in range(m)], 0.0, m - 1)
+            self.assertAlmostEqual(flat, 1.0, places=9)
+            self.assertLessEqual(skew, flat + 1e-9)
+
+
+class TestMedianVsMeanProperty(unittest.TestCase):
+    """Median-averaged Welch is finite, non-negative and bias-corrected toward the
+    mean on clean data (no outlier segments), yet more robust when a segment spikes."""
+
+    def test_median_finite_nonneg(self):
+        rng = random.Random(99)
+        for _ in range(20):
+            x = [rng.gauss(0, 1) for _ in range(1024)]
+            _, psd, meta = welch_psd(x, 128.0, nperseg=256, average="median")
+            self.assertGreater(meta["n_seg"], 1)
+            self.assertTrue(all(p >= 0 and math.isfinite(p) for p in psd))
+
+    def test_median_robust_to_outlier_segment(self):
+        # A single corrupted segment inflates the MEAN PSD far more than the MEDIAN.
+        fs = 128.0
+        x = _sine(fs, 20.0, 10.0, 5.0)
+        # blow up one 1-second window with a huge transient
+        for i in range(256, 384):
+            x[i] += 500.0
+        _, psd_mean, _ = welch_psd(x, fs, nperseg=256, average="mean")
+        _, psd_med, _ = welch_psd(x, fs, nperseg=256, average="median")
+        self.assertLess(sum(psd_med), sum(psd_mean))
+
+    def test_median_bias_monotone_decreasing_below_one(self):
+        # The correction is strictly < 1 for n>=3 and monotonically DECREASES
+        # toward ln2 (~0.693). A stub `return 1.0` (no correction) must FAIL this.
+        self.assertEqual(median_bias(1), 1.0)
+        self.assertEqual(median_bias(2), 1.0)
+        prev = median_bias(3)
+        self.assertLess(prev, 1.0)
+        for n in range(4, 200):
+            b = median_bias(n)
+            self.assertLess(b, prev + 1e-15)   # non-increasing
+            self.assertGreater(b, 0.69)        # bounded below by ~ln2
+            prev = b
+        self.assertLess(median_bias(199), 0.72)  # genuinely near ln2, not 1.0
+
+
+class TestSignalQualityProperty(unittest.TestCase):
+    def test_fractions_in_range(self):
+        rng = random.Random(17)
+        for _ in range(100):
+            n = rng.randint(1, 200)
+            vals = [rng.choice([rng.gauss(0, 1), 0.0, 5.0]) for _ in range(n)]
+            k = rng.randint(0, n)
+            q = signal_quality(vals, n_interpolated=k)
+            for frac in (q.frac_interpolated, q.frac_clipped, q.frac_flat):
+                self.assertGreaterEqual(frac, 0.0)
+                self.assertLessEqual(frac, 1.0)
+            self.assertLessEqual(q.v_min, q.v_max)
+            self.assertGreaterEqual(q.rms, 0.0)
+            self.assertAlmostEqual(q.ptp, q.v_max - q.v_min, places=9)
+
+    def test_flat_run_never_exceeds_n(self):
+        q = signal_quality([2.0] * 50)
+        self.assertLessEqual(q.n_flat, q.n_samples)
+        self.assertEqual(q.n_flat, 50)
 
 
 if __name__ == "__main__":

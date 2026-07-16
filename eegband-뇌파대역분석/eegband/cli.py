@@ -63,10 +63,20 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="표본화율 Hz (기본 128). 시간 열이 있으면 추정값을 우선 사용")
     p.add_argument("--epoch", type=float,
                    help="에폭 길이(초). 지정 시 에폭별 + 요약 리포트")
+    p.add_argument("--max-amp", type=float, dest="max_amp",
+                   help="아티팩트 제거: 에폭 최대 |진폭|(µV)이 이 값을 넘으면 SWA 요약에서 "
+                        "제외 (예: 150). 에폭 표에는 표시되지만 통계에서 빠짐")
     p.add_argument("--nperseg", type=int,
                    help="Welch 세그먼트 길이(표본). 기본 ~4초, 신호 길이로 상한")
     p.add_argument("--noverlap", type=int,
                    help="Welch 세그먼트 겹침(표본). 기본 nperseg//2 (50%%)")
+    p.add_argument("--detrend", choices=("constant", "linear", "none"),
+                   default="constant",
+                   help="세그먼트 디트렌드: constant(평균 제거, 기본), "
+                        "linear(선형 추세 제거 — 드리프트가 delta로 새는 것 방지), none")
+    p.add_argument("--average", choices=("mean", "median"), default="mean",
+                   help="Welch 세그먼트 평균: mean(기본) 또는 median"
+                        "(일시적 아티팩트에 강건, 편향보정 포함)")
     p.add_argument("--bands",
                    help="대역 재정의, 예: 'delta:0.5-4,theta:4-8,alpha:8-13,"
                         "beta:13-30,gamma:30-45'")
@@ -75,6 +85,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--json", action="store_true", help="사람용 리포트 대신 JSON 출력")
     p.add_argument("--csv", dest="csv_out", action="store_true",
                    help="에폭별(없으면 전체) 대역파워 표를 CSV로 출력 (통계 SW용)")
+    p.add_argument("--no-comment", dest="csv_comment", action="store_false",
+                   help="--csv 출력에서 맨 앞 '#' 프로버넌스 주석 행을 생략 "
+                        "(base-R read.csv/SAS PROC IMPORT 호환)")
     p.add_argument("--version", action="version", version=f"eegband {__version__}")
     return p
 
@@ -115,16 +128,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         result = analyze(sig.values, fs=fs, bands=bands, nperseg=args.nperseg,
                          noverlap=args.noverlap, sef_frac=sef_frac,
                          epoch_sec=args.epoch, times=sig.times,
-                         fs_source=fs_source, warnings=warnings)
+                         fs_source=fs_source, warnings=warnings,
+                         detrend=args.detrend, average=args.average,
+                         n_filled=sig.n_filled, max_amp=args.max_amp)
     except ValueError as exc:
         print(f"분석 오류: {exc}", file=sys.stderr)
         return 2
 
     result.source_file = args.csv
-    result.n_filled = sig.n_filled
     result.input_encoding = sig.encoding
     if args.csv_out:
-        sys.stdout.write(render_csv(result))
+        sys.stdout.write(render_csv(result, comment=args.csv_comment))
     elif args.json:
         print(json.dumps(to_dict(result), ensure_ascii=False, indent=2))
     else:

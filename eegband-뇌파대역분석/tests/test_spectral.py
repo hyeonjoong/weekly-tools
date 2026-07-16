@@ -14,8 +14,10 @@ from eegband import spectral
 from eegband.spectral import (
     band_powers,
     integrate_psd,
+    median_bias,
     peak_frequency,
     spectral_edge_frequency,
+    spectral_entropy,
     welch_psd,
 )
 
@@ -163,6 +165,160 @@ class TestWelchVsScipy(unittest.TestCase):
         ref_alpha = float(_trapz(p_ref[mask], f_ref[mask]))
         mine_alpha = integrate_psd(list(f_ref), list(p_ref), 8.0, 13.0)
         self.assertAlmostEqual(mine_alpha, ref_alpha, delta=1e-6)
+
+
+class TestSpectralEntropy(unittest.TestCase):
+    def test_flat_spectrum_is_one(self):
+        freqs = [float(k) for k in range(10)]
+        psd = [3.0] * 10
+        self.assertAlmostEqual(spectral_entropy(freqs, psd, 0.0, 9.0), 1.0, places=12)
+
+    def test_single_bin_is_low(self):
+        freqs = [float(k) for k in range(10)]
+        psd = [1e-9] * 10
+        psd[3] = 100.0
+        h = spectral_entropy(freqs, psd, 0.0, 9.0)
+        self.assertLess(h, 0.05)
+
+    def test_bounds_and_hand_value(self):
+        # two equal bins -> entropy = ln2, normalized by ln2 -> 1.0
+        freqs = [1.0, 2.0]
+        self.assertAlmostEqual(spectral_entropy(freqs, [5.0, 5.0], 1.0, 2.0), 1.0, 12)
+        # unnormalized ln2 for two equal bins
+        self.assertAlmostEqual(
+            spectral_entropy(freqs, [5.0, 5.0], 1.0, 2.0, normalize=False),
+            math.log(2), places=12)
+
+    def test_too_few_bins_or_zero_power_is_none(self):
+        self.assertIsNone(spectral_entropy([1.0], [3.0], 0.0, 5.0))
+        self.assertIsNone(spectral_entropy([1.0, 2.0], [0.0, 0.0], 0.0, 5.0))
+
+    def test_normalized_by_total_bins_not_positive_only(self):
+        # 4 bins in band, two equal positive + two zero: entropy = ln2 / ln4 = 0.5,
+        # NOT 1.0 (which the positive-only denominator bug would give).
+        freqs = [1.0, 2.0, 3.0, 4.0]
+        psd = [5.0, 5.0, 0.0, 0.0]
+        self.assertAlmostEqual(spectral_entropy(freqs, psd, 1.0, 4.0), 0.5, places=12)
+
+
+class TestPeakProminence(unittest.TestCase):
+    def test_real_peak_is_prominent(self):
+        from eegband.spectral import peak_frequency_prominent
+        # sharp interior peak far above the band median
+        freqs = [8.0, 9.0, 10.0, 11.0, 12.0, 13.0]
+        psd = [0.5, 0.5, 40.0, 0.5, 0.5, 0.5]
+        f, prom = peak_frequency_prominent(freqs, psd, 8.0, 13.0)
+        self.assertEqual(f, 10.0)
+        self.assertTrue(prom)
+
+    def test_monotonic_slope_not_prominent(self):
+        from eegband.spectral import peak_frequency_prominent
+        freqs = [8.0, 9.0, 10.0, 11.0, 12.0, 13.0]
+        psd = [10.0, 8.0, 6.0, 4.0, 2.0, 1.0]   # argmax at low edge
+        f, prom = peak_frequency_prominent(freqs, psd, 8.0, 13.0)
+        self.assertEqual(f, 8.0)
+        self.assertFalse(prom)
+
+    def test_shallow_bump_not_prominent(self):
+        from eegband.spectral import peak_frequency_prominent
+        # interior max but only ~1.3x the median -> below the 3x threshold
+        freqs = [8.0, 9.0, 10.0, 11.0, 12.0, 13.0]
+        psd = [1.0, 1.0, 1.3, 1.0, 1.0, 1.0]
+        _, prom = peak_frequency_prominent(freqs, psd, 8.0, 13.0)
+        self.assertFalse(prom)
+
+    def test_empty_band_none(self):
+        from eegband.spectral import peak_frequency_prominent
+        self.assertEqual(peak_frequency_prominent([1.0, 2.0], [1.0, 1.0],
+                                                  100.0, 200.0), (None, False))
+
+
+class TestPeakFrequencyEmptyRange(unittest.TestCase):
+    def test_no_bins_returns_none(self):
+        freqs = [0.0, 1.0, 2.0]
+        psd = [1.0, 2.0, 3.0]
+        self.assertIsNone(peak_frequency(freqs, psd, 100.0, 200.0))
+
+
+class TestMedianBias(unittest.TestCase):
+    def test_n1_is_one(self):
+        self.assertEqual(median_bias(1), 1.0)
+        self.assertEqual(median_bias(2), 1.0)
+
+    def test_matches_reference_formula(self):
+        # closed-form reference: 1 + Σ_{i=1}^{(n-1)//2} (1/(2i+1) - 1/(2i))
+        for n in range(1, 40):
+            ref = 1.0
+            for i in range(1, (n - 1) // 2 + 1):
+                ref += 1.0 / (2 * i + 1) - 1.0 / (2 * i)
+            self.assertAlmostEqual(median_bias(n), ref, places=12)
+
+
+class TestLinearDetrend(unittest.TestCase):
+    def test_removes_pure_ramp(self):
+        # a pure linear ramp has no spectral content after linear detrend
+        fs = 128.0
+        x = [0.01 * i for i in range(1280)]
+        freqs, psd, _ = welch_psd(x, fs, nperseg=256, detrend="linear")
+        self.assertTrue(all(p < 1e-12 for p in psd))
+
+    def test_none_keeps_dc(self):
+        # detrend='none' leaves the DC term (huge PSD at 0 Hz) unlike 'constant'
+        x = [5.0 + math.sin(2 * math.pi * 10 * i / 128) for i in range(512)]
+        _, psd_c, _ = welch_psd(x, 128.0, nperseg=256, detrend="constant")
+        _, psd_n, _ = welch_psd(x, 128.0, nperseg=256, detrend="none")
+        self.assertGreater(psd_n[0], psd_c[0] + 1.0)
+
+    def test_bad_mode_raises(self):
+        with self.assertRaises(ValueError):
+            welch_psd([1.0, 2.0, 3.0, 4.0], 128.0, detrend="quadratic")
+        with self.assertRaises(ValueError):
+            welch_psd([1.0, 2.0, 3.0, 4.0], 128.0, average="mode")
+
+
+@unittest.skipUnless(HAVE_SCIPY, "scipy/numpy not available")
+class TestMedianAndDetrendVsScipy(unittest.TestCase):
+    def _mk(self, seed):
+        rng = _np.random.RandomState(seed)
+        t = _np.arange(4096) / 128.0
+        return list(3.0 * _np.sin(2 * _np.pi * 10 * t) + rng.randn(4096)
+                    + 0.02 * _np.arange(4096))
+
+    def test_median_matches_scipy(self):
+        x = self._mk(7)
+        freqs, psd, meta = welch_psd(x, 128.0, nperseg=256, noverlap=128,
+                                     average="median")
+        _, p_ref = _sig.welch(
+            _np.asarray(x), fs=128.0,
+            window=_sig.get_window("hann", 256, fftbins=True),
+            nperseg=256, noverlap=128, nfft=256, detrend="constant",
+            scaling="density", average="median")
+        self.assertTrue(_np.allclose(psd, p_ref, rtol=1e-9, atol=1e-12),
+                        float(_np.max(_np.abs(_np.array(psd) - p_ref))))
+
+    def test_linear_detrend_matches_scipy(self):
+        for average in ("mean", "median"):
+            x = self._mk(11)
+            freqs, psd, meta = welch_psd(x, 128.0, nperseg=256, noverlap=128,
+                                         detrend="linear", average=average)
+            _, p_ref = _sig.welch(
+                _np.asarray(x), fs=128.0,
+                window=_sig.get_window("hann", 256, fftbins=True),
+                nperseg=256, noverlap=128, nfft=256, detrend="linear",
+                scaling="density", average=average)
+            self.assertTrue(_np.allclose(psd, p_ref, rtol=1e-8, atol=1e-12),
+                            f"{average}: "
+                            f"{float(_np.max(_np.abs(_np.array(psd) - p_ref)))}")
+
+    def test_entropy_matches_manual(self):
+        x = self._mk(3)
+        freqs, psd, _ = welch_psd(x, 128.0, nperseg=256)
+        h = spectral_entropy(freqs, psd, 0.5, 45.0)
+        # manual over the same bins
+        ps = _np.array([p for f, p in zip(freqs, psd) if 0.5 <= f <= 45.0 and p > 0])
+        q = ps / ps.sum()
+        ref = float(-(q * _np.log(q)).sum() / _np.log(len(ps)))
+        self.assertAlmostEqual(h, ref, places=12)
 
 
 if __name__ == "__main__":
