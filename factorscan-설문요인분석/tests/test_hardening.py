@@ -309,9 +309,11 @@ def test_report_shows_msa_omega_rmsr_pca():
     prep = _two_factor_data()
     out = render(analyze(prep, parallel_iter=0))
     assert "MSA" in out
-    assert "McDonald ω" in out
     assert "RMSR" in out
     assert "PCA" in out
+    # PCA 적재 기반 ω는 McDonald's ω가 아니므로 그 이름을 쓰면 안 된다(라벨이 복사된다).
+    assert "McDonald ω" not in out
+    assert "ω, PCA 근사" in out
 
 
 def test_report_msa_dash_when_singular():
