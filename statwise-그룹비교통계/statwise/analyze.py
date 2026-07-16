@@ -2,17 +2,23 @@
 
 The decision rules mirror standard clinical-stats practice:
 
-Two groups
+Two independent groups
     - Shapiro-Wilk normality on each group (when 3 <= n <= 5000).
     - Both normal  -> Levene's test:  equal variance -> Student's t
                                        unequal        -> Welch's t
-    - Any non-normal -> Mann-Whitney U.
+    - Any non-normal -> Mann-Whitney U (exact for small tie-free samples), plus a
+      Hodges-Lehmann median-difference estimate with a distribution-free CI.
+
+Two paired conditions (``analyze_paired``)
+    - Normality of the within-pair differences -> paired t-test, else Wilcoxon
+      signed-rank (exact when possible) with a Hodges-Lehmann CI.
 
 Three or more groups
-    - All normal and equal variance -> one-way ANOVA.
-    - Otherwise                     -> Kruskal-Wallis.
+    - All normal + equal variance   -> one-way ANOVA (pairwise Student's t).
+    - All normal + unequal variance -> Welch's ANOVA (pairwise Welch's t).
+    - Otherwise                     -> Kruskal-Wallis (pairwise Mann-Whitney).
     - If the omnibus test is significant, pairwise post-hoc comparisons with
-      Holm-Bonferroni correction of the p-values.
+      Holm-Bonferroni (default) or Benjamini-Hochberg (FDR) correction.
 """
 
 from __future__ import annotations
@@ -21,11 +27,12 @@ import math
 from dataclasses import dataclass, field
 from typing import List, Optional, Sequence, Tuple
 
-from . import effects, tests_stat
+from . import effects, location as location_mod, paired as paired_mod, tests_stat
 from .normality import shapiro_wilk
 from .special import t_ppf
 
-__all__ = ["Group", "PairwiseResult", "AnalysisResult", "analyze"]
+__all__ = ["Group", "PairwiseResult", "AnalysisResult", "analyze",
+           "analyze_paired"]
 
 
 @dataclass
@@ -110,12 +117,33 @@ class AnalysisResult:
     pairwise: List[PairwiseResult] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
     reason: str = ""
+    # paired / repeated-measures extras
+    paired: bool = False
+    diff_normality: Optional[NormalityCheck] = None
+    n_pairs: Optional[int] = None
+    n_zero_diff: Optional[int] = None
+    correction: str = "holm"
+    # distribution-free location difference (Hodges-Lehmann) for rank tests
+    location: Optional[location_mod.LocationEstimate] = None
+
+
+def _finite(vals: Sequence[float], label: str) -> List[float]:
+    """Coerce to float and reject non-finite values (NaN/inf) with a clear error."""
+    out: List[float] = []
+    for v in vals:
+        f = float(v)
+        if not math.isfinite(f):
+            raise ValueError(
+                f"group '{label}' contains a non-finite value ({v!r}); "
+                f"remove NaN/inf before analysis")
+        out.append(f)
+    return out
 
 
 def _normality_check(g: Group, alpha_norm: float) -> NormalityCheck:
     if g.n < 3:
         return NormalityCheck(g.label, None, None, None,
-                              "n<3: cannot test normality (assumed non-normal)")
+                              "n<3: normality unknown (defaulting to non-parametric, conservative)")
     if g.n > 5000:
         return NormalityCheck(g.label, None, None, True,
                               "n>5000: normality test skipped (assumed normal)")
@@ -159,8 +187,10 @@ def _auto_two_group(a: Group, b: Group, alpha: float, alpha_norm: float,
     # non-parametric
     res = tests_stat.mann_whitney_u(a.values, b.values)
     non_normal = [nc.label for nc in norm if nc.normal is not True]
+    method_note = ("exact permutation p-value" if res.method == "exact"
+                   else "normal approximation")
     reason = ("not all groups are normal (" + ", ".join(non_normal) +
-              ") -> Mann-Whitney U test")
+              ") -> Mann-Whitney U test [" + method_note + "]")
     es = [effects.rank_biserial(a.values, b.values),
           effects.cliffs_delta(a.values, b.values)]
     return ("Mann-Whitney U test", res.statistic, None, res.pvalue, es, reason, None, None)
@@ -179,27 +209,61 @@ def _holm_adjust(pvals: List[float]) -> List[float]:
     return adj
 
 
-def _pairwise(groups: List[Group], parametric: bool, alpha: float,
-              alpha_norm: float) -> List[PairwiseResult]:
+def _bh_adjust(pvals: List[float]) -> List[float]:
+    """Benjamini-Hochberg (FDR) step-up adjustment; returns adjusted p-values."""
+    m = len(pvals)
+    if m == 0:
+        return []
+    order = sorted(range(m), key=lambda i: pvals[i])  # ascending
+    adj = [0.0] * m
+    running = 1.0
+    # step up from the largest p-value, enforcing monotonicity
+    for rank in range(m - 1, -1, -1):
+        idx = order[rank]
+        val = pvals[idx] * m / (rank + 1)
+        running = min(running, val)
+        adj[idx] = min(1.0, running)
+    return adj
+
+
+def _correct(pvals: List[float], method: str) -> List[float]:
+    if method == "bh":
+        return _bh_adjust(pvals)
+    if method == "holm":
+        return _holm_adjust(pvals)
+    raise ValueError(f"unknown correction method '{method}' (use 'holm' or 'bh')")
+
+
+def _pairwise(groups: List[Group], kind: str, alpha: float,
+              correction: str = "holm") -> List[PairwiseResult]:
+    """Pairwise post-hoc comparisons with multiple-testing correction.
+
+    ``kind`` selects the per-pair test, kept consistent with the omnibus:
+        'student'     -> pairwise Student's t   (after equal-variance ANOVA)
+        'welch'       -> pairwise Welch's t     (after Welch's ANOVA)
+        'mannwhitney' -> pairwise Mann-Whitney U (after Kruskal-Wallis)
+    """
     pairs = [(i, j) for i in range(len(groups)) for j in range(i + 1, len(groups))]
     raw = []
     meta = []
     for i, j in pairs:
         a, b = groups[i], groups[j]
-        if parametric:
-            # ANOVA assumed equal variance, so pairwise Student's t keeps the
-            # post-hoc internally consistent with the omnibus (pairwise t-tests
-            # with Holm correction; not Tukey HSD).
+        if kind == "student":
             r = tests_stat.students_t(a.values, b.values)
             es = effects.cohens_d(a.values, b.values, hedges=True)
             meta.append(("Student's t", r.statistic, es.name, es.value, a.label, b.label))
+            raw.append(r.pvalue)
+        elif kind == "welch":
+            r = tests_stat.welch_t(a.values, b.values)
+            es = effects.cohens_d(a.values, b.values, hedges=True)
+            meta.append(("Welch's t", r.statistic, es.name, es.value, a.label, b.label))
             raw.append(r.pvalue)
         else:
             r = tests_stat.mann_whitney_u(a.values, b.values)
             es = effects.rank_biserial(a.values, b.values)
             meta.append(("Mann-Whitney U", r.statistic, es.name, es.value, a.label, b.label))
             raw.append(r.pvalue)
-    adj = _holm_adjust(raw)
+    adj = _correct(raw, correction)
     out = []
     for k, (test, stat, ename, eval_, la, lb) in enumerate(meta):
         out.append(PairwiseResult(la, lb, test, stat, raw[k], adj[k],
@@ -209,9 +273,11 @@ def _pairwise(groups: List[Group], parametric: bool, alpha: float,
 
 def analyze(named_groups: Sequence[Tuple[str, Sequence[float]]],
             alpha: float = 0.05, alpha_norm: float = 0.05,
-            posthoc: bool = True) -> AnalysisResult:
+            posthoc: bool = True, correction: str = "holm") -> AnalysisResult:
     """Run the full auto-selected group comparison and return an AnalysisResult."""
-    groups = [Group(str(label), [float(v) for v in vals]) for label, vals in named_groups]
+    if correction not in ("holm", "bh"):
+        raise ValueError("correction must be 'holm' or 'bh'")
+    groups = [Group(str(label), _finite(vals, label)) for label, vals in named_groups]
     if len(groups) < 2:
         raise ValueError("need at least 2 groups to compare")
     for g in groups:
@@ -229,15 +295,24 @@ def analyze(named_groups: Sequence[Tuple[str, Sequence[float]]],
     if len(groups) == 2:
         (name, stat, df, p, es, reason, diff, ci) = _auto_two_group(
             groups[0], groups[1], alpha, alpha_norm, norm, lev)
+        loc = None
+        if name == "Mann-Whitney U test":
+            loc = location_mod.hodges_lehmann_independent(
+                groups[0].values, groups[1].values, conf=1.0 - alpha)
         return AnalysisResult(
             groups=groups, alpha=alpha, alpha_norm=alpha_norm, normality=norm,
             levene=lev, test_name=name, statistic=stat, df=df, df2=None, pvalue=p,
             significant=p < alpha, effects=es, mean_diff=diff, mean_diff_ci=ci,
-            warnings=warnings, reason=reason)
+            warnings=warnings, reason=reason, correction=correction, location=loc)
 
     # 3+ groups
     both_normal = all(nc.normal for nc in norm)
     equal_var = lev.pvalue > alpha_norm
+    # If a group has zero variance the Levene p-value is NaN; treat variance as
+    # not demonstrably equal so we don't select equal-variance ANOVA on it.
+    if lev.pvalue != lev.pvalue:  # NaN
+        equal_var = False
+    df2: Optional[float]
     if both_normal and equal_var:
         res = tests_stat.one_way_anova([g.values for g in groups])
         es = [effects.eta_squared([g.values for g in groups], res.ss_between, res.ss_total)]
@@ -245,23 +320,131 @@ def analyze(named_groups: Sequence[Tuple[str, Sequence[float]]],
                                   res.df_between, res.df_within, res.pvalue)
         reason = ("all groups ~normal and equal variance (Levene p={:.3f}) "
                   "-> one-way ANOVA").format(lev.pvalue)
-        parametric = True
+        pair_kind = "student"
+    elif both_normal and not equal_var:
+        # Normal but heteroscedastic -> Welch's ANOVA (more appropriate than
+        # forcing a rank test on data that is actually normal).
+        try:
+            res = tests_stat.welch_anova([g.values for g in groups])
+            ow = tests_stat.one_way_anova([g.values for g in groups])
+            es = [effects.eta_squared([g.values for g in groups],
+                                      ow.ss_between, ow.ss_total)]
+            name, stat, df, df2, p = ("Welch's ANOVA", res.statistic,
+                                      res.df_between, res.df_within, res.pvalue)
+            lp = "{:.3f}".format(lev.pvalue) if lev.pvalue == lev.pvalue else "NaN"
+            reason = ("all groups ~normal but unequal variance (Levene p=" + lp +
+                      ") -> Welch's ANOVA")
+            warnings.append(
+                "효과크기 η²는 등분산 가정의 고전적 제곱합(pooled SS)에서 계산되어 "
+                "Welch's ANOVA와 정확히 일관되지는 않습니다(이분산에서 근사치로 해석하세요).")
+            pair_kind = "welch"
+        except ValueError:
+            # zero-variance group makes Welch's ANOVA undefined -> Kruskal-Wallis
+            res = tests_stat.kruskal_wallis([g.values for g in groups])
+            n_total = sum(g.n for g in groups)
+            es = [effects.eta_squared_h(res.statistic, n_total, len(groups))]
+            name, stat, df, df2, p = ("Kruskal-Wallis H test", res.statistic,
+                                      res.df, None, res.pvalue)
+            reason = ("unequal variance with a zero-variance group "
+                      "-> Kruskal-Wallis H test")
+            pair_kind = "mannwhitney"
     else:
         res = tests_stat.kruskal_wallis([g.values for g in groups])
         n_total = sum(g.n for g in groups)
         es = [effects.eta_squared_h(res.statistic, n_total, len(groups))]
         name, stat, df, df2, p = ("Kruskal-Wallis H test", res.statistic,
                                   res.df, None, res.pvalue)
-        why = "unequal variance" if both_normal else "not all groups normal"
-        reason = f"{why} -> Kruskal-Wallis H test"
-        parametric = False
+        reason = "not all groups normal -> Kruskal-Wallis H test"
+        pair_kind = "mannwhitney"
 
     pairwise: List[PairwiseResult] = []
-    if posthoc and p < alpha:
-        pairwise = _pairwise(groups, parametric, alpha, alpha_norm)
+    if posthoc and p == p and p < alpha:
+        pairwise = _pairwise(groups, pair_kind, alpha, correction)
 
     return AnalysisResult(
         groups=groups, alpha=alpha, alpha_norm=alpha_norm, normality=norm,
         levene=lev, test_name=name, statistic=stat, df=df, df2=df2, pvalue=p,
-        significant=p < alpha, effects=es, pairwise=pairwise,
-        warnings=warnings, reason=reason)
+        significant=(p == p and p < alpha), effects=es, pairwise=pairwise,
+        warnings=warnings, reason=reason, correction=correction)
+
+
+def analyze_paired(cond_a: Tuple[str, Sequence[float]],
+                   cond_b: Tuple[str, Sequence[float]],
+                   alpha: float = 0.05, alpha_norm: float = 0.05
+                   ) -> AnalysisResult:
+    """Paired / repeated-measures analysis of two matched conditions.
+
+    Normality is checked on the *differences* (a - b), then:
+        differences ~normal      -> paired-samples t-test (effect: Cohen's dz)
+        differences non-normal   -> Wilcoxon signed-rank (effect: matched
+                                    rank-biserial r; exact for small tie-free
+                                    samples, otherwise the normal approximation)
+    """
+    la, va = cond_a[0], _finite(cond_a[1], cond_a[0])
+    lb, vb = cond_b[0], _finite(cond_b[1], cond_b[0])
+    if len(va) != len(vb):
+        raise ValueError(
+            f"paired analysis needs equal-length conditions (got {len(va)} "
+            f"and {len(vb)})")
+    if len(va) < 2:
+        raise ValueError("paired analysis needs at least 2 matched pairs")
+
+    ga, gb = Group(str(la), va), Group(str(lb), vb)
+    diffs = [x - y for x, y in zip(va, vb)]
+    warnings: List[str] = []
+
+    # Normality of the differences drives the choice.
+    dnc: NormalityCheck
+    n = len(diffs)
+    if all(d == diffs[0] for d in diffs):
+        dnc = NormalityCheck("differences", None, None, None,
+                             "all differences identical (zero variance)")
+    elif n < 3:
+        dnc = NormalityCheck("differences", None, None, None,
+                             "n<3: normality unknown (defaulting to non-parametric, conservative)")
+    elif n > 5000:
+        dnc = NormalityCheck("differences", None, None, True,
+                             "n>5000: normality test skipped (assumed normal)")
+    else:
+        try:
+            w, pw = shapiro_wilk(diffs)
+            dnc = NormalityCheck("differences", w, pw, pw > alpha_norm)
+        except ValueError as exc:
+            dnc = NormalityCheck("differences", None, None, None, str(exc))
+    if dnc.note:
+        warnings.append(f"[differences] {dnc.note}")
+
+    if dnc.normal:
+        res = paired_mod.paired_t(va, vb)
+        es = [effects.cohens_dz(va, vb)]
+        tcrit = t_ppf(1 - alpha / 2, res.df)
+        se = res.sd_diff / math.sqrt(res.n)
+        ci = (res.mean_diff - tcrit * se, res.mean_diff + tcrit * se)
+        reason = ("differences ~normal (Shapiro p={:.3f}) "
+                  "-> paired-samples t-test").format(dnc.pvalue)
+        return AnalysisResult(
+            groups=[ga, gb], alpha=alpha, alpha_norm=alpha_norm, normality=[],
+            levene=None, test_name="Paired t-test", statistic=res.statistic,
+            df=res.df, df2=None, pvalue=res.pvalue,
+            significant=(res.pvalue == res.pvalue and res.pvalue < alpha),
+            effects=es, mean_diff=res.mean_diff, mean_diff_ci=ci,
+            warnings=warnings, reason=reason, paired=True, diff_normality=dnc,
+            n_pairs=res.n)
+
+    res = paired_mod.wilcoxon_signed_rank(va, vb)
+    es = [effects.matched_rank_biserial(res.w_plus, res.w_minus)]
+    why = ("differences non-normal" if dnc.normal is False
+           else "normality of differences undetermined")
+    method_note = ("exact" if res.method == "exact" else "normal approximation")
+    reason = f"{why} -> Wilcoxon signed-rank test [{method_note}]"
+    if res.n_zero:
+        warnings.append(
+            f"{res.n_zero} pair(s) with zero difference dropped (Wilcoxon)")
+    loc = location_mod.hodges_lehmann_paired(diffs, conf=1.0 - alpha)
+    return AnalysisResult(
+        groups=[ga, gb], alpha=alpha, alpha_norm=alpha_norm, normality=[],
+        levene=None, test_name="Wilcoxon signed-rank test",
+        statistic=res.statistic, df=None, df2=None, pvalue=res.pvalue,
+        significant=(res.pvalue < alpha), effects=es, warnings=warnings,
+        reason=reason, paired=True, diff_normality=dnc,
+        n_pairs=res.n_nonzero + res.n_zero, n_zero_diff=res.n_zero, location=loc)

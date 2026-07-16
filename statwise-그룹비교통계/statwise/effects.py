@@ -17,7 +17,9 @@ from .tests_stat import _rankdata, mean, variance
 __all__ = [
     "EffectSize",
     "cohens_d",
+    "cohens_dz",
     "rank_biserial",
+    "matched_rank_biserial",
     "eta_squared",
     "eta_squared_h",
     "cliffs_delta",
@@ -67,6 +69,45 @@ def cohens_d(a: Sequence[float], b: Sequence[float], hedges: bool = True,
     se = math.sqrt((n1 + n2) / (n1 * n2) + d * d / (2.0 * (n1 + n2)))
     z = _z_for_ci(ci)
     return EffectSize(name, d, d - z * se, d + z * se, _d_magnitude(d))
+
+
+def cohens_dz(a: Sequence[float], b: Sequence[float], ci: float = 0.95
+              ) -> EffectSize:
+    """Cohen's d_z for paired data: mean(diff) / SD(diff).
+
+    This is the standardized *paired* effect size (the effect size that pairs
+    with a paired t-test), not the between-group d.  CI uses the standard
+    normal approximation SE(d_z) = sqrt(1/n + d_z^2/(2n)).
+    """
+    if len(a) != len(b):
+        raise ValueError("paired data must have equal length")
+    diffs = [float(x) - float(y) for x, y in zip(a, b)]
+    n = len(diffs)
+    if n < 2:
+        raise ValueError("need at least 2 pairs")
+    md = mean(diffs)
+    sd = math.sqrt(variance(diffs))
+    if sd == 0:
+        raise ValueError("standard deviation of the differences is zero")
+    dz = md / sd
+    se = math.sqrt(1.0 / n + dz * dz / (2.0 * n))
+    z = _z_for_ci(ci)
+    return EffectSize("Cohen's dz", dz, dz - z * se, dz + z * se,
+                      _d_magnitude(dz))
+
+
+def matched_rank_biserial(w_plus: float, w_minus: float) -> EffectSize:
+    """Matched-pairs rank-biserial correlation for the signed-rank test.
+
+    r = (W+ - W-) / (W+ + W-), ranging -1..1; positive when ``a`` tends to
+    exceed ``b`` (Kerby, 2014).
+    """
+    total = w_plus + w_minus
+    r = 0.0 if total == 0 else (w_plus - w_minus) / total
+    ar = abs(r)
+    mag = "large" if ar >= 0.474 else "medium" if ar >= 0.33 else "small" \
+        if ar >= 0.147 else "negligible"
+    return EffectSize("matched rank-biserial r", r, None, None, mag)
 
 
 def _z_for_ci(ci: float) -> float:

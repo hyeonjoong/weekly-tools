@@ -73,6 +73,34 @@ def test_magnitude_labels():
         == "negligible"
 
 
+def test_cohens_dz_handmath():
+    a = [10.0, 12.0, 14.0, 16.0, 18.0]
+    b = [8.0, 11.0, 12.0, 15.0, 16.0]
+    # diffs [2,1,2,1,2]; mean 1.6, sd 0.547722; dz = 2.921187
+    es = effects.cohens_dz(a, b)
+    assert approx(es.value, 1.6 / math.sqrt(0.3), 1e-9)
+    assert es.name == "Cohen's dz"
+    assert es.ci_low < es.value < es.ci_high
+
+
+def test_cohens_dz_errors():
+    with pytest.raises(ValueError):
+        effects.cohens_dz([1.0, 2.0], [1.0])           # length mismatch
+    with pytest.raises(ValueError):
+        effects.cohens_dz([1.0, 2.0], [1.0, 2.0])       # zero diff variance
+
+
+def test_matched_rank_biserial():
+    # all positive ranks -> r = +1
+    es = effects.matched_rank_biserial(w_plus=55.0, w_minus=0.0)
+    assert approx(es.value, 1.0)
+    assert es.magnitude == "large"
+    # balanced -> 0
+    assert approx(effects.matched_rank_biserial(10.0, 10.0).value, 0.0)
+    # empty -> 0 (no divide-by-zero)
+    assert effects.matched_rank_biserial(0.0, 0.0).value == 0.0
+
+
 def test_errors():
     with pytest.raises(ValueError):
         effects.cohens_d([1.0], [2.0, 3.0])

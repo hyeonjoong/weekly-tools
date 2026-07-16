@@ -5,9 +5,11 @@ Public API:
     render_text(result) -> str
 """
 
-from .analyze import AnalysisResult, Group, PairwiseResult, analyze
-from .report import render_text
+from .analyze import (AnalysisResult, Group, PairwiseResult, analyze,
+                      analyze_paired)
+from .report import render_json, render_text, result_to_dict
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
-__all__ = ["analyze", "render_text", "AnalysisResult", "Group", "PairwiseResult"]
+__all__ = ["analyze", "analyze_paired", "render_text", "render_json",
+           "result_to_dict", "AnalysisResult", "Group", "PairwiseResult"]

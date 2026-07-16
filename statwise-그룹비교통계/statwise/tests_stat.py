@@ -13,18 +13,21 @@ import math
 from dataclasses import dataclass
 from typing import List, Sequence
 
+from . import exact
 from .special import chi2_sf, f_sf, norm_sf, t_sf_two_sided
 
 __all__ = [
     "TTestResult",
     "MannWhitneyResult",
     "AnovaResult",
+    "WelchAnovaResult",
     "KruskalResult",
     "LeveneResult",
     "students_t",
     "welch_t",
     "mann_whitney_u",
     "one_way_anova",
+    "welch_anova",
     "kruskal_wallis",
     "levene",
     "mean",
@@ -60,6 +63,7 @@ class MannWhitneyResult:
     u2: float
     zscore: float
     pvalue: float
+    method: str = "asymptotic"  # "asymptotic" or "exact"
 
 
 @dataclass
@@ -71,6 +75,14 @@ class AnovaResult:
     ss_between: float
     ss_within: float
     ss_total: float
+
+
+@dataclass
+class WelchAnovaResult:
+    statistic: float
+    df_between: float
+    df_within: float  # fractional (Welch-Satterthwaite)
+    pvalue: float
 
 
 @dataclass
@@ -102,6 +114,8 @@ def students_t(a: Sequence[float], b: Sequence[float]) -> TTestResult:
     df = n1 + n2 - 2
     sp2 = ((n1 - 1) * v1 + (n2 - 1) * v2) / df
     se = math.sqrt(sp2 * (1.0 / n1 + 1.0 / n2))
+    if se == 0.0:
+        raise ValueError("both groups have zero variance; Student's t is undefined")
     t = (m1 - m2) / se
     return TTestResult(t, float(df), t_sf_two_sided(t, df), "student")
 
@@ -114,6 +128,8 @@ def welch_t(a: Sequence[float], b: Sequence[float]) -> TTestResult:
     v1, v2 = variance(a), variance(b)
     se2_1, se2_2 = v1 / n1, v2 / n2
     se = math.sqrt(se2_1 + se2_2)
+    if se == 0.0:
+        raise ValueError("both groups have zero variance; Welch's t is undefined")
     t = (m1 - m2) / se
     df = (se2_1 + se2_2) ** 2 / (
         se2_1 ** 2 / (n1 - 1) + se2_2 ** 2 / (n2 - 1)
@@ -146,12 +162,18 @@ def _tie_term(values: Sequence[float]) -> float:
     return sum(c ** 3 - c for c in counts.values() if c > 1)
 
 
-def mann_whitney_u(a: Sequence[float], b: Sequence[float]) -> MannWhitneyResult:
-    """Mann-Whitney U test (asymptotic, tie- and continuity-corrected).
+def mann_whitney_u(a: Sequence[float], b: Sequence[float],
+                   method: str = "auto") -> MannWhitneyResult:
+    """Mann-Whitney U test.
 
-    Matches ``scipy.stats.mannwhitneyu(..., method='asymptotic',
-    use_continuity=True)``. The normal approximation is reliable for group
-    sizes >= ~8; for tiny groups treat the p-value as approximate.
+    ``method='auto'`` computes the **exact** permutation p-value when the
+    combined sample has no ties and both groups are small
+    (<= ``exact.MWU_EXACT_MAX_N``); otherwise it uses the tie- and
+    continuity-corrected normal approximation, matching
+    ``scipy.stats.mannwhitneyu(..., method='asymptotic', use_continuity=True)``.
+    Pass ``method='asymptotic'`` or ``'exact'`` to force one.  The exact test is
+    only valid without ties; a forced ``'exact'`` on tied data falls back to the
+    approximation rather than report a wrong p-value.
     """
     _check_two(a, b)
     n1, n2 = len(a), len(b)
@@ -167,14 +189,30 @@ def mann_whitney_u(a: Sequence[float], b: Sequence[float]) -> MannWhitneyResult:
     sigma2 = (n1 * n2 / 12.0) * ((n + 1) - tie / (n * (n - 1)))
     sigma = math.sqrt(sigma2) if sigma2 > 0 else 0.0
 
-    u = max(u1, u2)  # use the larger U so the tail is the upper one
+    has_ties = tie > 0
+    use_exact = (method == "exact" or
+                 (method == "auto" and not has_ties
+                  and n1 <= exact.MWU_EXACT_MAX_N
+                  and n2 <= exact.MWU_EXACT_MAX_N))
+    if method == "exact" and has_ties:
+        use_exact = False
+
+    # z is always reported (reference); it drives the p-value only when asymptotic.
     if sigma == 0.0:
-        z, p = 0.0, 1.0
+        z = 0.0
     else:
-        z = (u - mu - 0.5) / sigma  # continuity correction
-        p = 2.0 * norm_sf(z)
-        p = min(1.0, p)
-    return MannWhitneyResult(u1, u1, u2, z, p)
+        u_big = max(u1, u2)
+        z = (u_big - mu - 0.5) / sigma  # continuity correction
+
+    if use_exact:
+        p = exact.mannwhitney_exact_p(u1, n1, n2)
+        return MannWhitneyResult(u1, u1, u2, z, p, "exact")
+
+    if sigma == 0.0:
+        p = 1.0
+    else:
+        p = min(1.0, 2.0 * norm_sf(z))
+    return MannWhitneyResult(u1, u1, u2, z, p, "asymptotic")
 
 
 def one_way_anova(groups: Sequence[Sequence[float]]) -> AnovaResult:
@@ -209,6 +247,36 @@ def one_way_anova(groups: Sequence[Sequence[float]]) -> AnovaResult:
         f = ms_b / ms_w
         p = f_sf(f, df_b, df_w)
     return AnovaResult(f, float(df_b), float(df_w), p, ss_between, ss_within, ss_total)
+
+
+def welch_anova(groups: Sequence[Sequence[float]]) -> WelchAnovaResult:
+    """Welch's one-way ANOVA (does not assume equal variances).
+
+    The recommended omnibus test when groups are ~normal but heteroscedastic.
+    Matches ``pingouin.welch_anova`` / R's ``oneway.test(var.equal=FALSE)``.
+    """
+    groups = [list(g) for g in groups]
+    k = len(groups)
+    if k < 2:
+        raise ValueError("need at least 2 groups")
+    for g in groups:
+        if len(g) < 2:
+            raise ValueError("every group needs at least 2 observations")
+    ni = [len(g) for g in groups]
+    mi = [mean(g) for g in groups]
+    vi = [variance(g) for g in groups]
+    if any(v == 0 for v in vi):
+        raise ValueError("Welch's ANOVA is undefined when a group has zero variance")
+    wi = [n / v for n, v in zip(ni, vi)]
+    sw = sum(wi)
+    xbar = sum(w * m for w, m in zip(wi, mi)) / sw
+    num = sum(w * (m - xbar) ** 2 for w, m in zip(wi, mi)) / (k - 1)
+    tmp = sum((1.0 - w / sw) ** 2 / (n - 1) for w, n in zip(wi, ni))
+    denom = 1.0 + 2.0 * (k - 2) / (k ** 2 - 1) * tmp
+    f = num / denom
+    df1 = k - 1
+    df2 = (k ** 2 - 1) / (3.0 * tmp)
+    return WelchAnovaResult(f, float(df1), df2, f_sf(f, df1, df2))
 
 
 def kruskal_wallis(groups: Sequence[Sequence[float]]) -> KruskalResult:

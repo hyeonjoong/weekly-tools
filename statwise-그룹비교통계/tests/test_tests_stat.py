@@ -4,6 +4,7 @@ import math
 
 import pytest
 
+from statwise import exact
 from statwise import tests_stat as T
 
 A = [10.5, 12.1, 11.3, 13.0, 9.8, 14.2, 10.0, 12.5, 11.1, 13.7, 9.2, 12.9,
@@ -48,10 +49,63 @@ def test_welch_t_scipy_ref():
 
 
 def test_mann_whitney_scipy_ref():
-    r = T.mann_whitney_u(A, B)
+    # A and B share the value 11.9, so 'auto' uses the asymptotic path; assert
+    # it explicitly to pin the reference regardless of the tie heuristic.
+    r = T.mann_whitney_u(A, B, method="asymptotic")
     # scipy mannwhitneyu(A,B, method='asymptotic', use_continuity=True)
     assert approx(r.u1, 31.5, 1e-9)
     assert approx(r.pvalue, 0.0001958702856142994, 1e-6)
+    assert r.method == "asymptotic"
+
+
+def test_mann_whitney_exact_small_no_ties():
+    # no ties + small -> auto selects exact, matching scipy method='exact'
+    a = [1.0, 2.0, 3.0, 4.0, 5.0]
+    b = [6.0, 7.0, 8.0, 9.0, 10.0]
+    r = T.mann_whitney_u(a, b)
+    assert r.method == "exact"
+    assert approx(r.pvalue, 0.007936507936507936, 1e-10)
+
+
+def test_mann_whitney_exact_forced_falls_back_on_ties():
+    # ties present -> forced 'exact' must not lie; falls back to asymptotic
+    a = [1.0, 2.0, 2.0, 3.0]
+    b = [2.0, 3.0, 4.0, 5.0]
+    r = T.mann_whitney_u(a, b, method="exact")
+    assert r.method == "asymptotic"
+
+
+def test_welch_anova_ref():
+    g1 = [2.0, 4.0, 6.0, 8.0, 10.0]
+    g2 = [3.0, 3.5, 4.0, 4.5, 5.0]
+    g3 = [10.0, 20.0, 30.0, 40.0, 50.0]
+    r = T.welch_anova([g1, g2, g3])
+    assert approx(r.statistic, 6.820792194515976, 1e-6)
+    assert r.df_between == 2
+    assert approx(r.df_within, 5.658382587649298, 1e-6)
+    assert approx(r.pvalue, 0.031075997836605765, 1e-9)
+
+
+def test_welch_anova_zero_variance_rejected():
+    with pytest.raises(ValueError):
+        T.welch_anova([[5.0, 5.0, 5.0], [1.0, 2.0, 3.0]])
+
+
+def test_t_tests_reject_zero_variance():
+    # both groups constant -> SE = 0 -> undefined (must raise, not divide by 0)
+    with pytest.raises(ValueError):
+        T.students_t([5.0, 5.0, 5.0], [9.0, 9.0, 9.0])
+    with pytest.raises(ValueError):
+        T.welch_t([5.0, 5.0, 5.0], [9.0, 9.0, 9.0])
+
+
+def test_mann_whitney_auto_uses_asymptotic_over_size_cap():
+    # tie-free but larger than the exact cap -> auto must pick asymptotic
+    n = exact.MWU_EXACT_MAX_N + 5
+    a = [float(i) for i in range(n)]
+    b = [float(i) + 0.5 for i in range(n)]  # interleaved, no ties
+    r = T.mann_whitney_u(a, b)
+    assert r.method == "asymptotic"
 
 
 def test_mann_whitney_with_ties():
