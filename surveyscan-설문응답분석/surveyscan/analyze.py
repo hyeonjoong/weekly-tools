@@ -8,7 +8,7 @@ from __future__ import annotations
 import math
 from typing import Dict, List, Optional
 
-from . import stats
+from . import factor, quality, stats
 from .config import SurveyConfig
 from .dataio import SurveyData
 
@@ -110,6 +110,9 @@ def analyze_subscale(
     alpha = None
     alpha_ci = None
     alpha_std = None
+    omega = None
+    omega_loadings: Dict[str, Optional[float]] = {}
+    omega_heywood = False
     sem = None
     mdc95 = None
     sd_total_complete = None
@@ -132,6 +135,15 @@ def analyze_subscale(
         # MDC95 (최소검출가능변화, 95%): 1.96·√2·SEM — 개인 점수의 실질적 변화 판정용.
         if sem is not None:
             mdc95 = 1.959963984540054 * math.sqrt(2.0) * sem
+        # McDonald's ω_total (단일요인 congeneric 모형). α의 타우동등성 가정을 완화한
+        # 신뢰도 추정치 — 문항 3개 이상·수렴 시에만 보고(실패 시 조용히 None).
+        om = factor.omega_total(columns)
+        if om is not None:
+            omega = om["omega"]
+            omega_heywood = bool(om["heywood"])
+            omega_loadings = {
+                it: ld for it, ld in zip(items, om["loadings"])  # type: ignore[arg-type]
+            }
         iics = _inter_item_corrs(columns)
         if iics:
             mean_inter_item = stats.mean(iics)
@@ -193,6 +205,9 @@ def analyze_subscale(
         "alpha": alpha,
         "alpha_ci": list(alpha_ci) if alpha_ci else None,
         "alpha_std": alpha_std,
+        "omega": omega,
+        "omega_heywood": omega_heywood,
+        "omega_loadings": omega_loadings,
         "sem": sem,
         "mdc95": mdc95,
         "sd_total_complete": sd_total_complete,
@@ -250,12 +265,19 @@ def response_frequencies(
 
 
 def analyze(
-    data: SurveyData, cfg: SurveyConfig, conf: float = 0.95, item_freq: bool = False
+    data: SurveyData,
+    cfg: SurveyConfig,
+    conf: float = 0.95,
+    item_freq: bool = False,
+    quality_check: bool = False,
+    longstring_min: Optional[int] = None,
 ) -> Dict[str, object]:
     """전체 분석 실행. config에 명시된 모든 문항/하위척도를 검증·분석한다.
 
     conf: 신뢰구간(α CI, 점수 평균 CI)의 신뢰수준(기본 0.95).
     item_freq: True면 문항별 응답 선택지 빈도표를 함께 계산(척도 범위 정수일 때).
+    quality_check: True면 응답자별 부주의응답 선별 지표(longstring·IRV·결측)를 계산.
+    longstring_min: longstring 플래그 기준(None이면 max(3, ceil(k/2)) 휴리스틱).
     """
     # config 문항이 데이터에 실제로 있는지 확인
     missing_cols = [it for it in cfg.all_items() if it not in data.columns]
@@ -308,6 +330,13 @@ def analyze(
         "out_of_range": out_of_range,
         "descriptives": descriptives,
         "subscales": subscales,
+        # 하위척도 간 상관(변별타당도). 하위척도가 1개면 None.
+        "subscale_corr": quality.subscale_correlations(subscales),
+        "duplicate_ids": quality.duplicate_ids(data),
+        "quality": (
+            quality.respondent_quality(data, items_all, longstring_min)
+            if quality_check else None
+        ),
         "missing": {
             "total_cells": total_cells,
             "missing_cells": missing_cells,
