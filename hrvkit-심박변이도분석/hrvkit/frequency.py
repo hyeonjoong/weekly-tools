@@ -263,6 +263,25 @@ def frequency_domain(nn: Sequence[float], fs: float = 4.0,
     lf_nu = 100.0 * lf / lf_plus_hf if lf_plus_hf > 0 else 0.0
     hf_nu = 100.0 * hf / lf_plus_hf if lf_plus_hf > 0 else 0.0
 
+    # 호흡수 추정 & 호흡 레짐 감지.
+    # 자발 호흡의 RSA는 HF 대역(0.15–0.40 Hz, 9–24회/분)에 실리므로 기본적으로
+    # HF 최대 PSD 주파수를 호흡 주파수로 봅니다(표준 HRV 기반 호흡 추정).
+    # 그러나 느린/공명 호흡(예: 6회/분=0.1 Hz)은 LF 대역에 실려 HF가 거의 비고
+    # LF/HF·HF n.u. 의 '부교감 방향' 해석이 역전됩니다. 전체 호흡대역(0.04–0.40 Hz)의
+    # 최대 피크가 LF에 있고 HF n.u. 가 매우 낮으면(<20) '느린/공명 호흡 레짐'으로 보고
+    # 호흡수를 LF 피크에서 추정하며 플래그를 세웁니다.
+    resp_peak_hz = _peak(freqs, psd, LF_BAND[0], HF_BAND[1])
+    peak_in_lf = resp_peak_hz is not None and resp_peak_hz < HF_BAND[0]
+    slow_regime = bool(peak_in_lf and hf_nu < 20.0)
+    if slow_regime:
+        resp_hz = resp_peak_hz
+        resp_source = "LF"
+    else:
+        resp_hz = _peak(freqs, psd, *HF_BAND)
+        resp_source = "HF"
+    resp_brpm = resp_hz * 60.0 if resp_hz is not None else None
+    ln_hf = math.log(hf) if hf > 0 else float("nan")
+
     return {
         "vlf_power": vlf,
         "lf_power": lf,
@@ -271,11 +290,16 @@ def frequency_domain(nn: Sequence[float], fs: float = 4.0,
         "lf_hf_ratio": lf_hf,
         "lf_nu": lf_nu,
         "hf_nu": hf_nu,
+        "ln_hf": ln_hf,
         "vlf_pct": 100.0 * vlf / total if total > 0 else 0.0,
         "lf_pct": 100.0 * lf / total if total > 0 else 0.0,
         "hf_pct": 100.0 * hf / total if total > 0 else 0.0,
         "peak_lf": _peak(freqs, psd, *LF_BAND),
         "peak_hf": _peak(freqs, psd, *HF_BAND),
+        "resp_rate_hz": resp_hz,
+        "resp_rate_brpm": resp_brpm,
+        "resp_source": resp_source,
+        "slow_breathing_regime": slow_regime,
         "resample_fs": fs,
         "duration_sec": times[-1],
         "n_resampled": len(resampled),

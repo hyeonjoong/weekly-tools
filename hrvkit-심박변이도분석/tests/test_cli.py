@@ -54,5 +54,23 @@ def test_cli_no_sampen(capsys):
     rc = cli.main([os.path.join(EXAMPLES, "resting.csv"), "--no-sampen", "--json"])
     out = capsys.readouterr().out
     data = json.loads(out)
-    # SampEn 생략 시 NaN → JSON에서는 문자열 "NaN" 또는 null 로 직렬화됨
     assert rc == 0
+    # --no-sampen 이면 SampEn 이 실제로 생략(NaN → 문자열 "NaN")되어야 함
+    assert data["nonlinear"]["sampen"] == "NaN"
+
+
+def test_cli_sampen_present_without_flag(capsys):
+    rc = cli.main([os.path.join(EXAMPLES, "resting.csv"), "--json"])
+    data = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    # 플래그 없으면 유한한 수치여야 함
+    assert isinstance(data["nonlinear"]["sampen"], float)
+    assert data["nonlinear"]["sampen"] > 0
+
+
+def test_cli_clean_remove(capsys):
+    rc = cli.main([os.path.join(EXAMPLES, "resting.csv"), "--clean", "remove",
+                   "--json"])
+    data = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert data["clean_method"] == "remove"

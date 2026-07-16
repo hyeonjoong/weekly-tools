@@ -150,3 +150,18 @@ def test_frequency_domain_non_power_of_two_length():
 def test_frequency_domain_needs_min_beats():
     with pytest.raises(ValueError):
         frequency_domain([800, 810, 790])  # 4개 미만
+
+
+def test_respiration_estimate_from_hf_peak():
+    """HF(0.25 Hz) 호흡 → 호흡수 추정 ≈ 15회/분, ln_hf 는 유한."""
+    fs = 4.0
+    nn, t = [], 0.0
+    for _ in range(600):
+        v = 800.0 + 40.0 * math.sin(2 * math.pi * 0.25 * t)
+        nn.append(v)
+        t += v / 1000.0
+    r = frequency_domain(nn, fs=fs)
+    assert r["resp_rate_hz"] == pytest.approx(0.25, abs=0.02)
+    assert r["resp_rate_brpm"] == pytest.approx(15.0, abs=1.5)
+    assert math.isfinite(r["ln_hf"])
+    assert r["ln_hf"] == pytest.approx(math.log(r["hf_power"]), rel=1e-9)
