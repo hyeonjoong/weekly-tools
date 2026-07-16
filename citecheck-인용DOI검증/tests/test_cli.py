@@ -88,7 +88,8 @@ def test_json_output_shape(tmp_path, capsys):
     item = payload[0]
     assert set(item) == {"label", "doi", "pmid", "journal", "status", "findings"}
     assert item["status"] == "error"
-    assert item["findings"][0].keys() >= {"severity", "message"}
+    assert set(item["findings"][0]) == {"severity", "code", "message"}
+    assert item["findings"][0]["code"] == "doi-not-resolving"
 
 
 # --- ANSI / control-char injection ------------------------------------------
@@ -238,7 +239,7 @@ def test_resolvable_not_in_crossref_cli(tmp_path, capsys):
 
 
 def test_retraction_cli_exit_one(tmp_path, capsys):
-    rec = dict(GOOD, **{"update-by": [{"type": "retraction", "DOI": "10.1/notice"}]})
+    rec = dict(GOOD, **{"updated-by": [{"type": "retraction", "DOI": "10.1/notice"}]})
     path = write(tmp_path, "r.bib", "@article{k, doi={10.1371/journal.pone.0312345}}")
     code = run([path, "--delay", "0"], client=fake_client({"10.1371/journal.pone.0312345": rec}))
     out = capsys.readouterr().out
@@ -255,8 +256,30 @@ def test_summary_counts(tmp_path, capsys):
     path = write(tmp_path, "m.bib", bib)
     run([path, "--delay", "0"], client=fake_client({"10.1371/journal.pone.0312345": GOOD}, resolves=False))
     out = capsys.readouterr().out
-    assert "1 verified against Crossref" in out
-    assert "could not be verified" in out
+    assert "checked 3 references: 1 ok, 1 warnings, 1 errors" in out
+    # The two buckets must ACCOUNT FOR EVERY reference. The old wording excluded
+    # hard errors from both, so "1 verified, 1 could not be verified" silently
+    # lost the broken-DOI reference and did not sum to 3.
+    assert "1 of 3 compared against a Crossref record; 2 could not be" in out
+
+
+def test_summary_buckets_always_sum_to_the_total(tmp_path, capsys):
+    import re
+
+    bib = "\n".join(
+        [
+            "@article{ok, doi={10.1371/journal.pone.0312345}}",
+            "@article{bad, doi={10.9999/nope}}",
+            "@book{nodoi, title={No DOI}}",
+            "@article{ok2, doi={10.1371/journal.pone.0312345}}",
+        ]
+    )
+    path = write(tmp_path, "m.bib", bib)
+    run([path, "--delay", "0"], client=fake_client({"10.1371/journal.pone.0312345": GOOD}))
+    out = capsys.readouterr().out
+    m = re.search(r"\((\d+) of (\d+) compared .*?; (\d+) could not be", out)
+    checked, total, not_checked = (int(g) for g in m.groups())
+    assert checked + not_checked == total == 4
 
 
 def test_resolve_transient_failure_not_hard_error(tmp_path, capsys):
@@ -313,9 +336,10 @@ def test_csv_report(tmp_path, capsys):
     run([path, "--report", "csv", "--delay", "0"], client=fake_client({}, resolves=False))
     out = capsys.readouterr().out
     lines = out.strip().splitlines()
-    assert lines[0] == "label,doi,pmid,journal,status,findings"
+    assert lines[0] == "label,doi,pmid,journal,status,codes,findings"
     assert "10.9999/nope" in lines[1]
     assert "error" in lines[1]
+    assert "doi-not-resolving" in lines[1]  # the machine-readable code column
 
 
 def test_csv_injection_neutralised(tmp_path, capsys):
@@ -455,3 +479,156 @@ def test_json_doi_field_sanitized(tmp_path, capsys):
     assert "\x9b" not in out
     payload = json.loads(out)
     assert "\x9b" not in (payload[0]["doi"] or "")
+
+
+# --- csv input format (was reachable only via auto-detect) -------------------
+
+CSV_TABLE = "Study ID,Article DOI,Title\nS1,10.1371/journal.pone.0312345,Sleep as a transdiagnostic node in BELL disorders\n"
+
+
+def test_csv_reference_table_is_autodetected(tmp_path, capsys):
+    path = write(tmp_path, "refs.csv", CSV_TABLE)
+    assert run([path, "--delay", "0", "--no-color", "-v"], client=fake_client({GOOD["DOI"]: GOOD})) == 0
+    assert "Verified" in capsys.readouterr().out
+
+
+def test_csv_format_can_be_forced(tmp_path, capsys):
+    """--format csv was accepted by the parser layer but rejected by argparse."""
+    path = write(tmp_path, "refs.txt", CSV_TABLE)
+    code = run(
+        [path, "--format", "csv", "--delay", "0", "--no-color", "-v"],
+        client=fake_client({GOOD["DOI"]: GOOD}),
+    )
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "S1" in out  # the key column became the label => the csv parser ran
+
+
+def test_forcing_csv_on_a_tsv_table_works(tmp_path, capsys):
+    table = "id\tdoi\nS1\t10.1371/journal.pone.0312345\n"
+    path = write(tmp_path, "refs.tsv", table)
+    assert run(["--format", "csv", path, "--delay", "0", "--no-color"], client=fake_client({GOOD["DOI"]: GOOD})) == 0
+
+
+def test_csv_is_offered_in_the_help_text(capsys):
+    with pytest.raises(SystemExit):
+        run(["--help"])
+    assert "csv" in capsys.readouterr().out
+
+
+# --- --suggest-doi ----------------------------------------------------------
+
+SEARCH_HIT = {
+    "DOI": "10.1371/journal.pone.0312345",
+    "title": ["Sleep as a transdiagnostic node in BELL disorders"],
+    "author": [{"family": "Kim"}],
+    "issued": {"date-parts": [[2024]]},
+}
+
+
+def searching_client(items):
+    return CrossrefClient(
+        _fetch=lambda d: None, _resolve=lambda d: False, _search=lambda q: items
+    )
+
+
+def test_suggest_doi_names_the_missing_doi(tmp_path, capsys):
+    entry = (
+        "@article{k, title={Sleep as a transdiagnostic node in BELL disorders}, "
+        "author={Kim, Hyeon}, year={2024}}"
+    )
+    path = write(tmp_path, "r.bib", entry)
+    run([path, "--suggest-doi", "--delay", "0", "--no-color"], client=searching_client([SEARCH_HIT]))
+    assert "10.1371/journal.pone.0312345" in capsys.readouterr().out
+
+
+def test_without_the_flag_no_doi_is_suggested(tmp_path, capsys):
+    entry = "@article{k, title={Sleep as a transdiagnostic node in BELL disorders}, year={2024}}"
+    path = write(tmp_path, "r.bib", entry)
+    run([path, "--delay", "0", "--no-color"], client=searching_client([SEARCH_HIT]))
+    out = capsys.readouterr().out
+    assert "No DOI found" in out
+    assert "10.1371" not in out
+
+
+def test_suggested_doi_reaches_the_json_report(tmp_path, capsys):
+    entry = "@article{k, title={Sleep as a transdiagnostic node in BELL disorders}, year={2024}}"
+    path = write(tmp_path, "r.bib", entry)
+    run([path, "--suggest-doi", "--json", "--delay", "0"], client=searching_client([SEARCH_HIT]))
+    payload = json.loads(capsys.readouterr().out)
+    assert any("10.1371/journal.pone.0312345" in f["message"] for f in payload[0]["findings"])
+
+
+# --- --cache ----------------------------------------------------------------
+
+def test_cache_flag_writes_a_file_and_serves_the_second_run(tmp_path, capsys):
+    path = write(tmp_path, "r.bib", "@article{k, doi={10.1371/journal.pone.0312345}}")
+    cache_path = str(tmp_path / "cache.json")
+    calls = []
+
+    def client():
+        return CrossrefClient(_fetch=lambda d: calls.append(d) or GOOD, _resolve=lambda d: False)
+
+    # The CLI only builds a cache for clients it creates, so exercise the real
+    # wiring by patching the transport rather than injecting a whole client.
+    import citecheck.cli as cli
+
+    real = cli.CrossrefClient
+    cli.CrossrefClient = lambda mailto=None, cache=None: CrossrefClient(
+        cache=cache, _fetch=lambda d: calls.append(d) or GOOD, _resolve=lambda d: False
+    )
+    try:
+        assert run([path, "--cache", cache_path, "--delay", "0", "--no-color"]) == 0
+        assert calls == ["10.1371/journal.pone.0312345"]
+        capsys.readouterr()
+        assert run([path, "--cache", cache_path, "--delay", "0", "--no-color", "-v"]) == 0
+        assert calls == ["10.1371/journal.pone.0312345"]  # second run hit no transport
+        assert "served from the cache" in capsys.readouterr().out
+    finally:
+        cli.CrossrefClient = real
+
+
+def test_cache_default_path_is_used_for_a_bare_flag(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    import importlib
+
+    import citecheck.cli as cli
+
+    importlib.reload(cli)
+    try:
+        assert cli.DEFAULT_CACHE_PATH.startswith(str(tmp_path))
+        parsed = cli.build_parser().parse_args(["x.bib", "--cache"])
+        assert parsed.cache == cli.DEFAULT_CACHE_PATH
+    finally:
+        importlib.reload(cli)
+
+
+def test_cache_is_off_by_default():
+    from citecheck.cli import build_parser
+
+    args = build_parser().parse_args(["x.bib"])
+    assert args.cache is None
+    assert args.suggest_doi is False
+
+
+def test_unwritable_cache_does_not_change_the_verdict(tmp_path, capsys):
+    path = write(tmp_path, "r.bib", "@article{k, doi={10.1371/journal.pone.0312345}}")
+    bad_cache = tmp_path / "cache_dir"
+    bad_cache.mkdir()
+
+    import citecheck.cli as cli
+
+    real = cli.CrossrefClient
+    cli.CrossrefClient = lambda mailto=None, cache=None: CrossrefClient(
+        cache=cache, _fetch=lambda d: GOOD, _resolve=lambda d: False
+    )
+    try:
+        assert run([path, "--cache", str(bad_cache), "--delay", "0", "--no-color"]) == 0
+        assert "could not write the cache" in capsys.readouterr().err
+    finally:
+        cli.CrossrefClient = real
+
+
+def test_negative_cache_ttl_is_rejected(tmp_path):
+    with pytest.raises(SystemExit):
+        run(["x.bib", "--cache-ttl", "-1"])

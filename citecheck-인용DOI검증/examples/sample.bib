@@ -1,6 +1,20 @@
-% Demo reference list for citecheck.
-% Contains one clean citation and three common mistakes so `citecheck
-% examples/sample.bib` shows a ✓, an ✗, and two ! findings.
+% Demo reference list for citecheck. Every entry is a real, live Crossref record,
+% so `python3 -m citecheck examples/sample.bib --verbose` shows one of each
+% finding: a clean ✓, a broken DOI ✗, and three ! warnings (a correction issued,
+% a wrong year, and a reference with no DOI at all).
+%
+% prisma2009 is the clean one, NOT ioannidis2005: PLoS Medicine issued a
+% correction against Ioannidis 2005 in 2022, so it warns now — which is exactly
+% the check that entry is here to demonstrate. (This comment claimed a ✓ for
+% ioannidis2005 long after that stopped being true.)
+
+@article{prisma2009,
+  title   = {Preferred Reporting Items for Systematic Reviews and Meta-Analyses: The PRISMA Statement},
+  author  = {Moher, David and Liberati, Alessandro and Tetzlaff, Jennifer and Altman, Douglas G.},
+  journal = {PLoS Medicine},
+  year    = {2009},
+  doi     = {10.1371/journal.pmed.1000097}
+}
 
 @article{ioannidis2005,
   title   = {Why Most Published Research Findings Are False},

@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import socket
+import tempfile
 import time
 import unicodedata
 import urllib.error
@@ -16,6 +19,7 @@ from typing import Optional
 from .parsers import Reference
 
 CROSSREF_API = "https://api.crossref.org/works/"
+CROSSREF_SEARCH = "https://api.crossref.org/works"
 DOI_RESOLVER = "https://doi.org/"
 PUBMED_ESUMMARY = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
 DEFAULT_UA = "citecheck/0.1 (https://github.com/hyeonjoong/citecheck; mailto:citecheck@example.com)"
@@ -25,11 +29,59 @@ OK = "ok"
 WARNING = "warning"
 ERROR = "error"
 
+# Transport failures worth retrying. ``socket.timeout`` is listed explicitly
+# because it only became an alias of ``TimeoutError`` in Python 3.10 (bpo-42413)
+# — on 3.9, which pyproject.toml still supports, a read timeout would otherwise
+# escape the retry loop entirely and skip every remaining attempt.
+_TRANSPORT_ERRORS = (
+    urllib.error.URLError,
+    TimeoutError,
+    socket.timeout,
+    json.JSONDecodeError,
+    UnicodeDecodeError,
+)
+
+
+# Stable machine-readable codes for every finding the tool can emit. They exist
+# so a CI gate can say *which* problems matter (`--ignore no-doi`) and so a JSON
+# report is filterable without regex-matching English prose. Treat them as API:
+# renaming one breaks a user's --ignore list and their scripts.
+CODES = {
+    "verified": "The reference matched its Crossref record.",
+    "no-doi": "The reference cites no DOI, so nothing could be verified.",
+    "doi-not-resolving": "The DOI does not resolve at Crossref or doi.org.",
+    "doi-not-in-crossref": "The DOI resolves but is not in Crossref's works index.",
+    "lookup-failed": "A Crossref/PubMed lookup failed (e.g. offline).",
+    "bad-record": "Crossref returned a record we could not read.",
+    "retracted": "The work is marked retracted.",
+    "expression-of-concern": "An expression of concern has been issued.",
+    "withdrawal": "The work has been withdrawn.",
+    "removal": "The work has been removed.",
+    "correction": "A correction/erratum/corrigendum has been issued.",
+    "addendum": "An addendum has been issued.",
+    "clarification": "A clarification has been issued.",
+    "new-edition": "A newer edition/version exists.",
+    "preprint-published": "A peer-reviewed version of this preprint exists.",
+    "title-mismatch": "The cited title does not match Crossref's.",
+    "year-mismatch": "The cited year does not match any Crossref date.",
+    "author-mismatch": "The cited first author is not among Crossref's authors.",
+    "journal-mismatch": "The cited journal does not match Crossref's container.",
+    "text-title-missing": "A free-text citation does not mention the Crossref title.",
+    "duplicate-doi": "The same DOI is cited by more than one reference.",
+    "duplicate-pmid": "The same PMID is cited by more than one reference.",
+    "pmid-doi-mismatch": "The cited PMID and DOI belong to different papers.",
+    "pmid-not-found": "The cited PMID is not in PubMed.",
+    "doi-suggestion": "Crossref holds a confident match for a DOI-less reference.",
+}
+
 
 @dataclass
 class Finding:
     severity: str
     message: str
+    # A CODES key. Defaults to "" rather than being required so a third-party
+    # caller constructing a Finding directly keeps working.
+    code: str = ""
 
 
 @dataclass
@@ -47,8 +99,108 @@ class CheckResult:
             return WARNING
         return OK
 
-    def add(self, severity: str, message: str) -> None:
-        self.findings.append(Finding(severity, message))
+    def add(self, severity: str, message: str, code: str = "") -> None:
+        self.findings.append(Finding(severity, message, code))
+
+
+class DiskCache:
+    """A tiny expiring JSON cache of Crossref/PubMed lookups.
+
+    Re-checking a 150-reference manuscript through a round of revisions means
+    150 network round-trips each time, most of them for records that have not
+    changed. This makes the second run instant and spares Crossref the load.
+
+    Entries expire (default 7 days) because the whole point of the tool is to
+    catch a *newly* retracted reference — an indefinite cache would eventually
+    report a stale clean pass, which is the one failure this tool must not have.
+
+    Every operation is best-effort: an unreadable, corrupt, or unwritable cache
+    file degrades to "no cache", never to an error. A cache is an optimisation,
+    and must never be able to fail a citation check.
+    """
+
+    def __init__(self, path, ttl_seconds: float = 7 * 24 * 3600, _now=None):
+        self.path = str(path)
+        self.ttl_seconds = ttl_seconds
+        self._now = _now or time.time
+        self._entries: dict[str, dict] = {}
+        self.dirty = False
+        # Live entries actually served. The CLI reports this, so it must count
+        # real hits — inferring it from "this reference made no network call"
+        # instead credited the cache for references that never had a DOI to look
+        # up, and claimed hits against a cache file that did not exist.
+        self.hits = 0
+        self.load()
+
+    def load(self) -> None:
+        try:
+            with open(self.path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError, RecursionError):
+            return  # missing/corrupt cache is simply an empty one
+        entries = data.get("entries") if isinstance(data, dict) else None
+        if isinstance(entries, dict):
+            self._entries = {k: v for k, v in entries.items() if isinstance(v, dict)}
+
+    def get(self, key: str):
+        """Return the cached value for *key*, or ``_MISS`` when absent/expired."""
+        entry = self._entries.get(key)
+        if not isinstance(entry, dict) or "value" not in entry:
+            return _MISS
+        stored = entry.get("stored_at")
+        if not isinstance(stored, (int, float)):
+            return _MISS
+        age = self._now() - stored
+        # A negative age means a clock change (or a doctored file) — treat the
+        # entry as expired rather than trusting it forever.
+        if age < 0 or age > self.ttl_seconds:
+            return _MISS
+        self.hits += 1
+        return entry["value"]
+
+    def set(self, key: str, value) -> None:
+        self._entries[key] = {"stored_at": self._now(), "value": value}
+        self.dirty = True
+
+    def save(self) -> bool:
+        """Persist the cache. Returns True on success; never raises."""
+        if not self.dirty:
+            return True
+        try:
+            directory = os.path.dirname(os.path.abspath(self.path))
+            if directory:
+                os.makedirs(directory, exist_ok=True)
+            # Write via a temp file in the same directory + atomic replace, so an
+            # interrupted run (or two concurrent ones) cannot leave a truncated
+            # cache that the next run would have to treat as corrupt.
+            fd, tmp = tempfile.mkstemp(dir=directory or ".", suffix=".tmp")
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    json.dump({"version": 1, "entries": self._entries}, fh)
+                os.replace(tmp, self.path)
+            except BaseException:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+                raise
+        except (OSError, ValueError, TypeError, RecursionError):
+            return False
+        self.dirty = False
+        return True
+
+
+class _Miss:
+    """Sentinel: distinct from a cached ``None`` (a real 'not in Crossref')."""
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return "<MISS>"
+
+    def __bool__(self) -> bool:
+        return False
+
+
+_MISS = _Miss()
 
 
 class CrossrefClient:
@@ -60,9 +212,12 @@ class CrossrefClient:
         timeout: float = 15.0,
         retries: int = 2,
         sleep: float = 1.0,
+        cache: Optional[DiskCache] = None,
         _fetch=None,
         _resolve=None,
+        _search=None,
     ):
+        self.cache = cache
         self.timeout = timeout
         self.retries = retries
         self.sleep = sleep
@@ -71,22 +226,37 @@ class CrossrefClient:
             if mailto
             else DEFAULT_UA
         )
-        # _fetch/_resolve let tests inject fake transports:
+        # _fetch/_resolve/_search let tests inject fake transports:
         #   _fetch:   doi -> message dict | None
         #   _resolve: doi -> bool (does the DOI resolve at doi.org?)
+        #   _search:  query string -> list of candidate message dicts
         self._fetch = _fetch
         self._resolve = _resolve
+        self._search = _search
+        # Counts lookups that went out to the transport rather than being served
+        # from a cache. The CLI reads it to decide whether a rate-limiting delay
+        # is owed (a cache hit costs Crossref nothing) and to report cache use.
+        self.remote_calls = 0
         # In-run memoisation so a manuscript that cites the same DOI twice (or a
         # re-run over the same file) hits the network only once per DOI.
         self._fetch_cache: dict[str, Optional[dict]] = {}
         self._resolve_cache: dict[str, bool] = {}
+        self._search_cache: dict[str, list] = {}
 
     def fetch(self, doi: str) -> Optional[dict]:
         """Return the Crossref `message` for *doi*, or None if not found."""
         if doi in self._fetch_cache:
             return self._fetch_cache[doi]
+        if self.cache is not None:
+            cached = self.cache.get(f"crossref:fetch:{doi}")
+            if cached is not _MISS and (cached is None or isinstance(cached, dict)):
+                self._fetch_cache[doi] = cached
+                return cached
+        self.remote_calls += 1
         result = self._fetch(doi) if self._fetch is not None else self._fetch_network(doi)
         self._fetch_cache[doi] = result
+        if self.cache is not None and (result is None or isinstance(result, dict)):
+            self.cache.set(f"crossref:fetch:{doi}", result)
         return result
 
     def _fetch_network(self, doi: str) -> Optional[dict]:
@@ -102,18 +272,66 @@ class CrossrefClient:
                 if e.code == 404:
                     return None
                 last_err = e
-            except (
-                urllib.error.URLError,
-                TimeoutError,
-                json.JSONDecodeError,
-                UnicodeDecodeError,
-            ) as e:
+            except _TRANSPORT_ERRORS as e:
                 last_err = e
             if attempt < self.retries:
                 time.sleep(self.sleep * (attempt + 1))
         if last_err:
             raise last_err
         return None
+
+    def search(self, query: str) -> list:
+        """Return candidate Crossref records for a bibliographic *query*.
+
+        Backs the "this reference has no DOI — here is the DOI Crossref holds
+        for it" recovery path. Crossref's ``query.bibliographic`` is built for
+        exactly this: it accepts a whole reference string or a title+author+year
+        blob and ranks works against it.
+        """
+        if not query:
+            return []
+        if query in self._search_cache:
+            return self._search_cache[query]
+        self.remote_calls += 1
+        result = self._search(query) if self._search is not None else self._search_network(query)
+        result = result if isinstance(result, list) else []
+        self._search_cache[query] = result
+        return result
+
+    def _search_network(self, query: str, rows: int = 5) -> list:
+        params = {
+            "query.bibliographic": query,
+            "rows": str(rows),
+            # Ask only for the fields we actually use — a full record per
+            # candidate would be many KB of payload we immediately discard.
+            # `updated-by`/`relation`/`type` are NOT optional: without them a
+            # candidate's retraction is invisible and the tool would cheerfully
+            # recommend citing a retracted paper (it did — see _suggest_doi).
+            "select": "DOI,title,subtitle,author,issued,published-print,"
+            "published-online,container-title,short-container-title,"
+            "updated-by,relation,type",
+        }
+        url = CROSSREF_SEARCH + "?" + urllib.parse.urlencode(params)
+        req = urllib.request.Request(url, headers={"User-Agent": self.user_agent})
+        last_err: Optional[Exception] = None
+        for attempt in range(self.retries + 1):
+            try:
+                with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                message = data.get("message") if isinstance(data, dict) else None
+                items = message.get("items") if isinstance(message, dict) else None
+                return [i for i in _as_list(items) if isinstance(i, dict)]
+            except urllib.error.HTTPError as e:
+                if e.code == 404:
+                    return []
+                last_err = e
+            except _TRANSPORT_ERRORS as e:
+                last_err = e
+            if attempt < self.retries:
+                time.sleep(self.sleep * (attempt + 1))
+        if last_err:
+            raise last_err
+        return []
 
     def resolve(self, doi: str) -> bool:
         """Return True if *doi* resolves at doi.org (independent of Crossref).
@@ -123,8 +341,16 @@ class CrossrefClient:
         """
         if doi in self._resolve_cache:
             return self._resolve_cache[doi]
+        if self.cache is not None:
+            cached = self.cache.get(f"crossref:resolve:{doi}")
+            if isinstance(cached, bool):
+                self._resolve_cache[doi] = cached
+                return cached
+        self.remote_calls += 1
         result = self._resolve(doi) if self._resolve is not None else self._resolve_network(doi)
         self._resolve_cache[doi] = result
+        if self.cache is not None and isinstance(result, bool):
+            self.cache.set(f"crossref:resolve:{doi}", result)
         return result
 
     def _resolve_network(self, doi: str) -> bool:
@@ -157,8 +383,10 @@ class PubMedClient:
         retries: int = 2,
         sleep: float = 1.0,
         api_key: Optional[str] = None,
+        cache: Optional[DiskCache] = None,
         _fetch=None,
     ):
+        self.cache = cache
         self.timeout = timeout
         self.retries = retries
         self.sleep = sleep
@@ -170,14 +398,23 @@ class PubMedClient:
             else DEFAULT_UA
         )
         self._fetch = _fetch
+        self.remote_calls = 0  # see CrossrefClient.remote_calls
         self._cache: dict[str, Optional[dict]] = {}
 
     def fetch(self, pmid: str) -> Optional[dict]:
         """Return the PubMed esummary record for *pmid*, or None if absent."""
         if pmid in self._cache:
             return self._cache[pmid]
+        if self.cache is not None:
+            cached = self.cache.get(f"pubmed:fetch:{pmid}")
+            if cached is not _MISS and (cached is None or isinstance(cached, dict)):
+                self._cache[pmid] = cached
+                return cached
+        self.remote_calls += 1
         result = self._fetch(pmid) if self._fetch is not None else self._fetch_network(pmid)
         self._cache[pmid] = result
+        if self.cache is not None and (result is None or isinstance(result, dict)):
+            self.cache.set(f"pubmed:fetch:{pmid}", result)
         return result
 
     def _fetch_network(self, pmid: str) -> Optional[dict]:
@@ -199,12 +436,7 @@ class PubMedClient:
                 if e.code == 404:
                     return None
                 last_err = e
-            except (
-                urllib.error.URLError,
-                TimeoutError,
-                json.JSONDecodeError,
-                UnicodeDecodeError,
-            ) as e:
+            except _TRANSPORT_ERRORS as e:
                 last_err = e
             if attempt < self.retries:
                 time.sleep(self.sleep * (attempt + 1))
@@ -288,7 +520,11 @@ def _crossref_title_candidates(message: dict) -> list[str]:
     titles = [t for t in _as_list(message.get("title")) if isinstance(t, str) and t.strip()]
     if not titles:
         return []
-    main = titles[0]
+    # Drop a publisher's "RETRACTED: " marker: the author cited the paper's
+    # actual title, so comparing against the marked-up one reports a false title
+    # mismatch on every correctly-cited retracted paper (the retraction itself is
+    # reported separately, by _is_retracted).
+    main = _strip_retracted_prefix(titles[0])[0].strip() or titles[0]
     candidates = [main]
     subs = [s for s in _as_list(message.get("subtitle")) if isinstance(s, str) and s.strip()]
     if subs:
@@ -306,9 +542,15 @@ def _crossref_years(message: dict) -> set[int]:
 
     A paper published online in year N and in print in N+1 legitimately carries
     both; the citation matches if it equals *any* of them.
+
+    ``created`` is deliberately excluded. It is Crossref's *deposit* timestamp,
+    not a publication year, and for back-deposited papers it is wildly wrong —
+    Wakefield 1998 has ``created`` 2002, so including it silently accepted "2002"
+    as a valid year for a 1998 paper. Any record with only a ``created`` date now
+    yields an empty set, which skips the year check rather than misjudging it.
     """
     years: set[int] = set()
-    for key in ("published-print", "published-online", "published", "issued", "created"):
+    for key in ("published-print", "published-online", "published", "issued"):
         field_val = message.get(key)
         if not isinstance(field_val, dict):
             continue
@@ -321,7 +563,11 @@ def _crossref_years(message: dict) -> set[int]:
             elif isinstance(part, list) and part:
                 try:
                     years.add(int(part[0]))
-                except (TypeError, ValueError):
+                except (TypeError, ValueError, OverflowError):
+                    # OverflowError: a poisoned record (or cache file) can hold
+                    # `1e400`, which JSON decodes to float('inf'); int(inf)
+                    # raises OverflowError, and this runs outside the
+                    # "one weird record must not abort the batch" guards.
                     pass
     return years
 
@@ -387,6 +633,40 @@ def _is_abbrev_of(cited: str, full: str) -> bool:
     return True
 
 
+# Words an initialism skips: "JAMA" is Journal (of the) American Medical
+# Association, "PNAS" is Proceedings (of the) National Academy (of) Sciences.
+_INITIALISM_STOPWORDS = {"of", "the", "and", "for", "a", "an", "in", "on", "to"}
+
+
+def _is_initialism_of(cited: str, full: str) -> bool:
+    """True if *cited* is the all-caps initialism of *full*.
+
+    "NEJM" ↔ "New England Journal of Medicine", "JAMA" ↔ "Journal of the
+    American Medical Association", "BMJ" ↔ "British Medical Journal". Clinical
+    authors write these constantly, and ``_is_abbrev_of`` structurally cannot
+    match them: it requires at least two abbreviation words, so any single-token
+    journal name failed and produced a false "Journal mismatch" warning on some
+    of the most-cited journals in medicine.
+
+    Deliberately narrow, because a short token is weak evidence:
+
+    * *cited* must be a single token that is ALL-CAPS **as written** — the case
+      is the signal that the author meant an initialism, not a word. So "Cancer"
+      never matches "Cancer Nursing", while "AIDS" may match its expansion.
+    * The letters must equal the initials of *full*'s significant words exactly,
+      in order — not a subsequence, not a prefix.
+    * At least two letters, and *full* must be a multi-word name; a one-word
+      journal has no initialism to speak of.
+    """
+    token = cited.strip().replace(".", "").replace(" ", "")
+    if len(token) < 2 or not token.isalpha() or not token.isupper():
+        return False
+    words = [w for w in _journal_words(full) if w not in _INITIALISM_STOPWORDS]
+    if len(words) < 2:
+        return False
+    return "".join(w[0] for w in words) == token.lower()
+
+
 _LEADING_ARTICLE_RE = re.compile(r"^(?:the|a|an)\s+", re.IGNORECASE)
 
 
@@ -405,10 +685,12 @@ def _journal_matches(cited: str, candidates: list[str], threshold: float) -> boo
     abbreviation relationship in either direction. Only a clear mismatch (e.g.
     "Nature" cited, Crossref says "Lancet") fails.
 
-    Multi-word ISO-4 abbreviations ("Am J Med", "N Engl J Med") are handled; a
-    *single-token* pure abbreviation ("Circ" → "Circulation") is only matched via
-    Crossref's ``short-container-title`` (which real records carry), because
-    expanding one token can't be distinguished from a genuinely different journal
+    Multi-word ISO-4 abbreviations ("Am J Med", "N Engl J Med") are handled, as
+    are all-caps initialisms ("NEJM", "JAMA", "BMJ" — see
+    :func:`_is_initialism_of`). A single-token *lower*-case abbreviation
+    ("Circ" → "Circulation") is only matched via Crossref's
+    ``short-container-title`` (which real records carry), because expanding one
+    such token can't be distinguished from a genuinely different journal
     ("Cancer" vs "Cancer Research").
     """
     cited_key = _journal_key(cited)
@@ -421,6 +703,8 @@ def _journal_matches(cited: str, candidates: list[str], threshold: float) -> boo
         if cand_key and SequenceMatcher(None, cited_key, cand_key).ratio() >= threshold:
             return True
         if _is_abbrev_of(cited, cand) or _is_abbrev_of(cand, cited):
+            return True
+        if _is_initialism_of(cited, cand) or _is_initialism_of(cand, cited):
             return True
     return False
 
@@ -440,43 +724,419 @@ def _crossref_all_author_families(message: dict) -> list[str]:
     ]
 
 
-def _retraction_notice(message: dict) -> Optional[str]:
-    """Return the DOI of a retraction notice for *message*, if exposed.
+def _self_doi(message: dict) -> str:
+    doi = message.get("DOI") or message.get("doi") or ""
+    return str(doi).strip().lower()
 
-    Falls through to whichever field actually carries a DOI (``update-by`` may
-    match on type but omit the DOI while ``update-to`` carries it).
+
+def _update_notice_doi(message: dict, kinds_match) -> Optional[str]:
+    """The DOI of a notice issued against *message*, skipping self-references.
+
+    Publishers overwhelmingly deposit ``updated-by`` entries whose DOI is the
+    record's *own* DOI rather than the notice's: sampling 400 live records with
+    a retraction in ``updated-by``, 185 of 186 publisher-deposited entries
+    self-referenced (Retraction Watch-sourced entries are usually right). Emitting
+    those produced "Reference appears to be RETRACTED (retraction notice:
+    <the paper itself>)", which is nonsense and sends the reader in a circle.
+
+    So a self-referencing DOI is skipped, and if no entry names a *different*
+    document we return None and the caller simply omits the notice — an honest
+    "we don't know where the notice is" beats a wrong pointer.
     """
-    for f in ("update-by", "update-to"):
-        for upd in _as_list(message.get(f)):
-            if isinstance(upd, dict) and "retract" in str(upd.get("type", "")).lower():
-                doi = upd.get("DOI") or upd.get("doi")
-                if doi:
-                    return doi
+    own = _self_doi(message)
+    for upd in _updates(message):
+        if not kinds_match(_normalize_update_type(upd.get("type"))):
+            continue
+        doi = upd.get("DOI") or upd.get("doi")
+        if not doi:
+            continue
+        doi = str(doi).strip()
+        if doi.lower() == own:
+            continue  # points at this very record — not a notice
+        return doi
     return None
+
+
+def _retraction_notice(message: dict) -> Optional[str]:
+    """Return the DOI of the retraction notice issued against *message*, if any.
+
+    Read from ``updated-by`` only — never ``update-to``. Elsevier deposits
+    ``update-to`` symmetrically (the retracted Lancet paper
+    10.1016/S0140-6736(20)31180-6 carries ``update-to`` retractions pointing at
+    its own notices), so it identifies neither side of the relationship.
+    """
+    return _update_notice_doi(message, lambda kind: "retract" in kind)
+
+
+# The Crossref field naming the notices issued *against* a work. THIS IS THE
+# REAL FIELD NAME: an article carries ``updated-by``; the notice carries
+# ``update-to`` pointing back at the article. (An earlier version of this file
+# read a non-existent ``update-by``, which silently disabled retraction
+# detection entirely — see tests/test_retraction_real_shapes.py, whose fixtures
+# are copied from live api.crossref.org payloads to keep that honest.)
+UPDATED_BY = "updated-by"
+UPDATE_TO = "update-to"
+
+# Crossref "update" types other than retraction that a clinical/pharma author
+# needs to know about before citing a paper. Maps the normalised Crossref type
+# to (human label, severity). Retraction-flavoured types are deliberately absent
+# — ``_is_retracted`` already owns those (it substring-matches "retract", which
+# also covers "partial_retraction") and reporting both would double up.
+#
+# The key set is taken from the live `update-type` facet on api.crossref.org
+# (i.e. what Crossref actually emits, by volume), not from the schema docs:
+# correction 209k, erratum 114k, retraction 74k, new_version 44k, new_edition
+# 11k, corrigendum 8.9k, expression_of_concern 4.1k, withdrawal 3.4k, addendum
+# 1.7k, removal 697, clarification 503.
+#
+# Rationale for the severities: an expression of concern, a withdrawal, or a
+# removal means the literature itself has flagged the work's integrity — citing
+# it silently is exactly the mistake this tool exists to prevent, so those fail
+# the run. A correction/erratum/corrigendum/addendum does NOT invalidate the
+# paper; it means some reported value may have changed, so it warns and asks the
+# author to look.
+# Values are (human label, severity, finding code — a CODES key).
+_UPDATE_KINDS: dict[str, tuple[str, str, str]] = {
+    "expression_of_concern": (
+        "has an EXPRESSION OF CONCERN against it", ERROR, "expression-of-concern",
+    ),
+    "withdrawal": ("has been WITHDRAWN", ERROR, "withdrawal"),
+    "removal": ("has been REMOVED", ERROR, "removal"),
+    "correction": ("has a correction issued", WARNING, "correction"),
+    "erratum": ("has an erratum issued", WARNING, "correction"),
+    "corrigendum": ("has a corrigendum issued", WARNING, "correction"),
+    "addendum": ("has an addendum", WARNING, "addendum"),
+    "clarification": ("has a clarification issued", WARNING, "clarification"),
+    "new_edition": ("has a newer edition", WARNING, "new-edition"),
+    "new_version": ("has a newer version", WARNING, "new-edition"),
+}
+
+# Low-volume spellings Crossref really carries for the same thing (from the same
+# facet): "err" (192), "corrected" (54), "corrected-article" (38). Folded rather
+# than listed above so the severity table stays readable.
+_UPDATE_ALIASES: dict[str, str] = {
+    "err": "erratum",
+    "corrected": "correction",
+    "corrected_article": "correction",
+}
+
+
+def _normalize_update_type(value) -> str:
+    """Fold a Crossref update ``type`` to its ``_UPDATE_KINDS`` key.
+
+    Crossref mostly writes these snake_cased and lowercase, but the live data
+    also contains ``expression-of-concern``, ``Erratum`` and ``Corrigendum``, so
+    case and separator are normalised and known aliases folded.
+    """
+    key = re.sub(r"[\s\-]+", "_", str(value or "").strip().lower())
+    return _UPDATE_ALIASES.get(key, key)
+
+
+def _updates(message: dict) -> list:
+    """The Crossmark update entries issued against *message*.
+
+    Only ``updated-by`` is consulted — on an *article* it names the notices that
+    update it, which is the thing we want to warn the author about. ``update-to``
+    is the mirror: a record carrying it *is* the notice, and reporting "this has
+    a correction issued" about an erratum notice would be backwards.
+    """
+    return [u for u in _as_list(message.get(UPDATED_BY)) if isinstance(u, dict)]
+
+
+def _classify_updates(message: dict) -> list[tuple[str, str, Optional[str], str]]:
+    """Non-retraction Crossmark updates against *message*, deduplicated.
+
+    Returns (label, severity, notice_doi, code) per distinct update kind.
+    Deduplication is by *code*, not by raw type: a paper carrying both an
+    "erratum" and a "corrigendum" has had one thing happen to it, and should say
+    so once.
+    """
+    out: list[tuple[str, str, Optional[str], str]] = []
+    seen: set[str] = set()
+    for upd in _updates(message):
+        kind = _normalize_update_type(upd.get("type"))
+        if kind not in _UPDATE_KINDS:
+            continue
+        label, severity, code = _UPDATE_KINDS[kind]
+        if code in seen:
+            continue
+        seen.add(code)
+        # Same self-reference problem as retractions — see _update_notice_doi.
+        notice = _update_notice_doi(message, lambda k, want=kind: k == want)
+        out.append((label, severity, notice, code))
+    return out
+
+
+# Elsevier, Springer, Wiley and NEJM all mark a retracted article by prefixing
+# its Crossref title with "RETRACTED:" (and withdrawn preprints with
+# "WITHDRAWN:"). This is an entirely independent signal from Crossmark, and it is
+# load-bearing: it is often present when Crossmark data is thin. It also has to
+# be stripped before comparing titles, or every correctly-cited retracted paper
+# reads as a title mismatch (the cited title lacks the publisher's prefix).
+_RETRACTED_TITLE_RE = re.compile(
+    r"^\s*(?:retracted(?:\s+article)?|withdrawn(?:\s+article)?|removed|temporary\s+removal)"
+    r"\s*[:\-–—]\s*",
+    re.IGNORECASE,
+)
+
+
+def _strip_retracted_prefix(title: str) -> tuple[str, bool]:
+    """Split a publisher "RETRACTED: " marker off *title*.
+
+    Returns (title_without_marker, marker_was_present).
+    """
+    stripped = _RETRACTED_TITLE_RE.sub("", title, count=1)
+    return stripped, stripped != title
+
+
+def _title_marks_retracted(message: dict) -> bool:
+    """True if the publisher prefixed this work's Crossref title with RETRACTED."""
+    for t in _as_list(message.get("title")):
+        if isinstance(t, str) and _RETRACTED_TITLE_RE.match(t):
+            return True
+    return False
+
+
+def _relation_ids(message: dict, wanted: str) -> list[str]:
+    """DOIs listed under Crossref ``relation[<wanted>]``, normalised.
+
+    Crossref keys are hyphenated (``is-preprint-of``); tolerate underscores too.
+    """
+    from .parsers import normalize_doi_field
+
+    relation = message.get("relation")
+    if not isinstance(relation, dict):
+        return []
+    out: list[str] = []
+    for key, entries in relation.items():
+        if not isinstance(key, str):
+            continue
+        if key.strip().lower().replace("_", "-") != wanted:
+            continue
+        for entry in _as_list(entries):
+            if not isinstance(entry, dict):
+                continue
+            if str(entry.get("id-type", "doi")).lower() != "doi":
+                continue
+            doi = normalize_doi_field(str(entry.get("id", "")))
+            if doi:
+                out.append(doi)
+    return out
+
+
+def _published_version_doi(message: dict) -> Optional[str]:
+    """The DOI of the peer-reviewed version of a preprint, if Crossref knows one.
+
+    A preprint record carries ``relation["is-preprint-of"]`` pointing at the
+    version of record. Citing the preprint when the paper has since been
+    published in a journal is one of the most common (and most correctable)
+    slips in a clinical manuscript — the numbers frequently change in peer
+    review, so the preprint's results may no longer be what the author means.
+    """
+    dois = _relation_ids(message, "is-preprint-of")
+    return dois[0] if dois else None
 
 
 def _is_retracted(message: dict) -> bool:
     """Best-effort retraction detection against a Crossref *article* record.
 
-    Crossref marks a retracted article via ``update-by`` (the Crossmark model);
-    the retraction *notice* carries ``update-to`` pointing back. We check both,
-    plus an ``is-retracted-by`` relation (the retracted work pointing to its
-    notice). We deliberately do NOT match ``is-retraction-of`` — that identifies
-    the notice itself, not a retracted paper. Note: Crossref coverage of
-    retractions is incomplete, so a clean result is not a guarantee.
+    Three independent signals, any of which is sufficient:
+
+    1. ``updated-by`` carries a retraction-flavoured update — the Crossmark
+       model, and the primary signal. This is the field an *article* carries to
+       name the notices issued against it.
+    2. An ``is-retracted-by`` relation (the retracted work pointing at its
+       notice). We deliberately do NOT match ``is-retraction-of`` — that
+       identifies the notice itself, not a retracted paper.
+    3. The publisher prefixed the title with "RETRACTED:" — see
+       ``_RETRACTED_TITLE_RE``. Independent of Crossmark and often present when
+       Crossmark data is thin.
+
+    ``update-to`` is deliberately NOT consulted. In principle it marks the
+    notice, but Elsevier deposits it *symmetrically* — the retracted Lancet
+    paper 10.1016/S0140-6736(20)31180-6 carries ``update-to`` retractions
+    pointing at its own notices — so it identifies neither side reliably. Every
+    real record we checked is classified correctly from ``updated-by`` alone.
+
+    Note: Crossref's retraction coverage is incomplete, so a clean result is not
+    a guarantee — see the README caveat.
     """
     if str(message.get("type", "")).lower() == "retraction":
         return True
-    for f in ("update-by", "update-to"):
-        for upd in _as_list(message.get(f)):
-            if isinstance(upd, dict) and "retract" in str(upd.get("type", "")).lower():
-                return True
+    for upd in _updates(message):
+        if "retract" in _normalize_update_type(upd.get("type")):
+            return True
     relation = message.get("relation")
     if isinstance(relation, dict):
         for key in relation:
             if isinstance(key, str) and "retracted-by" in key.lower():
                 return True
-    return False
+    return _title_marks_retracted(message)
+
+
+def _bibliographic_query(ref: Reference) -> str:
+    """Build a Crossref ``query.bibliographic`` string for a DOI-less reference.
+
+    With structured fields, a title+author+journal+year blob matches best. With
+    only free text (a pasted reference list), the raw line *is* the bibliographic
+    string Crossref's matcher expects — it is trimmed only to keep the URL sane.
+    """
+    if ref.title:
+        parts = [ref.title]
+        for extra in (ref.author, ref.journal, str(ref.year) if ref.year else None):
+            if extra:
+                parts.append(extra)
+        return " ".join(" ".join(p.split()) for p in parts)[:500]
+    return " ".join(ref.raw.split())[:500]
+
+
+# A suggestion is only worth showing if it is almost certainly the same paper —
+# a wrong DOI confidently offered is worse than no suggestion at all, because the
+# author may paste it in unchecked. Both thresholds are far above the ones used
+# to *compare* an already-cited DOI (0.80), where the DOI itself is the evidence.
+SUGGEST_TITLE_THRESHOLD = 0.92
+SUGGEST_OVERLAP_THRESHOLD = 0.80
+# A title must carry this many distinctive words before a similarity score means
+# anything. Without it, `title={Editorial}` scores a perfect 1.00 against any of
+# the thousands of works titled "Editorial" and we confidently emit whichever one
+# Crossref's ranker happened to put first. A high similarity on a short string
+# discriminates typos, not papers.
+SUGGEST_MIN_TITLE_TOKENS = 4
+
+
+def _author_families_match(ref: Reference, candidate: dict, threshold: float = 0.85) -> bool:
+    """Does *ref*'s cited surname appear among *candidate*'s authors?
+
+    Only meaningful when both sides state one; "unknown" must not mean "reject",
+    or every author-less reference loses its suggestion.
+    """
+    if not ref.author:
+        return True
+    families = _crossref_all_author_families(candidate)
+    if not families:
+        return True
+    return max(_similar(ref.author, fam) for fam in families) >= threshold
+
+
+def _score_candidate(ref: Reference, candidate: dict) -> float:
+    """How confidently does *candidate* match a DOI-less *ref*? 0.0 = reject.
+
+    Titles are compared directly when the reference has one. For a free-text
+    reference we instead require the cited line to *contain* most of the
+    candidate's title words — the same signal ``_check_text_mentions_title``
+    uses, since a real citation quotes its source's title.
+
+    Three independent hard rejects, each guarding a way a plausible-looking
+    candidate turns out to be a different paper:
+
+    * **Year disagreement.** Crossref's ranker happily returns a same-titled
+      paper from a different year (a later edition, a conference/journal pair).
+    * **Author disagreement.** Title similarity alone cannot tell two papers
+      with the same generic title apart; the surname can.
+    * **Too little title to judge.** See ``SUGGEST_MIN_TITLE_TOKENS``.
+
+    A field neither side states is never a reject — only a stated *disagreement*
+    is.
+    """
+    cr_titles = _crossref_title_candidates(candidate)
+    if not cr_titles:
+        return 0.0
+
+    cr_years = _crossref_years(candidate)
+    if ref.year and cr_years and ref.year not in cr_years:
+        return 0.0
+
+    if not _author_families_match(ref, candidate):
+        return 0.0
+
+    if ref.title:
+        if len(_alpha_tokens(ref.title)) < SUGGEST_MIN_TITLE_TOKENS:
+            return 0.0
+        score = max(_similar(ref.title, t) for t in cr_titles)
+        return score if score >= SUGGEST_TITLE_THRESHOLD else 0.0
+
+    block_tokens = set(_alpha_tokens(ref.raw))
+    if len(block_tokens) < 4:
+        return 0.0  # a bare "no DOI" stub — nothing to corroborate against
+    best = 0.0
+    for title in cr_titles:
+        title_tokens = set(_alpha_tokens(title))
+        if len(title_tokens) < SUGGEST_MIN_TITLE_TOKENS:
+            continue  # a generic candidate title can't be confidently matched
+        best = max(best, len(title_tokens & block_tokens) / len(title_tokens))
+    return best if best >= SUGGEST_OVERLAP_THRESHOLD else 0.0
+
+
+def _suggest_doi(ref: Reference, result: CheckResult, client: CrossrefClient) -> None:
+    """Add a DOI suggestion for a DOI-less *ref*, if Crossref holds a confident match.
+
+    Best-effort and never raising: a search failure becomes a "Lookup failed"
+    warning (so the run reads as inconclusive rather than a false clean pass),
+    and a merely-plausible match is silently dropped rather than guessed at.
+    """
+    query = _bibliographic_query(ref)
+    if not query:
+        return
+    try:
+        candidates = client.search(query)
+    except Exception as e:
+        result.add(
+            WARNING,
+            f"Lookup failed while searching Crossref for a missing DOI "
+            f"({type(e).__name__}) — no suggestion available.",
+            "lookup-failed",
+        )
+        return
+
+    best_doi: Optional[str] = None
+    best_score = 0.0
+    best_record: Optional[dict] = None
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        score = _score_candidate(ref, candidate)
+        if score > best_score:
+            doi = candidate.get("DOI") or candidate.get("doi")
+            if isinstance(doi, str) and doi.strip():
+                best_doi, best_score, best_record = doi.strip(), score, candidate
+
+    if not best_doi or best_record is None:
+        return
+    cr_title = _crossref_title(best_record) or "?"
+    years = sorted(_crossref_years(best_record))
+    year_disp = years[0] if years else "?"
+    who = f"{_crossref_first_author(best_record) or '?'} ({year_disp}) — {cr_title}"
+
+    # NEVER recommend citing a retracted work. This path used to skip the
+    # retraction check entirely — and, because `_crossref_title_candidates`
+    # strips the publisher's "RETRACTED: " marker, it also deleted the one
+    # visual cue the author had. The result: "Crossref has a 100%-confident
+    # match — consider citing DOI 10.1016/s0140-6736(97)11096-0", i.e. the tool
+    # actively recommended Wakefield 1998, at exit code 0.
+    #
+    # `_title_marks_retracted` is checked alongside `_is_retracted` because a
+    # Hindawi/MDPI retraction *notice* is titled "Retracted: <original title>",
+    # which — once stripped — matches the original paper perfectly and would be
+    # suggested as if it were the paper. Either way the author must go look.
+    if _is_retracted(best_record) or _title_marks_retracted(best_record):
+        result.add(
+            ERROR,
+            f"This reference cites no DOI, and the Crossref record that matches "
+            f"it ({best_score:.0%}) is marked RETRACTED — do not cite it without "
+            f"checking:\n"
+            f"    match: {who}\n"
+            f"    Crossref DOI: {best_doi}",
+            "retracted",
+        )
+        return
+
+    result.add(
+        WARNING,
+        f"Crossref has a {best_score:.0%}-confident match for this reference — "
+        f"consider citing DOI {best_doi}\n"
+        f"    match: {who}",
+        "doi-suggestion",
+    )
 
 
 def check_reference(
@@ -487,6 +1147,7 @@ def check_reference(
     journal_threshold: float = 0.82,
     resolve_unknown: bool = True,
     pubmed: Optional["PubMedClient"] = None,
+    suggest_missing: bool = False,
 ) -> CheckResult:
     """Verify a single reference against Crossref and return findings.
 
@@ -496,6 +1157,10 @@ def check_reference(
     When a *pubmed* client is supplied and the reference carries a PMID, also
     cross-checks PubMed for a retraction PubMed marks but Crossref may miss, and
     for PMID↔DOI consistency (a classic copy-paste-from-two-records error).
+
+    When *suggest_missing* is set, a reference with no DOI is looked up by its
+    bibliographic details so the report can name the DOI the author should add,
+    instead of only saying it could not be verified.
     """
     result = CheckResult(reference=ref)
 
@@ -509,13 +1174,17 @@ def check_reference(
             if ref.pmid
             else ""
         )
-        result.add(WARNING, f"No DOI found — cannot verify against Crossref.{pmid_note}")
+        result.add(
+            WARNING, f"No DOI found — cannot verify against Crossref.{pmid_note}", "no-doi"
+        )
+        if suggest_missing:
+            _suggest_doi(ref, result, client)
         return result
 
     try:
         message = client.fetch(ref.doi)
     except Exception as e:  # network/transport failure, not a citation problem
-        result.add(WARNING, f"Lookup failed ({type(e).__name__}): {e}")
+        result.add(WARNING, f"Lookup failed ({type(e).__name__}): {e}", "lookup-failed")
         return result
 
     if message is None:
@@ -530,6 +1199,7 @@ def check_reference(
                     WARNING,
                     f"Lookup failed while confirming the DOI resolves "
                     f"({type(e).__name__}) — could not verify: {ref.doi}",
+                    "lookup-failed",
                 )
                 return result
         else:
@@ -539,17 +1209,23 @@ def check_reference(
                 WARNING,
                 f"DOI resolves but is not in Crossref — metadata not verified: {ref.doi}. "
                 f"It may be a dataset/preprint/DataCite DOI.",
+                "doi-not-in-crossref",
             )
         else:
             result.add(
                 ERROR,
                 f"DOI does not resolve anywhere (Crossref or doi.org) — "
                 f"check for a typo: {ref.doi}",
+                "doi-not-resolving",
             )
         return result
 
     if not isinstance(message, dict):
-        result.add(WARNING, "Crossref returned an unexpected record shape — could not verify.")
+        result.add(
+            WARNING,
+            "Crossref returned an unexpected record shape — could not verify.",
+            "bad-record",
+        )
         return result
 
     result.resolved_doi = message.get("DOI", ref.doi)
@@ -558,14 +1234,16 @@ def check_reference(
     try:
         _compare(ref, message, result, title_threshold, author_threshold, journal_threshold)
     except Exception as e:  # never let one weird record abort the batch
-        result.add(WARNING, f"Could not fully compare metadata ({type(e).__name__}).")
+        result.add(WARNING, f"Could not fully compare metadata ({type(e).__name__}).", "bad-record")
 
     if not result.findings:
         cr_author = _crossref_first_author(message)
         cr_year = sorted(_crossref_years(message))
         cr_title = _crossref_title(message)
         year_disp = cr_year[0] if cr_year else "?"
-        result.add(OK, f"Verified: {cr_author or '?'} ({year_disp}) — {cr_title or ref.doi}")
+        result.add(
+            OK, f"Verified: {cr_author or '?'} ({year_disp}) — {cr_title or ref.doi}", "verified"
+        )
     return result
 
 
@@ -582,17 +1260,23 @@ def _pubmed_crosscheck(ref: Reference, result: CheckResult, pubmed: "PubMedClien
             WARNING,
             f"Lookup failed (PubMed, {type(e).__name__}) — PMID {ref.pmid} "
             f"could not be cross-checked.",
+            "lookup-failed",
         )
         return
     if not isinstance(record, dict):
         # None (not found) or, defensively, any non-dict a transport might return
         # — mirror the Crossref path's shape guard rather than trusting the record.
-        result.add(WARNING, f"PMID {ref.pmid} not found in PubMed — could not cross-check.")
+        result.add(
+            WARNING,
+            f"PMID {ref.pmid} not found in PubMed — could not cross-check.",
+            "pmid-not-found",
+        )
         return
     if _pubmed_is_retracted(record):
         result.add(
             ERROR,
             f"Reference appears to be RETRACTED according to PubMed (PMID {ref.pmid}).",
+            "retracted",
         )
     pdoi = _pubmed_doi(record)
     if pdoi and ref.doi and pdoi.lower() != ref.doi.lower():
@@ -600,12 +1284,14 @@ def _pubmed_crosscheck(ref: Reference, result: CheckResult, pubmed: "PubMedClien
             WARNING,
             f"PMID/DOI mismatch: PMID {ref.pmid} is registered to DOI {pdoi}, "
             f"but the citation gives {ref.doi} — one of the two is wrong.",
+            "pmid-doi-mismatch",
         )
     elif pdoi and not ref.doi:
         result.add(
             WARNING,
             f"No DOI cited, but PMID {ref.pmid} maps to DOI {pdoi} in PubMed — "
             f"consider adding it.",
+            "pmid-doi-mismatch",
         )
 
 
@@ -620,7 +1306,24 @@ def _compare(
     if _is_retracted(message):
         notice = _retraction_notice(message)
         extra = f" (retraction notice: {notice})" if notice else ""
-        result.add(ERROR, f"Reference appears to be RETRACTED according to Crossref.{extra}")
+        result.add(
+            ERROR, f"Reference appears to be RETRACTED according to Crossref.{extra}", "retracted"
+        )
+    else:
+        # Only report the softer integrity flags when the work is not already
+        # retracted — a retraction subsumes them, and stacking both is noise.
+        for label, severity, notice, code in _classify_updates(message):
+            extra = f" (notice: {notice})" if notice else ""
+            result.add(severity, f"Crossref says this reference {label}.{extra}", code)
+
+    published = _published_version_doi(message)
+    if published:
+        result.add(
+            WARNING,
+            f"This is a preprint — a peer-reviewed version is published as "
+            f"{published}. Cite that instead (results often change in review).",
+            "preprint-published",
+        )
 
     # Title comparison — compare against the best-matching Crossref candidate
     # (main title, or main+subtitle) so a cited subtitle is not a false mismatch.
@@ -633,6 +1336,7 @@ def _compare(
                 f"Title mismatch ({best:.0%} similar):\n"
                 f"    cited:    {ref.title}\n"
                 f"    crossref: {cr_titles[0]}",
+                "title-mismatch",
             )
 
     # Year and first-author were guessed from free text when heuristic_fields is
@@ -649,7 +1353,9 @@ def _compare(
     cr_years = _crossref_years(message)
     if ref.year and cr_years and ref.year not in cr_years:
         shown = ", ".join(str(y) for y in sorted(cr_years))
-        result.add(WARNING, f"Year mismatch: cited {ref.year}, Crossref says {shown}.")
+        result.add(
+            WARNING, f"Year mismatch: cited {ref.year}, Crossref says {shown}.", "year-mismatch"
+        )
 
     # First-author comparison — tolerate diacritics; also accept a match against
     # any listed author (co-author ordering / equal-contribution differences).
@@ -662,6 +1368,7 @@ def _compare(
                     WARNING,
                     f"First-author mismatch: cited '{ref.author}', "
                     f"Crossref says '{families[0]}'.",
+                    "author-mismatch",
                 )
 
     # Journal / container comparison — a second, independent signal for a
@@ -674,6 +1381,7 @@ def _compare(
                 WARNING,
                 f"Journal mismatch: cited '{ref.journal}', "
                 f"Crossref says '{containers[0]}'.",
+                "journal-mismatch",
             )
 
 
@@ -715,4 +1423,5 @@ def _check_text_mentions_title(
             WARNING,
             f"Cited text does not mention the Crossref title — possibly the wrong DOI:\n"
             f"    crossref: {cr_titles[0]}",
+            "text-title-missing",
         )
