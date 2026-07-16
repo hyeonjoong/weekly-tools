@@ -2,7 +2,8 @@
 
 두 측정 방법(A vs B)을 같은 대상에 적용한 **짝지은 CSV**를 넣으면,
 **Bland–Altman**(bias·95% 일치한계 LoA·신뢰구간), **ICC(2,1)/ICC(3,1)**,
-**Lin's CCC**, **반복성(within-subject CV·repeatability coefficient)**, 그리고
+**Lin's CCC**, **반복성(within-subject CV·repeatability coefficient)**,
+**방법비교 회귀(Deming·Passing–Bablok, CLSI EP09)**, 그리고
 참고용 **Pearson r·대응 차이검정**을 한 번에 계산하고, **논문에 바로 붙일 수 있는
 문장**까지 출력합니다. 외부 라이브러리 없이 **표준 라이브러리만**으로 동작합니다.
 
@@ -132,6 +133,8 @@ agreestat data.csv -a watch -b ecg --json           # 기계 판독용 JSON
 | `--alpha 0.05` | 유의수준 / 신뢰구간 폭 (기본 0.05 → 95% CI) |
 | `--accept DELTA` | 사전 설정한 임상 허용한계 ±DELTA. 95% LoA가 그 안이면 **교환가능(interchangeable)** 판정을 출력 (`--accept-lower/--accept-upper`로 비대칭 지정 가능) |
 | `--target-loa-hw H` | 목표 LoA CI 반너비 H. 그 정밀도 달성에 필요한 표본수 n을 계산 |
+| `--deming-lambda L` | Deming 회귀의 오차분산비 λ=Var(err_기준B)/Var(err_검증A) (기본 1.0=직교회귀) |
+| `--at XC` | 의학적 결정수준 XC(기준법 값)에서의 예측 계통편향 `bias(XC)=절편+(기울기−1)·XC`를 회귀로 추정(Deming CI 포함). `--accept`와 함께 쓰면 그 지점 편향이 허용한계 안인지 판정 |
 | `--encoding` | 입력 CSV 인코딩 (기본: 자동 감지 — UTF-8/UTF-16/CP949/EUC-KR) |
 | `--json` | JSON으로 출력 |
 | `--markdown [PATH]` | 결과를 논문 부록용 마크다운 표로 출력(경로 생략 시 화면) |
@@ -172,6 +175,20 @@ agreestat data.csv -a watch -b ecg --json           # 기계 판독용 JSON
   z변환 근사(Lin 1989, 2000). 정확도 `Cb = CCC/r`도 함께 보고합니다.
 - **반복성**: 피험자당 반복측정이 있으면 일원배치 잔차에서 within-subject SD(s_w)를
   구해 CV(%)와 반복성 계수(2.77·s_w = 1.96·√2·s_w)를 계산합니다(Bland & Altman 1996).
+- **방법비교 회귀(CLSI EP09)**: 검증법(A)을 기준법(B)에 회귀합니다
+  (`A = 절편 + 기울기·B`). **기울기 CI가 1을 제외하면 비례 편향**, **절편 CI가 0을
+  제외하면 상수(계통) 편향**입니다. 단순 최소제곱(OLS)은 기준법에 오차가 없다고
+  가정해 기울기를 0쪽으로 편향(regression dilution)시키므로, 두 방법 모두에 오차를
+  허용하는 두 추정량을 씁니다: **Deming 회귀**(Linnet 1990; 오차분산비 λ 가정,
+  λ=1이면 직교회귀, CI는 leave-one-out 잭나이프 t(n−2))와 **Passing–Bablok 회귀**
+  (1983; 분포무관·이상치에 강건, 기울기=전체 쌍별 기울기의 이동중앙값, rank 기반 CI).
+  Bland–Altman의 단일 bias 요약이 놓치는 크기-의존/상수 편향을 잡아 줍니다.
+  (Deming λ=1 기울기는 scipy의 직교거리회귀 `scipy.odr`와 ≤1e-4로 교차검증됩니다.)
+- **결정수준 예측 편향(`--at XC`)**: 임상적으로 중요한 값 XC(기준법 척도)에서 두 방법의
+  예측 계통편향 `bias(XC)=절편+(기울기−1)·XC`를 회귀로 추정합니다(Passing–Bablok 점추정 +
+  Deming 잭나이프 CI). "이 수준에서 새 기기가 기준보다 얼마나 치우치는가"라는, 임상가가
+  실제로 쓰는 숫자입니다. `--accept`와 함께 주면 그 지점의 편향 CI가 허용한계 안인지까지
+  판정합니다. 권장 회귀는 기본 Passing–Bablok(강건), 오차가 정규·등분산이면 Deming입니다.
 - **Pearson r + 대응 t검정**: 참고용입니다. **r은 일치도가 아닙니다** — 계통편향을
   감지하지 못하므로 리포트에서 명시적으로 경고합니다. (대응 t검정 = bias≠0 검정.)
 
@@ -192,12 +209,18 @@ agreestat data.csv -a watch -b ecg --json           # 기계 판독용 JSON
   개수를 경고합니다(한 셀의 무한대가 전체 통계를 오염시키지 못하도록).
 - 한국어 Excel에서 저장한 CSV는 보통 CP949/EUC-KR 인코딩입니다 — 자동 감지하며,
   안 되면 `--encoding cp949`로 지정하세요.
+- **방법비교 회귀**는 검증법(A)을 기준법(B)에 회귀합니다(`-b`가 기준). Passing–Bablok은
+  두 방법이 **양의 관계**(둘 다 같은 양을 측정)라고 가정하므로 강한 음의 관계에는
+  적합하지 않습니다. Deming의 기본 λ=1(직교회귀)은 두 방법의 측정오차가 비슷할 때
+  적절하며, 기준법(B)이 훨씬 정밀하면(오차가 작으면) λ를 **작게**, 검증법(A)이 훨씬
+  정밀하면 λ를 **크게** 주세요(λ=Var(err_기준B)/Var(err_검증A)). n이 작으면(<10) rank 기반
+  Passing–Bablok CI가 계산되지 않을 수 있고(그때 CI 생략), 이는 정상입니다.
 - 이 도구는 계산을 자동화하지만 최종 판단은 연구자의 몫입니다 — 경고를 꼭 확인하세요.
 
 ## Tests
 
 ```bash
-python3 -m pytest -q    # 160개 테스트, 전부 오프라인
+python3 -m pytest -q    # 208개 테스트, 전부 오프라인
 ```
 
 ICC는 Shrout & Fleiss(1979) 공개 예제와 1e-9, Bland–Altman·CCC는 손계산 값과 일치하며,

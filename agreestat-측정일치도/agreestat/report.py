@@ -191,6 +191,9 @@ def render_text(res: AnalysisResult) -> str:
     L("    ⚠ 주의: 높은 상관(r)은 '일치도(agreement)'가 아닙니다. r은 계통편향을 "
       "감지하지 못하므로 Bland–Altman/ICC/CCC로 판단하세요.")
 
+    # [7] Method-comparison regression (CLSI EP09)
+    _render_regression_text(res, L, lvl)
+
     # Warnings
     if res.warnings:
         L("")
@@ -204,6 +207,80 @@ def render_text(res: AnalysisResult) -> str:
     L("  " + _sentence(res))
     L("")
     return "\n".join(lines)
+
+
+def _bias_verdict(flag) -> str:
+    """Render a proportional/constant-bias flag (True/False/None)."""
+    if flag is None:
+        return "판정 불가"
+    return "있음 ⚠" if flag else "없음"
+
+
+def _render_regression_text(res: AnalysisResult, L, lvl: str) -> None:
+    dem = res.deming
+    pb = res.passing_bablok
+    if (dem is None or not dem.available) and (pb is None or not pb.available):
+        return
+    L("")
+    L("[7] 방법비교 회귀 / Method-comparison regression (CLSI EP09)")
+    L(f"    회귀식: {res.name_a}(검증) = 절편 + 기울기·{res.name_b}(기준)")
+    L("    기울기 CI가 1을 포함하면 비례편향 없음, 절편 CI가 0을 포함하면 상수편향 없음")
+    L("    권장: 기본은 Passing–Bablok(분포무관·강건). 오차가 정규·등분산이고 오차비 λ를"
+      " 알면 Deming. 두 결과가 크게 다르면 이상치/비선형/분포가정을 점검하세요.")
+    if pb is not None and pb.available:
+        L(f"    Passing–Bablok (분포무관·이상치에 강건):")
+        L(f"        기울기 = {_num(pb.slope, 4)}  "
+          f"{_ci(*pb.slope_ci, lvl, d=4)}  → 비례편향 {_bias_verdict(pb.proportional_bias)}")
+        L(f"        절편   = {_num(pb.intercept, 4)}  "
+          f"{_ci(*pb.intercept_ci, lvl, d=4)}  → 상수편향 {_bias_verdict(pb.constant_bias)}")
+        if pb.note:
+            L(f"        ※ {pb.note}")
+    elif pb is not None and pb.note:
+        L(f"    Passing–Bablok: 건너뜀 ({pb.note})")
+    if dem is not None and dem.available:
+        lam_note = "직교회귀" if dem.lam == 1.0 else f"λ={_num(dem.lam, 3)}"
+        L(f"    Deming (두 방법 모두 오차 가정, {lam_note}):")
+        L(f"        기울기 = {_num(dem.slope, 4)}  "
+          f"{_ci(*dem.slope_ci, lvl, d=4)}  → 비례편향 {_bias_verdict(dem.proportional_bias)}")
+        L(f"        절편   = {_num(dem.intercept, 4)}  "
+          f"{_ci(*dem.intercept_ci, lvl, d=4)}  → 상수편향 {_bias_verdict(dem.constant_bias)}")
+        if dem.note:
+            L(f"        ※ {dem.note}")
+    elif dem is not None and dem.note:
+        L(f"    Deming: 건너뜀 ({dem.note})")
+    # Predicted systematic bias at a medical decision level (EP09) — the number
+    # a clinician actually uses ("at this level, the two methods differ by …").
+    dp = None
+    if dem is not None and dem.decision_point is not None:
+        dp = dem.decision_point
+    elif pb is not None and pb.decision_point is not None:
+        dp = pb.decision_point
+    if dp is not None:
+        # The regression is always fit on the RAW (absolute) values, so bias(Xc)
+        # is in the methods' absolute units — never the Bland-Altman % unit.
+        L(f"    결정수준 XC={_num(dp, 3)}에서의 예측 계통편향 "
+          f"bias(XC)=절편+(기울기−1)·XC  (절대 단위):")
+        if pb is not None and pb.available and pb.bias_at_dp == pb.bias_at_dp:
+            L(f"        Passing–Bablok: {_num(pb.bias_at_dp, 3)}")
+        if dem is not None and dem.available and dem.bias_at_dp == dem.bias_at_dp:
+            ci_txt = (f"  {_ci(*dem.bias_at_dp_ci, lvl, d=3)}"
+                      if dem.bias_at_dp_ci[0] == dem.bias_at_dp_ci[0] else "")
+            L(f"        Deming: {_num(dem.bias_at_dp, 3)}{ci_txt}")
+        # The acceptance limit compares only in ABSOLUTE mode: in --percent mode
+        # --accept is a percentage limit, incomparable to an absolute bias(Xc).
+        if (res.accept_lower is not None and res.ba.mode == "absolute"
+                and dem is not None and dem.available
+                and dem.bias_at_dp_ci[0] == dem.bias_at_dp_ci[0]):
+            lo, hi = dem.bias_at_dp_ci
+            within = res.accept_lower <= lo and hi <= res.accept_upper
+            L(f"        → Deming bias(XC) {lvl}% CI가 허용한계 "
+              f"[{_num(res.accept_lower, 2)}, {_num(res.accept_upper, 2)}] "
+              + ("안에 있음 ✔ (그 수준에서 교환 가능)"
+                 if within else "밖에 있음 ✗ (그 수준에서 편향이 큼)"))
+        elif (res.accept_lower is not None and res.ba.mode == "percent"
+              and dp is not None):
+            L("        (※ --percent 모드에서는 --accept가 백분율 한계이므로 "
+              "절대 단위 bias(XC)와 직접 비교하지 않습니다.)")
 
 
 def _sentence(res: AnalysisResult) -> str:
@@ -274,6 +351,22 @@ def _sentence(res: AnalysisResult) -> str:
     if ba.prop_bias:
         parts.append(" 다만 비례 편향이 유의하여(차이가 측정값 크기에 의존) "
                      "단일 LoA 해석에는 주의가 필요하다.")
+    pb = res.passing_bablok
+    if pb is not None and pb.available and pb.slope_ci[0] == pb.slope_ci[0]:
+        if pb.proportional_bias and pb.constant_bias:
+            bias_txt = "비례편향과 상수편향이 모두 관찰되었다"
+        elif pb.proportional_bias:
+            bias_txt = "유의한 비례편향이 관찰되었다"
+        elif pb.constant_bias:
+            bias_txt = "유의한 상수편향이 관찰되었다"
+        else:
+            bias_txt = "유의한 비례·상수 편향은 관찰되지 않았다"
+        parts.append(
+            f" Passing–Bablok 회귀에서 기울기는 {_num(pb.slope, 3)}"
+            f"({lvl}% CI {_num(pb.slope_ci[0], 3)}~{_num(pb.slope_ci[1], 3)}), "
+            f"절편은 {_num(pb.intercept, 3)}"
+            f"({lvl}% CI {_num(pb.intercept_ci[0], 3)}~{_num(pb.intercept_ci[1], 3)})"
+            f"로, {bias_txt}.")
     parts.append(" 상관계수만으로는 일치도를 보장할 수 없으므로 위 지표로 판단하였다.")
     return "".join(parts)
 
@@ -367,9 +460,46 @@ def render_json(res: AnalysisResult) -> str:
             "t": _f(res.paired.t), "df": res.paired.df,
             "pvalue": _f(res.paired.pvalue), "mean_diff": _f(res.paired.mean_diff),
         },
+        "regression": {
+            "model": f"{res.name_a} = intercept + slope * {res.name_b}",
+            "deming": _regression_json(res.deming),
+            "passing_bablok": _regression_json(res.passing_bablok),
+        },
         "warnings": res.warnings,
     }
     return json.dumps(d, ensure_ascii=False, indent=2)
+
+
+def _regression_json(reg) -> Any:
+    if reg is None:
+        return {"available": False, "note": "not computed"}
+    if not reg.available:
+        return {"available": False, "note": reg.note}
+    out: Dict[str, Any] = {
+        "available": True,
+        "method": reg.method,
+        "slope": _f(reg.slope),
+        "slope_ci": [_f(reg.slope_ci[0]), _f(reg.slope_ci[1])],
+        "intercept": _f(reg.intercept),
+        "intercept_ci": [_f(reg.intercept_ci[0]), _f(reg.intercept_ci[1])],
+        "proportional_bias": reg.proportional_bias,
+        "constant_bias": reg.constant_bias,
+        "note": reg.note,
+    }
+    if reg.method == "Deming":
+        out["lambda"] = _f(reg.lam)
+    else:
+        out["n_slopes"] = reg.n_slopes
+        out["k_offset"] = reg.k_offset
+    if reg.decision_point is not None:
+        dp: Dict[str, Any] = {
+            "level": _f(reg.decision_point),
+            "bias": _f(reg.bias_at_dp),
+        }
+        if reg.method == "Deming":
+            dp["bias_ci"] = [_f(reg.bias_at_dp_ci[0]), _f(reg.bias_at_dp_ci[1])]
+        out["bias_at_decision_point"] = dp
+    return out
 
 
 def _icc_json(r) -> Dict[str, Any]:
@@ -466,6 +596,38 @@ def render_markdown(res: AnalysisResult) -> str:
                  c.interpretation.split(" / ")[0]])
     rows.append(["Pearson r", _num(res.pearson.r, 3),
                  ci(res.pearson.ci_lower, res.pearson.ci_upper), "context only"])
+    pb = res.passing_bablok
+    if pb is not None and pb.available:
+        rows.append(["Passing–Bablok slope", _num(pb.slope, 3),
+                     ci(*pb.slope_ci),
+                     "prop. bias" if pb.proportional_bias else "slope≈1"])
+        rows.append(["Passing–Bablok intercept", _num(pb.intercept, 3),
+                     ci(*pb.intercept_ci),
+                     "const. bias" if pb.constant_bias else "intercept≈0"])
+    dem = res.deming
+    if dem is not None and dem.available:
+        rows.append(["Deming slope", _num(dem.slope, 3), ci(*dem.slope_ci),
+                     "prop. bias" if dem.proportional_bias else "slope≈1"])
+        rows.append(["Deming intercept", _num(dem.intercept, 3),
+                     ci(*dem.intercept_ci),
+                     "const. bias" if dem.constant_bias else "intercept≈0"])
+    # decision-point predicted bias (absolute units; Deming CI when available)
+    _dp = None
+    if dem is not None and dem.decision_point is not None:
+        _dp = dem.decision_point
+    elif pb is not None and pb.decision_point is not None:
+        _dp = pb.decision_point
+    if _dp is not None and dem is not None and dem.available \
+            and dem.bias_at_dp == dem.bias_at_dp:
+        dp_lo, dp_hi = dem.bias_at_dp_ci
+        dp_ci = ("—" if dp_lo != dp_lo
+                 else f"{_num(dp_lo, 3)} to {_num(dp_hi, 3)}")  # absolute, no unit
+        rows.append([f"Predicted bias at Xc={_num(_dp, 3)} (Deming)",
+                     _num(dem.bias_at_dp, 3), dp_ci, "absolute units"])
+    elif _dp is not None and pb is not None and pb.available \
+            and pb.bias_at_dp == pb.bias_at_dp:
+        rows.append([f"Predicted bias at Xc={_num(_dp, 3)} (Passing–Bablok)",
+                     _num(pb.bias_at_dp, 3), "—", "absolute units"])
     if res.repeat.available:
         rows.append(["Within-subject CV (A / B)",
                      f"{_num(res.repeat.cv_a, 2)}% / {_num(res.repeat.cv_b, 2)}%",

@@ -376,3 +376,106 @@ def test_report_percent_unit_on_ci():
     # the CI must carry the % unit, not just the point estimate
     assert "% CI" in txt
     assert "%," in txt  # e.g. "[95% CI 8.12%, ...]"
+
+
+# --------------------------------------------------------------------------
+# Method-comparison regression (Deming / Passing–Bablok) integration
+# --------------------------------------------------------------------------
+def test_analyze_includes_regression_blocks():
+    a, b = _good_pair()
+    res = run(a, b, name_a="sensor", name_b="band")
+    assert res.deming is not None and res.deming.available
+    assert res.passing_bablok is not None and res.passing_bablok.available
+    txt = render_text(res)
+    assert "방법비교 회귀" in txt
+    assert "Passing–Bablok" in txt and "Deming" in txt
+    js = json.loads(render_json(res))
+    assert js["regression"]["deming"]["available"] is True
+    assert js["regression"]["passing_bablok"]["available"] is True
+    assert "slope" in js["regression"]["deming"]
+
+
+def test_analyze_regression_flags_proportional_bias_warning():
+    # 25% proportional bias -> regression slope CI should exclude 1 and warn
+    import random
+    random.seed(101)
+    x = [random.gauss(50, 15) for _ in range(60)]
+    a = [1.25 * xi + random.gauss(0, 2) for xi in x]  # test
+    b = x                                              # reference
+    res = run(a, b, name_a="test", name_b="ref")
+    assert res.passing_bablok.proportional_bias is True
+    assert any("방법비교 회귀" in w for w in res.warnings)
+    # the paste-ready sentence should mention Passing–Bablok
+    assert "Passing–Bablok 회귀" in render_text(res)
+
+
+def test_analyze_regression_constant_bias_detected():
+    # pure +5 offset: intercept CI excludes 0, slope CI includes 1
+    import random
+    random.seed(202)
+    x = [random.gauss(30, 8) for _ in range(50)]
+    a = [xi + 5.0 + random.gauss(0, 0.5) for xi in x]
+    b = x
+    res = run(a, b, name_a="test", name_b="ref")
+    pb = res.passing_bablok
+    assert pb.constant_bias is True
+    assert pb.slope_ci[0] <= 1.0 <= pb.slope_ci[1]  # no proportional bias
+
+
+def test_analyze_deming_lambda_passthrough():
+    a, b = _good_pair()
+    r1 = run(a, b, deming_lambda=1.0)
+    r4 = run(a, b, deming_lambda=4.0)
+    assert r1.deming.lam == 1.0 and r4.deming.lam == 4.0
+    assert r1.deming.slope != r4.deming.slope
+
+
+def test_analyze_regression_skipped_when_constant():
+    # method B constant -> Deming/PB unavailable but analysis still runs
+    a = [1.0, 2.0, 3.0, 4.0, 5.0]
+    b = [7.0, 7.0, 7.0, 7.0, 7.0]
+    res = run(a, b)
+    assert not res.deming.available
+    assert not res.passing_bablok.available
+    # no crash rendering
+    render_text(res)
+    json.loads(render_json(res))
+
+
+def test_decision_point_bias_never_carries_percent_unit():
+    # regression is always fit on RAW values -> bias(Xc) is absolute, must not
+    # be labelled with the Bland-Altman % unit, and --accept (a % limit in
+    # percent mode) must NOT be compared to the absolute bias(Xc).
+    a = [110, 220, 330, 440, 550, 120, 230, 340]
+    b = [100, 200, 300, 400, 500, 110, 210, 310]
+    res = run(a, b, mode="percent", decision_point=300.0,
+              accept=(-10.0, 10.0))
+    txt = render_text(res)
+    assert "XC=300.000" in txt
+    assert "직접 비교하지 않습니다" in txt  # percent accept comparison skipped
+    # the regression bias value lines must not carry the % unit (ignore the
+    # "95% CI" label inside the bracket, which is not a unit on the value)
+    for line in txt.splitlines():
+        s = line.strip()
+        if s.startswith("Passing–Bablok:") or s.startswith("Deming:"):
+            head = line.split("[")[0]  # drop the "[95% CI ...]" part
+            assert "%" not in head
+
+
+def test_decision_point_accept_verdict_absolute_mode():
+    a = [12.1, 14.0, 16.2, 18.1, 20.0, 13.0, 15.1, 17.2, 19.0, 11.0]
+    b = [12.0, 14.1, 16.0, 18.0, 20.1, 13.1, 15.0, 17.0, 19.1, 11.1]
+    res = run(a, b, decision_point=15.0, accept=(-1.0, 1.0))
+    txt = render_text(res)
+    assert "허용한계" in txt and "bias(XC)" in txt
+
+
+def test_analyze_survives_overflow_magnitudes():
+    # values within dataio's 1e150 cap can overflow ICC/CCC internals; analyze()
+    # must degrade gracefully (warn, NaN) rather than raise OverflowError.
+    a = [1e150, 9e149, 5e149, 8e149, 3e149, 7e149]
+    b = [1.0e150, 9.1e149, 5.2e149, 7.9e149, 3.1e149, 7.2e149]
+    res = run(a, b)  # must not raise
+    txt = render_text(res)
+    json.loads(render_json(res))  # valid JSON
+    assert isinstance(txt, str) and len(txt) > 0
