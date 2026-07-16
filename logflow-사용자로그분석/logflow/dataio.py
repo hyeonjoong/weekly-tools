@@ -1,16 +1,23 @@
-"""CSV 로딩과 타임스탬프 파싱.
+"""이벤트 로그 로딩(CSV/JSONL, gzip 가능)과 타임스탬프 파싱.
 
 이벤트 로그는 최소 3개 열을 가진다고 가정한다: 사용자 ID, 이벤트 이름, 타임스탬프.
-열 이름은 CLI에서 바꿀 수 있다. 타임스탬프는 ISO-8601 문자열이나 epoch(초/밀리초)을
-모두 받아들인다.
+선택적으로 군(arm/group) 열을 더 줄 수 있다. 열 이름은 CLI에서 바꿀 수 있다.
+타임스탬프는 ISO-8601 문자열이나 epoch(초/밀리초)을 모두 받아들인다.
+
+입력 형식은 확장자로 자동 판별한다: `.jsonl`/`.ndjson` 은 한 줄에 JSON 객체 하나,
+그 외는 CSV. 어느 쪽이든 `.gz` 로 압축돼 있으면 투명하게 푼다(내용의 gzip 매직바이트로
+확인하므로 확장자가 없어도 동작).
 """
 
 from __future__ import annotations
 
 import csv
+import gzip
+import io
+import json
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, Iterator, List, Optional, Tuple
 
 # 결측을 뜻하는 흔한 토큰 (pandas/엑셀 CSV 내보내기에서 자주 나옴). 이 값들은 빈 칸처럼 건너뛴다.
 NULL_TOKENS = {"", "nan", "null", "none", "na", "n/a", "#n/a"}
@@ -18,14 +25,21 @@ NULL_TOKENS = {"", "nan", "null", "none", "na", "n/a", "#n/a"}
 # 구분자 자동감지에 시도할 후보들 (엑셀 유럽 로케일의 ';', TSV 의 '\t' 등).
 _DELIM_CANDIDATES = ",;\t|"
 
+# gzip 파일의 매직바이트.
+_GZIP_MAGIC = b"\x1f\x8b"
+
+# 지원하는 입력 형식.
+INPUT_FORMATS = ("auto", "csv", "jsonl")
+
 
 @dataclass(frozen=True)
 class Event:
-    """로그 한 줄: 누가(user), 무엇을(name), 언제(ts)."""
+    """로그 한 줄: 누가(user), 무엇을(name), 언제(ts), (선택) 어느 군(group)."""
 
     user: str
     name: str
     ts: datetime
+    group: Optional[str] = None
 
 
 def parse_timestamp(raw: str) -> datetime:
