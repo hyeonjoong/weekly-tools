@@ -1,5 +1,11 @@
 #!/bin/bash
 cd "$(dirname "$0")"
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "⚠ python3 가 설치되어 있지 않습니다."
+    echo "  https://www.python.org 에서 Python 3을 설치한 뒤 다시 실행하세요."
+    read -p "엔터를 누르면 창이 닫힙니다..."
+    exit 1
+fi
 echo "============================================================"
 echo "  factorscan — 설문 척도 요인분석·타당도 진단기"
 echo "  KMO · Bartlett · 요인 수(고유값/평행분석) · 적재량 · 문항-총점"

@@ -102,15 +102,18 @@ def render(res: Dict) -> str:
 
     # --- 적재량 ---
     A("")
-    rot = "Varimax 회전 후" if res["rotation"] == "varimax" else "비회전"
-    A(f"[ 3. 요인 적재량 ({rot}) · 공통성 · 문항-총점 상관 ]")
+    rot = {"varimax": "Varimax 회전 후", "promax": "Promax 사교회전 후"}.get(
+        res["rotation"], "비회전")
+    extr = {"principal_component": "주성분(PCA)"}.get(res.get("extraction"), res.get("extraction", "주성분(PCA)"))
+    A(f"[ 3. 요인 적재량 ({rot}, 추출={extr}) · 공통성 · MSA · 문항-총점 ]")
     kf = res["n_factors"]
     header = "  " + _pad("문항", 18) + "".join(f"  F{j+1:<5}" for j in range(kf))
-    header += "  공통성   문항-총점"
+    header += "  공통성    MSA   요인총점"
     A(header)
     load = res["loadings"]
     comm = res["communalities"]
-    it = res["item_total"]
+    # 문항-총점은 소속 요인(하위척도) 기준. 구버전 키 호환도 유지.
+    it = res.get("item_total_by_factor") or res.get("item_total")
     ml = res.get("min_loading", 0.40)
     flags = {f["item"]: f for f in res["item_flags"]}
     for i, name in enumerate(res["items"]):
@@ -120,14 +123,41 @@ def render(res: Dict) -> str:
             v = load[i][j]
             star = "*" if abs(v) >= ml else " "
             cells += f" {v:>6.3f}{star}"
-        primary = flags[name]["primary_factor"]
-        row = f"  {disp}{cells}  {comm[i]:>6.3f}  {_fmt(it[i], width=8)}"
+        fl = flags[name]
+        primary = fl["primary_factor"]
+        row = (f"  {disp}{cells}  {comm[i]:>6.3f}  "
+               f"{_fmt(fl.get('msa'), width=6)}  {_fmt(it[i], width=8)}")
         A(row + f"   →F{primary}")
     ssv = res["ss_prop_variance"]
     A("  " + "-" * 62)
     ss_cells = "".join(f" {res['ss_loadings'][j]:>6.3f} " for j in range(kf))
     A("  " + _pad("적재제곱합(SS)", 18) + ss_cells)
     A(f"  요인별 설명분산%: " + "  ".join(f"F{j+1}={ssv[j]*100:.1f}%" for j in range(kf)))
+
+    om = res.get("omega")
+    if om:
+        A("  요인별 신뢰도(McDonald ω): " + "  ".join(
+            (f"F{j+1}={om[j]:.3f}" if j < len(om) and om[j] is not None else f"F{j+1}=—")
+            for j in range(kf)))
+    resid = res.get("residual")
+    if resid and resid.get("n_resid"):
+        th = resid.get("threshold", 0.05)
+        A(f"  모형 적합: RMSR={resid['rmsr']:.3f}  "
+          f"(|잔차|>{th:.2f} 인 비중복잔차 {resid['n_large']}/{resid['n_resid']}"
+          f" = {resid['prop_large']*100:.0f}%)")
+
+    # 요인 간 상관(사교 promax 추정/실제): 직교 가정이 타당한지 판단 근거
+    fc = res.get("factor_correlation")
+    if fc and kf >= 2:
+        label = "promax 실제" if res["rotation"] == "promax" else "promax 추정"
+        if res["rotation"] == "promax":
+            A("  (위 표는 패턴적재; 공통성·ω·설명분산은 구조행렬 S=PΦ 기준)")
+        A(f"  요인 간 상관행렬 ({label}):")
+        head = "        " + "".join(f"  F{j+1:<5}" for j in range(kf))
+        A(head)
+        for i in range(kf):
+            cells = "".join(f" {fc[i][j]:>6.3f} " for j in range(kf))
+            A(f"    F{i+1}{cells}")
 
     # --- 문제 문항 ---
     A("")
@@ -146,5 +176,9 @@ def render(res: Dict) -> str:
     A("")
     A(f"해석 도움말: KMO>0.6 · Bartlett p<0.05 이면 요인분석 적합. "
       f"적재량 |{ml:.2f}| 이상(*)을 주요 적재로 봅니다.")
-    A("공통성<0.3, 문항-총점<0.3, 교차적재 문항은 제거/수정을 검토하세요.")
+    A("공통성<0.3, 문항-총점<0.3, MSA<0.5, 교차적재 문항은 제거/수정을 검토하세요.")
+    A("추출은 주성분(PCA, SPSS 기본). '요인총점'·요인별 ω는 문항을 |적재|최대 요인에 배정(argmax)해 계산하므로")
+    A("교차·저적재 문항은 배정이 불안정합니다(참고용). 전체합 기준 문항-총점은 JSON item_total_overall 참고.")
+    A("RMSR은 작을수록(대략 <0.08) 적합이 좋습니다(PCA라 다소 큼). ω는 PCA 기반 근사로 공통요인 ω·α보다")
+    A("높게(낙관적) 나오는 경향이 있으니 'PCA 기반 ω(근사)'로 보고하세요(대략 ≥0.70 권장).")
     return "\n".join(L)

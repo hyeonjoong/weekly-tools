@@ -42,10 +42,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--scale-max", type=float, help="리커트 최댓값(역문항 재점수화용)")
     p.add_argument("--na", action="append", default=[], metavar="값",
                    help="결측으로 처리할 추가 문자열(여러 번 지정 가능)")
+    p.add_argument("--encoding", default="utf-8-sig",
+                   help="CSV 인코딩(기본 utf-8-sig; 한국어 엑셀 파일은 cp949/euc-kr)")
     p.add_argument("-k", "--n-factors", type=int,
                    help="유지할 요인 수(미지정 시 평행분석 기준, 평행분석 끄면 Kaiser)")
-    p.add_argument("--rotation", choices=["varimax", "none"], default="varimax",
-                   help="회전 방식(기본 varimax)")
+    p.add_argument("--rotation", choices=["varimax", "promax", "none"], default="varimax",
+                   help="회전 방식: varimax(직교, 기본) · promax(사교, 요인상관 허용) · none")
     p.add_argument("--parallel-iter", type=int, default=100,
                    help="평행분석 반복수(0이면 생략, 기본 100)")
     p.add_argument("--seed", type=int, default=42, help="평행분석 난수 시드(재현용)")
@@ -69,7 +71,37 @@ def _sanitize(obj):
 
 def _load_config(path: str) -> dict:
     with open(path, encoding="utf-8") as fh:
-        return json.load(fh)
+        cfg = json.load(fh)
+    if not isinstance(cfg, dict):
+        raise ConfigError("설정 파일 최상위는 JSON 객체({ ... })여야 합니다.")
+    return cfg
+
+
+class ConfigError(Exception):
+    """설정 파일 구조 오류."""
+
+
+def _cfg_list(cfg: dict, key: str) -> List[str]:
+    """설정의 리스트 필드를 안전하게 문자열 리스트로 정규화(문자열 하나면 쉼표분리)."""
+    v = cfg.get(key)
+    if v is None:
+        return []
+    if isinstance(v, str):
+        return _split_list(v)
+    if isinstance(v, (list, tuple)):
+        return [str(x).strip() for x in v if str(x).strip()]
+    raise ConfigError(f"설정의 '{key}'는 문자열 목록이어야 합니다.")
+
+
+def _cfg_scale_range(cfg: dict):
+    if "scale_range" not in cfg:
+        return None, None
+    sr = cfg["scale_range"]
+    if (not isinstance(sr, (list, tuple)) or len(sr) != 2
+            or not all(isinstance(x, (int, float)) and not isinstance(x, bool)
+                       and math.isfinite(x) for x in sr)):
+        raise ConfigError("설정의 'scale_range'는 [최솟값, 최댓값] 형태의 유한한 숫자 2원소 배열이어야 합니다.")
+    return float(sr[0]), float(sr[1])
 
 
 def run(argv: Optional[List[str]] = None) -> int:
@@ -83,17 +115,33 @@ def run(argv: Optional[List[str]] = None) -> int:
     if args.config:
         try:
             cfg = _load_config(args.config)
-        except (OSError, json.JSONDecodeError) as exc:
+            items = items or _cfg_list(cfg, "items")
+            id_cols = id_cols or _cfg_list(cfg, "id_cols")
+            reverse = reverse or _cfg_list(cfg, "reverse")
+            if scale_min is None:
+                cmin, cmax = _cfg_scale_range(cfg)
+                if cmin is not None:
+                    scale_min, scale_max = cmin, cmax
+        except (OSError, json.JSONDecodeError, ConfigError) as exc:
             print(f"설정 파일 오류: {exc}", file=sys.stderr)
             return 2
-        items = items or cfg.get("items", [])
-        id_cols = id_cols or cfg.get("id_cols", [])
-        reverse = reverse or cfg.get("reverse", [])
-        if scale_min is None and "scale_range" in cfg:
-            scale_min, scale_max = cfg["scale_range"]
+
+    # 인자 값 검증(잘못된 임계값/범위를 조용히 통과시키지 않음)
+    if not (0.0 <= args.min_loading <= 1.0):
+        print("오류: --min-loading 은 0.0~1.0 사이여야 합니다.", file=sys.stderr)
+        return 2
+    if scale_min is not None and scale_max is not None and scale_min >= scale_max:
+        print(f"오류: --scale-min({scale_min:g})은 --scale-max({scale_max:g})보다 작아야 합니다.",
+              file=sys.stderr)
+        return 2
 
     try:
-        columns = load_csv(args.csv, na_values=args.na)
+        columns = load_csv(args.csv, na_values=args.na, encoding=args.encoding)
+        # 지정한 ID 열이 실제로 없으면(오타·인코딩 깨짐) 조용히 넘기지 말고 알린다.
+        unknown_id = [c for c in id_cols if c not in columns]
+        if unknown_id:
+            print(f"⚠ 경고: --id-col 로 지정한 열이 CSV에 없습니다: {', '.join(unknown_id)}. "
+                  f"열 이름/인코딩(--encoding)을 확인하세요.", file=sys.stderr)
         ds: Dataset = select_items(columns, items=items or None,
                                    id_cols=id_cols, na_values=args.na)
         if reverse:
