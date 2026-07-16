@@ -130,7 +130,18 @@ agreestat data.csv -a watch -b ecg --json           # 기계 판독용 JSON
 | `--name-a`, `--name-b` | 리포트에 표시할 이름 |
 | `--percent` | 백분율 Bland–Altman |
 | `--alpha 0.05` | 유의수준 / 신뢰구간 폭 (기본 0.05 → 95% CI) |
+| `--accept DELTA` | 사전 설정한 임상 허용한계 ±DELTA. 95% LoA가 그 안이면 **교환가능(interchangeable)** 판정을 출력 (`--accept-lower/--accept-upper`로 비대칭 지정 가능) |
+| `--target-loa-hw H` | 목표 LoA CI 반너비 H. 그 정밀도 달성에 필요한 표본수 n을 계산 |
+| `--encoding` | 입력 CSV 인코딩 (기본: 자동 감지 — UTF-8/UTF-16/CP949/EUC-KR) |
 | `--json` | JSON으로 출력 |
+| `--markdown [PATH]` | 결과를 논문 부록용 마크다운 표로 출력(경로 생략 시 화면) |
+| `--plot-data PATH` | Bland–Altman 플롯 데이터(mean, diff)를 CSV로 저장(R/Excel/Python에서 바로 작도) |
+| `--svg PATH` | Bland–Altman 플롯을 SVG 파일로 저장(외부 라이브러리 없이) |
+
+> **임상 허용한계 예시:** `agreestat data.csv -a watch -b ecg --accept 5` 는 "두 방법의 차이가
+> ±5 이내면 임상적으로 교환 가능"이라는 사전 기준에 대해, 95% LoA가 그 한계 안에 드는지
+> 판정하고 논문용 문장에 결론까지 넣어 줍니다. 숫자만 내는 게 아니라 **연구자가 실제로 내려야
+> 하는 결정**(교환 가능 여부)을 직접 지원합니다.
 
 ---
 
@@ -140,7 +151,17 @@ agreestat data.csv -a watch -b ecg --json           # 기계 판독용 JSON
   bias의 CI는 t분포로, 각 LoA의 CI는 `Var(LoA)=s²[1/n + 1.96²/(2(n−1))]`
   (Bland & Altman 1999)로 계산합니다. 차이를 평균에 회귀시켜 **비례 편향**(기울기≠0)을
   검정하고, 유의하면 경고합니다. `--percent`는 차이를 `100·(A−B)/mean`으로 바꿔
-  비례오차 데이터에 대응합니다.
+  비례오차 데이터에 대응합니다. LoA 밖 관측치 비율(정규성 하 ~5% 기대)과 LoA 추정
+  정밀도(각 LoA CI의 반너비)도 함께 보고합니다.
+- **비례 편향이 감지되면** 회귀 기반 LoA(Bland & Altman 1999 §3)를 자동 계산합니다:
+  차이를 평균에 회귀하고 잔차의 SD를 평균의 함수로 모형화(×√(π/2)=1.253)해
+  `LoA(mean) = D(mean) ± 1.96·s(mean)`을 산출합니다.
+- **반복측정(개인당 여러 쌍)이 감지되면** 반복측정 보정 LoA(Bland & Altman 2007)를
+  계산해 **권장 지표로 headline**합니다. 분산성분(σ_b²+σ_w²)으로 within-subject 상관을
+  반영하므로, 각 행을 독립으로 가정한 naive LoA의 지나치게 좁은 CI 문제를 해결합니다
+  (수면 디바이스처럼 개인당 여러 epoch가 있는 데이터의 올바른 방법).
+- **임상 허용한계(`--accept`)**를 주면 95% LoA가 그 안에 드는지로 **교환가능 여부**를
+  판정하고, **필요 표본수(`--target-loa-hw`)**는 목표 LoA-CI 정밀도로부터 역산합니다.
 - **ICC**: 피험자 × 방법(2열) 이원배치 ANOVA의 평균제곱에서
   **ICC(2,1)**(이원 랜덤, 절대일치, 단일측정)과 **ICC(3,1)**(이원 혼합, 일관성)을
   계산합니다. CI는 F 기반 정확법(Shrout & Fleiss 1979; McGraw & Wong 1996).
@@ -159,16 +180,24 @@ agreestat data.csv -a watch -b ecg --json           # 기계 판독용 JSON
 - **상관(r)은 일치도가 아닙니다.** r=0.99여도 한 방법이 다른 방법보다 항상 +5만큼
   크면 두 방법은 바꿔 쓸 수 없습니다. 판단은 Bland–Altman/ICC/CCC로 하세요.
 - ICC(2,1)의 CI는 표본이 작거나 계통차가 크면 매우 넓어질 수 있습니다(정상입니다).
+  **점추정이 아니라 신뢰구간 하한으로 등급을 판단하세요(Koo & Li 2016).** 도구도
+  점추정 등급이 CI 하한 등급보다 높으면 경고하고, 논문용 문장은 CI 하한 기준으로 등급을 씁니다.
 - 반복측정이 있으면 각 행을 독립으로 가정한 기본 LoA가 **좁게** 나올 수 있습니다.
   도구가 이를 감지해 경고하며, 필요하면 반복측정용 방법(Bland & Altman 2007)을 쓰세요.
-- 한 방법의 분산이 0(모두 같은 값)이면 ICC/CCC/Pearson이 정의되지 않아 해당 값은
-  `NaN`(JSON에서는 `null`)으로 나오고 경고합니다.
+- 한 방법의 분산이 0(모두 같은 값)이면 **Pearson r과 그 신뢰구간, CCC의 신뢰구간**이
+  정의되지 않아 `NaN`(JSON에서는 `null`)으로 나옵니다. ICC/CCC 점추정은 퇴화(degenerate)값
+  (예: CCC=0, ICC≈0)이 나올 수 있어 신뢰할 수 없으므로, 도구가 경고하고 **논문용 문장에서는
+  ICC/CCC를 제외**합니다. (Bland–Altman의 bias·LoA와 그 신뢰구간은 여전히 계산됩니다.)
+- 입력에 `inf`·`-inf`·`1e999`(→무한대) 같은 비정상 수치가 있으면 해당 쌍을 제외하고
+  개수를 경고합니다(한 셀의 무한대가 전체 통계를 오염시키지 못하도록).
+- 한국어 Excel에서 저장한 CSV는 보통 CP949/EUC-KR 인코딩입니다 — 자동 감지하며,
+  안 되면 `--encoding cp949`로 지정하세요.
 - 이 도구는 계산을 자동화하지만 최종 판단은 연구자의 몫입니다 — 경고를 꼭 확인하세요.
 
 ## Tests
 
 ```bash
-python3 -m pytest -q    # 61개 테스트, 전부 오프라인
+python3 -m pytest -q    # 160개 테스트, 전부 오프라인
 ```
 
 ICC는 Shrout & Fleiss(1979) 공개 예제와 1e-9, Bland–Altman·CCC는 손계산 값과 일치하며,

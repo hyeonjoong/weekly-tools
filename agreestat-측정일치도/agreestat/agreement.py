@@ -30,6 +30,8 @@ __all__ = [
     "mean",
     "variance",
     "BlandAltmanResult",
+    "RegressionLoA",
+    "RepeatedMeasuresBA",
     "ICCResult",
     "CCCResult",
     "RepeatabilityResult",
@@ -40,6 +42,7 @@ __all__ = [
     "icc",
     "ccc",
     "repeatability",
+    "repeated_measures_ba",
     "pearson",
     "paired_t",
     "interpret_icc",
@@ -69,6 +72,28 @@ def _sd(x: Sequence[float], ddof: int = 1) -> float:
 # --------------------------------------------------------------------------
 # Bland-Altman
 # --------------------------------------------------------------------------
+_SQRT_HALF_PI = math.sqrt(math.pi / 2.0)  # 1.2533..., E|N(0,s)| = s*sqrt(2/pi)
+
+
+@dataclass
+class RegressionLoA:
+    """Mean-dependent (regression-based) LoA for proportional bias (B&A 1999 §3)."""
+    available: bool
+    note: str = ""
+    diff_intercept: float = float("nan")   # b0 in D(m) = b0 + b1*m
+    diff_slope: float = float("nan")       # b1
+    sd_intercept: float = float("nan")     # c0 in s(m) = 1.253*(c0 + c1*m)
+    sd_slope: float = float("nan")         # c1
+    factor: float = _SQRT_HALF_PI
+    mean_min: float = float("nan")
+    mean_max: float = float("nan")
+    loa_at_min: Tuple[float, float] = (float("nan"), float("nan"))
+    loa_at_max: Tuple[float, float] = (float("nan"), float("nan"))
+    fit_at_min: float = float("nan")
+    fit_at_max: float = float("nan")
+    sd_negative_warning: bool = False
+
+
 @dataclass
 class BlandAltmanResult:
     n: int
@@ -86,6 +111,39 @@ class BlandAltmanResult:
     prop_pvalue: float
     prop_bias: bool
     alpha: float
+    n_outside: int = 0        # points falling outside the 95% LoA
+    pct_outside: float = 0.0  # 100 * n_outside / n
+    se_loa: float = float("nan")            # SE of each estimated limit
+    loa_ci_halfwidth: float = float("nan")  # tcrit * se_loa
+    reg_loa: Optional["RegressionLoA"] = None
+    means: List[float] = field(default_factory=list)
+    diffs: List[float] = field(default_factory=list)
+
+
+def _regression_loa(means: Sequence[float], diffs: Sequence[float],
+                    slope: float, intercept: float) -> RegressionLoA:
+    """Regression-based LoA (Bland & Altman 1999 §3): D(m)=b0+b1*m, and the
+    residual SD modelled linearly in m via 1.253*|residual| regressed on m."""
+    n = len(means)
+    if n < 3:
+        return RegressionLoA(False, "need >=3 points for regression LoA")
+    resid = [d - (intercept + slope * m) for d, m in zip(diffs, means)]
+    c1, c0, _p = _ols_slope_test(means, [abs(r) for r in resid])
+    if c1 != c1:  # NaN -> no spread in means
+        return RegressionLoA(False, "mean has no spread")
+    m_min, m_max = min(means), max(means)
+    warn = False
+    out = {}
+    for tag, m in (("min", m_min), ("max", m_max)):
+        fit = intercept + slope * m
+        s = _SQRT_HALF_PI * (c0 + c1 * m)
+        if s < 0.0:
+            s = 0.0
+            warn = True
+        out[tag] = (fit, (fit - _Z_LOA * s, fit + _Z_LOA * s))
+    return RegressionLoA(
+        True, "", intercept, slope, c0, c1, _SQRT_HALF_PI, m_min, m_max,
+        out["min"][1], out["max"][1], out["min"][0], out["max"][0], warn)
 
 
 def _ols_slope_test(x: Sequence[float], y: Sequence[float]
@@ -149,15 +207,25 @@ def bland_altman(a: Sequence[float], b: Sequence[float], alpha: float = 0.05,
     loa_lower_ci = (loa_lower - tcrit * se_loa, loa_lower + tcrit * se_loa)
     loa_upper_ci = (loa_upper - tcrit * se_loa, loa_upper + tcrit * se_loa)
 
+    loa_ci_halfwidth = tcrit * se_loa
+
     slope, intercept, p_slope = _ols_slope_test(means, diffs)
     prop_bias = (p_slope == p_slope) and (p_slope < alpha)  # not NaN and sig
+
+    reg_loa = _regression_loa(means, diffs, slope, intercept) if prop_bias else None
+
+    n_outside = sum(1 for d in diffs if d < loa_lower or d > loa_upper)
+    pct_outside = 100.0 * n_outside / n
 
     return BlandAltmanResult(
         n=n, mode=mode, unit=unit, bias=bias, sd_diff=sd,
         loa_lower=loa_lower, loa_upper=loa_upper, bias_ci=bias_ci,
         loa_lower_ci=loa_lower_ci, loa_upper_ci=loa_upper_ci,
         prop_slope=slope, prop_intercept=intercept, prop_pvalue=p_slope,
-        prop_bias=prop_bias, alpha=alpha)
+        prop_bias=prop_bias, alpha=alpha,
+        n_outside=n_outside, pct_outside=pct_outside,
+        se_loa=se_loa, loa_ci_halfwidth=loa_ci_halfwidth, reg_loa=reg_loa,
+        means=list(means), diffs=list(diffs))
 
 
 # --------------------------------------------------------------------------
@@ -262,18 +330,27 @@ def icc(rows: Sequence[Sequence[float]], alpha: float = 0.05
     # ---- ICC(2,1): absolute agreement, two-way random, single measures ----
     denom2 = msr + (k - 1) * mse + (k / n) * (msc - mse)
     v2 = (msr - mse) / denom2 if denom2 != 0 else float("nan")
-    if math.isfinite(v2) and 0.0 < v2 < 1.0 and mse > 0:
+    # The McGraw & Wong exact CI is valid for the whole admissible range,
+    # including non-positive point estimates (verified vs pingouin); only
+    # exclude v2==1 (Satterthwaite denominator blows up) and mse==0.
+    if math.isfinite(v2) and v2 < 1.0 and mse > 0:
         a = (k * v2) / (n * (1.0 - v2))
         bb = 1.0 + (k * v2 * (n - 1)) / (n * (1.0 - v2))
         vnum = (a * msc + bb * mse) ** 2
         vden = (a * msc) ** 2 / (k - 1) + (bb * mse) ** 2 / ((n - 1) * (k - 1))
         v = vnum / vden if vden > 0 else float("nan")
-        if math.isfinite(v) and v > 0:
+        if math.isfinite(v) and v > 1e-6:
             fu_c = f_ppf(1.0 - alpha / 2.0, df1, v)
             fl_c = f_ppf(1.0 - alpha / 2.0, v, df1)
             common = k * msc + (k * n - k - n) * mse
             lo2 = n * (msr - fu_c * mse) / (fu_c * common + n * msr)
             hi2 = n * (fl_c * msr - mse) / (common + n * fl_c * msr)
+            # Guard the degenerate strongly-negative-ICC region where the
+            # Satterthwaite df collapses and the "CI" would exclude the point
+            # estimate or pinch to a point (pingouin returns NaN here too).
+            if not (math.isfinite(lo2) and math.isfinite(hi2)
+                    and lo2 < hi2 and lo2 - 1e-9 <= v2 <= hi2 + 1e-9):
+                lo2 = hi2 = float("nan")
         else:
             lo2 = hi2 = float("nan")
     else:
@@ -425,6 +502,98 @@ def repeatability(a: Sequence[float], b: Sequence[float],
     rc_b = 1.96 * math.sqrt(2.0) * sw_b if sw_b == sw_b else float("nan")
     return RepeatabilityResult(
         True, "", n_subjects, max(rep_a, rep_b), sw_a, sw_b, cv_a, cv_b, rc_a, rc_b)
+
+
+# --------------------------------------------------------------------------
+# Repeated-measures Bland-Altman (Bland & Altman 2007)
+# --------------------------------------------------------------------------
+@dataclass
+class RepeatedMeasuresBA:
+    """LoA accounting for within-subject correlation (Bland & Altman 2007).
+
+    When each subject contributes several paired measurements, the naive LoA
+    treat correlated rows as independent (too-narrow CI, biased SD on
+    unbalanced designs). This variance-components version is the correct one.
+    """
+    available: bool
+    note: str = ""
+    n_subjects: int = 0
+    n_pairs: int = 0
+    n_replicated_subjects: int = 0      # subjects contributing >=2 pairs
+    bias: float = float("nan")
+    sd_diff: float = float("nan")       # sqrt(var_between + var_within)
+    var_between: float = float("nan")
+    var_within: float = float("nan")
+    m0: float = float("nan")
+    loa_lower: float = float("nan")
+    loa_upper: float = float("nan")
+    loa_lower_ci: Tuple[float, float] = (float("nan"), float("nan"))
+    loa_upper_ci: Tuple[float, float] = (float("nan"), float("nan"))
+    var_between_clamped: bool = False
+
+
+def repeated_measures_ba(a: Sequence[float], b: Sequence[float],
+                         subjects: Optional[Sequence[str]],
+                         mode: str = "absolute", alpha: float = 0.05
+                         ) -> RepeatedMeasuresBA:
+    """Repeated-measures LoA (Bland & Altman 2007, 'true value varies' case)."""
+    if subjects is None:
+        return RepeatedMeasuresBA(False, "no subject-id column supplied")
+
+    means = [(x + y) / 2.0 for x, y in zip(a, b)]
+    if mode == "percent":
+        if any(m == 0.0 for m in means):
+            return RepeatedMeasuresBA(
+                False, "percentage undefined: a pair has mean 0")
+        all_diffs = [100.0 * (x - y) / m for x, y, m in zip(a, b, means)]
+    else:
+        all_diffs = [x - y for x, y in zip(a, b)]
+
+    by_subj: Dict[str, List[float]] = {}
+    for s, d in zip(subjects, all_diffs):
+        by_subj.setdefault(s, []).append(d)
+
+    n = len(by_subj)
+    N = len(all_diffs)
+    n_rep = sum(1 for v in by_subj.values() if len(v) >= 2)
+    if n_rep == 0:
+        return RepeatedMeasuresBA(
+            False, "no subject has replicate measurements", n, N)
+    if n < 2:
+        return RepeatedMeasuresBA(
+            False, "need >=2 subjects for repeated-measures LoA", n, N)
+
+    grand = sum(all_diffs) / N
+    ssb = sum(len(v) * (mean(v) - grand) ** 2 for v in by_subj.values())
+    ssw = sum(sum((d - mean(v)) ** 2 for d in v) for v in by_subj.values())
+    df_b = n - 1
+    df_w = N - n
+    msb = ssb / df_b
+    msw = ssw / df_w if df_w > 0 else float("nan")
+    sum_mi2 = sum(len(v) ** 2 for v in by_subj.values())
+    m0 = (N - sum_mi2 / N) / (n - 1)
+
+    var_within = msw if msw == msw else 0.0
+    var_between = (msb - var_within) / m0 if m0 > 0 else float("nan")
+    clamped = False
+    if var_between == var_between and var_between < 0.0:
+        var_between = 0.0
+        clamped = True
+
+    total_var = var_between + var_within
+    sd_diff = math.sqrt(total_var) if total_var >= 0 else float("nan")
+    loa_lower = grand - _Z_LOA * sd_diff
+    loa_upper = grand + _Z_LOA * sd_diff
+
+    # CI on the LoA uses the SUBJECT count (not N) — approximate.
+    se_loa = sd_diff * math.sqrt(1.0 / n + _Z_LOA ** 2 / (2.0 * (n - 1)))
+    tcrit = t_ppf(1.0 - alpha / 2.0, n - 1)
+    loa_lower_ci = (loa_lower - tcrit * se_loa, loa_lower + tcrit * se_loa)
+    loa_upper_ci = (loa_upper - tcrit * se_loa, loa_upper + tcrit * se_loa)
+
+    return RepeatedMeasuresBA(
+        True, "", n, N, n_rep, grand, sd_diff, var_between, var_within, m0,
+        loa_lower, loa_upper, loa_lower_ci, loa_upper_ci, clamped)
 
 
 # --------------------------------------------------------------------------

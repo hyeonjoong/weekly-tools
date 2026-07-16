@@ -35,4 +35,10 @@ echo ""
 run examples/hrv_rmssd_proportional.csv -a watch_rmssd_ms -b ecg_rmssd_ms -s subject
 
 echo ""
+echo "### 예제 3) 임상 허용한계 ±2 brpm — 교환가능(interchangeable) 판정 + 마크다운 표"
+echo "\$ agreestat examples/resp_rate_good.csv -a contactless_brpm -b band_brpm --accept 2 --markdown"
+echo ""
+run examples/resp_rate_good.csv -a contactless_brpm -b band_brpm --accept 2 --markdown
+
+echo ""
 read -p "엔터를 누르면 창이 닫힙니다..."

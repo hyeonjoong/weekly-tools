@@ -106,3 +106,273 @@ def test_percent_mode_end_to_end():
     assert res.ba.unit == "%"
     txt = render_text(res)
     assert "백분율" in txt
+
+
+# --------------------------------------------------------------------------
+# Acceptance limits / interchangeability verdict
+# --------------------------------------------------------------------------
+def test_accept_interchangeable():
+    a = list(range(1, 21))
+    b = [x + 0.1 for x in a]  # tiny, consistent offset
+    res = run(a, b, accept=(-1.0, 1.0))
+    assert res.interchangeable is True
+    assert any("교환가능" in w for w in res.warnings)
+    obj = json.loads(render_json(res))
+    assert obj["acceptance"]["interchangeable"] is True
+    assert obj["acceptance"]["lower"] == -1.0
+
+
+def test_accept_not_interchangeable():
+    a = list(range(1, 21))
+    b = [x * 1.4 for x in a]  # growing difference
+    res = run(a, b, accept=(-0.5, 0.5))
+    assert res.interchangeable is False
+    txt = render_text(res)
+    assert "교환 불가" in txt
+
+
+def test_accept_absent_by_default():
+    res = run([1, 2, 3, 4], [1.1, 2.1, 2.9, 4.2])
+    assert res.interchangeable is None
+    obj = json.loads(render_json(res))
+    assert obj["acceptance"]["interchangeable"] is None
+
+
+# --------------------------------------------------------------------------
+# Warnings: CI-based grade, non-finite, percent-mode near-zero mean
+# --------------------------------------------------------------------------
+def test_sentence_grades_from_ci_lower_not_point():
+    # Regression pin for the flagship Koo & Li fix. The HRV example has a high
+    # ICC(2,1) point (~0.92) but a CI lower bound (~0.009) that grades "poor",
+    # so the sentence MUST say '낮음' (from the CI lower bound), never '매우 좋음'.
+    from agreestat.dataio import load_pairs
+    d = load_pairs("examples/hrv_rmssd_proportional.csv",
+                   "watch_rmssd_ms", "ecg_rmssd_ms", "subject")
+    res = run(d.a, d.b, subjects=d.subjects, name_a=d.name_a, name_b=d.name_b)
+    assert res.icc21.value > 0.9 and res.icc21.ci_lower < 0.5  # grades must differ
+    txt = render_text(res)
+    sentence = txt.split("논문용 문장")[1]
+    assert "'낮음' 수준" in sentence
+    assert "매우 좋음" not in sentence
+    assert any("Koo & Li" in w for w in res.warnings)
+
+
+def test_percent_sign_mixed_means_warns():
+    a = [-10, -5, 5, 10, 15]
+    b = [-11, -4, 6, 9, 16]
+    res = run(a, b, mode="percent")
+    assert any("부호가 섞" in w for w in res.warnings)
+
+
+# --------------------------------------------------------------------------
+# Repeated-measures LoA + precision + markdown/plot outputs
+# --------------------------------------------------------------------------
+def test_repeated_measures_headlines_in_report_and_sentence():
+    a = [10, 12, 13, 20, 24, 22, 30, 33, 31, 40, 44, 42]
+    b = [10, 11, 12, 20, 21, 20, 30, 31, 30, 40, 41, 40]
+    subs = ["A", "A", "A", "B", "B", "B", "C", "C", "C", "D", "D", "D"]
+    res = run(a, b, subjects=subs)
+    assert res.rm_ba is not None and res.rm_ba.available
+    txt = render_text(res)
+    assert "[2c] 반복측정 보정 LoA" in txt
+    assert any("반복측정 보정 LoA" in w for w in res.warnings)
+    sentence = txt.split("논문용 문장")[1]
+    assert "반복측정 보정" in sentence
+    obj = json.loads(render_json(res))
+    assert obj["bland_altman_repeated_measures"]["available"] is True
+    assert obj["bland_altman_repeated_measures"]["variance_components"]["m0"] == 3.0
+
+
+def test_precision_required_n_and_json():
+    a = [14.2, 15.1, 11.9, 13.0, 16.4, 12.2, 18.1, 10.5, 19.3, 13.8]
+    b = [14.0, 14.8, 12.2, 12.9, 16.1, 12.5, 17.8, 10.9, 19.0, 13.5]
+    res = run(a, b, target_loa_hw=0.5)
+    assert res.precision_required_n is not None and res.precision_required_n >= 2
+    txt = render_text(res)
+    assert "LoA 추정 정밀도" in txt and "필요 표본" in txt
+    obj = json.loads(render_json(res))
+    assert obj["precision"]["required_n"] == res.precision_required_n
+    assert obj["precision"]["target_halfwidth"] == 0.5
+
+
+def test_ci_lower_grade_in_json():
+    a, b = _good_pair()
+    obj = json.loads(render_json(run(a, b)))
+    assert obj["icc"]["ci_lower_grade"] is not None
+    # perfect agreement (a==b) -> mse=0 -> NaN ICC CI -> grade is null
+    obj2 = json.loads(render_json(run([1, 2, 3, 4, 5, 6], [1, 2, 3, 4, 5, 6])))
+    assert obj2["icc"]["ci_lower_grade"] is None
+
+
+def test_accept_percent_mode_verdict():
+    a = [110, 220, 330, 440, 550]
+    b = [100, 200, 300, 400, 500]  # ~10% high
+    res = run(a, b, mode="percent", accept=(-15.0, 15.0))
+    assert res.interchangeable is True
+    txt = render_text(res)
+    assert "%" in txt and "교환가능" in txt
+
+
+def _rm_pair():
+    a = [1, 2, 3, 2, 3, 4, 3, 4, 5, 4, 5, 6, 5, 6, 7]
+    b = [1.1, 1.9, 3.2, 1.8, 3.1, 4.2, 3.1, 3.9, 5.1, 4.2, 4.8, 6.1, 5.1, 5.9, 7.2]
+    subs = ["A"] * 3 + ["B"] * 3 + ["C"] * 3 + ["D"] * 3 + ["E"] * 3
+    return a, b, subs
+
+
+def test_interchangeability_verdict_uses_repeated_measures_loa():
+    # verdict must be judged on the headlined RM LoA, not the naive LoA
+    a, b, subs = _rm_pair()
+    res = run(a, b, subjects=subs)
+    naive_hi = res.ba.loa_upper
+    rm_hi = res.rm_ba.loa_upper
+    assert rm_hi > naive_hi  # RM LoA is wider
+    # acceptance limit between the two upper LoA -> naive would pass, RM must fail
+    acc = (res.rm_ba.loa_lower - 0.01, (naive_hi + rm_hi) / 2.0)
+    res2 = run(a, b, subjects=subs, accept=acc)
+    assert res2.interchangeable is False
+    assert any("반복측정 95% LoA" in w and "허용한계" in w for w in res2.warnings)
+
+
+def test_markdown_includes_repeated_measures_rows():
+    from agreestat.report import render_markdown
+    a, b, subs = _rm_pair()
+    md = render_markdown(run(a, b, subjects=subs))
+    assert "Repeated-measures lower LoA" in md
+    assert "B&A 2007 (recommended)" in md
+
+
+def test_rm_ba_json_not_available_shape():
+    obj = json.loads(render_json(run([1, 2, 3], [1.1, 2.1, 3.1],
+                                      subjects=["A", "B", "C"])))
+    rm = obj["bland_altman_repeated_measures"]
+    assert rm["available"] is False
+    assert rm["note"]
+
+
+def test_precision_already_met_branch():
+    a = [14.2, 15.1, 11.9, 13.0, 16.4, 12.2, 18.1, 10.5, 19.3, 13.8]
+    b = [14.0, 14.8, 12.2, 12.9, 16.1, 12.5, 17.8, 10.9, 19.0, 13.5]
+    txt = render_text(run(a, b, target_loa_hw=50.0))  # trivially met
+    assert "이미 충족" in txt
+
+
+def test_required_n_is_the_true_minimum():
+    # hw(n) <= target < hw(n-1) must hold exactly (down-corrected minimum)
+    import math
+    from agreestat.analyze import _required_n_for_loa_hw
+    from agreestat.special import t_ppf
+
+    def hw(n, sd):
+        return t_ppf(0.975, n - 1) * sd * math.sqrt(
+            1.0 / n + 1.96 ** 2 / (2.0 * (n - 1)))
+
+    for sd, target in [(0.6289, 0.2), (2.5, 0.5), (10.0, 1.0), (1.0, 0.05)]:
+        n, _approx = _required_n_for_loa_hw(sd, target)
+        assert n is not None and n >= 2
+        assert hw(n, sd) <= target
+        if n > 2:
+            assert hw(n - 1, sd) > target
+
+
+def test_precision_target_too_tight():
+    a = [10, 20, 30, 40, 50, 15, 25, 35, 45, 55]
+    b = [11, 19, 32, 38, 51, 14, 27, 33, 47, 53]
+    txt = render_text(run(a, b, target_loa_hw=1e-9))
+    assert "매우 큼" in txt
+    obj = json.loads(render_json(run(a, b, target_loa_hw=1e-9)))
+    assert obj["precision"]["required_n"] is None
+
+
+def test_regression_loa_sd_negative_renders_warning():
+    a = [6.862, 22.335, 30.305, 37.515, 47.239,
+         56.149, 65.51, 74.683, 82.708, 91.684]
+    b = [13.138, 13.665, 21.695, 30.485, 36.761,
+         43.851, 50.49, 57.317, 65.292, 72.316]
+    txt = render_text(run(a, b))
+    assert "[2b] 회귀 기반 LoA" in txt
+    assert "음수로 외삽" in txt
+
+
+def test_svg_acceptance_band_and_xml_escape():
+    from agreestat.report import render_svg
+    import xml.dom.minidom as m
+    a, b = _good_pair()
+    res = run(a, b, name_a='A<&>"x', name_b="band", accept=(-1.0, 1.0))
+    svg = render_svg(res)
+    m.parseString(svg)                    # hostile names must still parse
+    assert 'fill-opacity="0.08"' in svg   # acceptance band present
+    assert "&amp;" in svg and "&lt;" in svg
+
+
+def test_markdown_and_plot_and_svg_render():
+    from agreestat.report import render_markdown, render_plot_data, render_svg
+    a, b = _good_pair()
+    res = run(a, b, name_a="sensor", name_b="band", accept=(-1.0, 1.0))
+    md = render_markdown(res)
+    assert md.startswith("# agreestat")
+    assert "| Metric | Estimate |" in md
+    assert "Interchangeability" in md
+    pd = render_plot_data(res)
+    assert pd.startswith("# agreestat plot data")
+    assert "mean,diff,outside_loa" in pd
+    assert len(pd.strip().splitlines()) == res.n + 2  # header comment + col + n rows
+    svg = render_svg(res)
+    import xml.dom.minidom as m
+    m.parseString(svg)  # must be well-formed XML
+    assert "Bland" in svg
+
+
+def test_nonfinite_warning_surfaced():
+    res = run([1, 2, 3, 4], [1, 2, 3, 4], nonfinite=2)
+    assert any("무한대" in w for w in res.warnings)
+
+
+def test_percent_near_zero_mean_warns():
+    a = [0.02, 10, 12, 14, 16]
+    b = [0.08, 11, 13, 15, 17]
+    res = run(a, b, mode="percent")
+    assert any("0에 가까운" in w for w in res.warnings)
+
+
+def test_extra_warnings_passed_through():
+    res = run([1, 2, 3, 4], [1.1, 2.1, 2.9, 4.2],
+              extra_warnings=["자동 선택 경고 테스트"])
+    assert any("자동 선택 경고 테스트" in w for w in res.warnings)
+
+
+# --------------------------------------------------------------------------
+# PII: subject ids must never appear in report or JSON output
+# --------------------------------------------------------------------------
+def test_subject_ids_not_leaked_in_output():
+    a = [10, 12, 20, 24, 30, 33]
+    b = [10, 11, 20, 21, 30, 31]
+    subs = ["PATIENT-12345", "PATIENT-12345", "KIM-CHULSOO",
+            "KIM-CHULSOO", "LEE-YOUNGHEE", "LEE-YOUNGHEE"]
+    res = run(a, b, subjects=subs)
+    txt = render_text(res)
+    js = render_json(res)
+    for sid in set(subs):
+        assert sid not in txt
+        assert sid not in js
+
+
+# --------------------------------------------------------------------------
+# Report renders exact numbers (not just section markers)
+# --------------------------------------------------------------------------
+def test_report_renders_exact_numbers():
+    # a - b = [-1, 1, 1, -1] -> bias 0.000
+    a = [10, 12, 14, 16]
+    b = [11, 11, 13, 17]
+    txt = render_text(run(a, b, name_a="A", name_b="B"))
+    assert "bias (평균차) = 0.000" in txt
+    assert "LoA 밖 관측치:" in txt
+
+
+def test_report_percent_unit_on_ci():
+    a = [110, 220, 330, 440, 550]
+    b = [100, 200, 300, 400, 500]
+    txt = render_text(run(a, b, mode="percent"))
+    # the CI must carry the % unit, not just the point estimate
+    assert "% CI" in txt
+    assert "%," in txt  # e.g. "[95% CI 8.12%, ...]"
