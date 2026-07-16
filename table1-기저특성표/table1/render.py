@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import html
 import io
 import json
 import math
 from typing import List, Optional
 
 from .build import CategoricalRow, ContinuousRow, Options, Table1
+from .multiplicity import normalize_method
 
 __all__ = ["render"]
 
@@ -22,6 +24,8 @@ _LANG = {
         "char": "특성 (Characteristic)",
         "overall": "전체",
         "p": "p값",
+        "p_adj": "p(보정)",
+        "effect": "차이 (95% CI)",
         "smd": "SMD",
         "test": "검정",
         "missing": "결측",
@@ -49,12 +53,23 @@ _LANG = {
                            "Fisher exact."),
         "leg_smd": ("**SMD**: 표준화 평균차(절대값). |SMD|>0.1 이면 두 군 간 "
                     "불균형을 시사(범주형은 Yang–Dalton 다변량 SMD)."),
+        "leg_effect": ("**차이 (95% CI)**: 첫 군 − 둘째 군(양수면 첫 군이 큼). "
+                       "연속형은 모수 검정 시 평균차(보고한 검정과 같은 SE의 t-CI), "
+                       "비모수 시 Hodges–Lehmann 중앙값 이동량(쌍별 차의 중앙값이라 "
+                       "표시된 두 중앙값의 차와 다를 수 있음). 이진형은 표시된 수준"
+                       "(예: 'M:')의 위험차(%p, Newcombe 점수구간 — 범주형 검정과는 "
+                       "다른 방법이라 p값의 유의성과 어긋날 수 있음)."),
+        "leg_padj": ("**p(보정)**: {method} 다중비교 보정(변수 {m}개 기준). "
+                     "무작위배정 시험의 기저 p값 보정은 권장되지 않습니다"
+                     "(비교/관찰 연구용)."),
     },
     "en": {
         "title": "Table 1. Baseline characteristics",
         "char": "Characteristic",
         "overall": "Overall",
         "p": "p",
+        "p_adj": "p (adj)",
+        "effect": "Difference (95% CI)",
         "smd": "SMD",
         "test": "Test",
         "missing": "missing",
@@ -85,7 +100,28 @@ _LANG = {
         "leg_smd": ("**SMD**: absolute standardized mean difference. |SMD|>0.1 "
                     "suggests between-group imbalance (categorical: Yang-Dalton "
                     "multivariate SMD)."),
+        "leg_effect": ("**Difference (95% CI)**: group 1 - group 2 (positive = "
+                       "first group higher). Continuous: difference in means with "
+                       "a t-CI from the reported test's SE (parametric), or the "
+                       "Hodges-Lehmann median shift = median of pairwise "
+                       "differences, which can differ from the difference of the "
+                       "displayed medians (nonparametric). Binary: risk difference "
+                       "for the labelled level (e.g. 'M:') in percentage points "
+                       "(Newcombe score interval — a different method from the "
+                       "categorical test, so it may disagree with the p-value)."),
+        "leg_padj": ("**p (adj)**: {method} multiple-comparison adjustment "
+                     "(family of {m} variables). Adjusting baseline p-values in a "
+                     "randomized trial is discouraged (for comparative/"
+                     "observational tables)."),
     },
+}
+
+# Display names for the --padjust methods, used in the legend.
+_PADJUST_NAMES = {
+    "bonferroni": "Bonferroni",
+    "holm": "Holm",
+    "bh": "Benjamini-Hochberg (FDR)",
+    "by": "Benjamini-Yekutieli (FDR)",
 }
 
 
@@ -100,14 +136,26 @@ def _leg_p_for(L: dict, opt: Options) -> str:
     return L.get(f"leg_p_{tc}", L["leg_p"])
 
 
+def _leg_padj(L: dict, t: Table1, opt: Options) -> str:
+    """Legend line for the adjusted-p column, naming the method and family size."""
+    method = normalize_method(getattr(opt, "padjust", "none"))
+    m = sum(1 for r in t.rows if getattr(r, "pvalue", None) is not None)
+    return L["leg_padj"].format(method=_PADJUST_NAMES.get(method, method), m=m)
+
+
 def _disp_name(opt: Options, name: str) -> str:
     """Apply a --labels display-name override (pretty name / units)."""
     return getattr(opt, "labels", {}).get(name, name)
 
 
 def _fmt_num(x: float, d: int) -> str:
-    if x is None or (isinstance(x, float) and (math.isnan(x))):
+    if x is None or (isinstance(x, float) and math.isnan(x)):
         return "—"
+    if isinstance(x, float) and math.isinf(x):
+        # A non-finite summary (e.g. a variance that overflowed on ~1e308 data)
+        # would otherwise print "inf" or a ~300-digit integer; render the symbol
+        # instead, consistent with _fmt_smd.
+        return "∞" if x > 0 else "-∞"
     d = max(0, d)  # negative precision is a ValueError in format specs
     return f"{x:.{d}f}"
 
@@ -130,6 +178,40 @@ def _fmt_smd(s: Optional[float]) -> str:
     if math.isnan(s):
         return "—"
     return f"{s:.3f}"
+
+
+def _fmt_effect(e, decimals: int, pct_decimals: int) -> str:
+    """Format an Effect as 'estimate (lo, hi)'.
+
+    A risk difference is shown in percentage points (x100) with a %p suffix so
+    it is directly comparable to the n(%) cells; a mean/median difference is
+    shown in the variable's own units.
+    """
+    if e is None:
+        return ""
+    if any(x is None or (isinstance(x, float) and not math.isfinite(x))
+           for x in (e.estimate, e.lo, e.hi)):
+        return "—"
+    if e.kind == "risk_diff":
+        d = pct_decimals
+        est, lo, hi = e.estimate * 100.0, e.lo * 100.0, e.hi * 100.0
+        suffix = " %p"
+    else:
+        d = decimals
+        est, lo, hi = e.estimate, e.lo, e.hi
+        suffix = ""
+    return (f"{_fmt_num(est, d)} ({_fmt_num(lo, d)}, {_fmt_num(hi, d)})"
+            + suffix)
+
+
+def _effect_index_prefix(e, esc) -> str:
+    """For a binary risk difference in the non-collapsed layout, prefix the
+    index level (e.g. ``M: ``) so the reader knows which of the two levels the
+    difference refers to. ``esc`` escapes the (data-derived) level per format.
+    """
+    if e is None or e.kind != "risk_diff" or not getattr(e, "index_level", None):
+        return ""
+    return esc(e.index_level) + ": "
 
 
 def _range_suffix(st, d: int) -> str:
@@ -193,6 +275,26 @@ def _cont_suffix(row: ContinuousRow, L: dict) -> str:
     return f" — {L['mean_sd']}/{L['median_iqr']}"
 
 
+def _col_flags(t: Table1, opt: Options):
+    """Which optional analytic columns are present, in table order.
+
+    Returns (two_group, show_p, show_effect, show_padj, single_group). All
+    renderers share this so the columns line up identically. A single-group
+    (no grouping column) descriptive table suppresses every comparison column
+    and the test column.
+    """
+    two_group = len(t.groups) == 2
+    single_group = len(t.groups) < 2
+    show_p = opt.show_pvalue and not single_group
+    show_effect = two_group and getattr(opt, "effect", False)
+    # Only show the adjusted-p column when at least one variable is actually
+    # testable; otherwise the column is all "—" and the legend reads "0 vars".
+    any_testable = any(getattr(r, "pvalue", None) is not None for r in t.rows)
+    show_padj = (show_p and any_testable and
+                 normalize_method(getattr(opt, "padjust", "none")) != "none")
+    return two_group, show_p, show_effect, show_padj, single_group
+
+
 # --------------------------------------------------------------------------- #
 # Markdown
 # --------------------------------------------------------------------------- #
@@ -211,23 +313,59 @@ def _md_escape(s: str) -> str:
 
 def _render_markdown(t: Table1, opt: Options) -> str:
     L = _lang(opt)
-    show_overall = opt.overall
-    show_p = opt.show_pvalue
-    two_group = len(t.groups) == 2
+    two_group, show_p, show_effect, show_padj, single_group = _col_flags(t, opt)
+    # In a single-group table the group column and the Overall column coincide,
+    # so show only Overall (forced on) and drop the test column.
+    show_overall = True if single_group else opt.overall
+    show_groups = not single_group
+    show_test = not single_group
     out: List[str] = []
     out.append("## " + L["title"])
     out.append("")
 
+    def value_tail(row, with_level: bool = True) -> List[str]:
+        """Trailing analytic cells for a row that carries statistics.
+
+        ``with_level`` prepends the binary risk-difference index level (e.g.
+        ``M: ``); suppressed on a collapsed row whose label already names it.
+        """
+        tail: List[str] = []
+        if show_effect:
+            pre = _effect_index_prefix(row.effect, _md_escape) if with_level else ""
+            tail.append(pre + _fmt_effect(row.effect, opt.decimals,
+                                          opt.pct_decimals))
+        if show_p:
+            tail.append(_fmt_p(row.pvalue))
+        if show_padj:
+            tail.append(_fmt_p(row.p_adjusted))
+        if two_group:
+            tail.append(_fmt_smd(row.smd))
+        if show_test:
+            tail.append(row.test_name)
+        return tail
+
+    def blank_tail() -> List[str]:
+        """Trailing cells for a level sub-row (no per-level statistics)."""
+        n = (int(show_effect) + int(show_p) + int(show_padj) + int(two_group)
+             + int(show_test))
+        return [""] * n
+
     headers = [L["char"]]
     if show_overall:
         headers.append(f"{L['overall']} (N={t.overall_size})")
-    for g, n in zip(t.groups, t.group_sizes):
-        headers.append(f"{_md_escape(g)} (n={n})")
+    if show_groups:
+        for g, n in zip(t.groups, t.group_sizes):
+            headers.append(f"{_md_escape(g)} (n={n})")
+    if show_effect:
+        headers.append(L["effect"])
     if show_p:
         headers.append(L["p"])
+    if show_padj:
+        headers.append(L["p_adj"])
     if two_group:
         headers.append(L["smd"])
-    headers.append(L["test"])
+    if show_test:
+        headers.append(L["test"])
 
     out.append("| " + " | ".join(headers) + " |")
     out.append("|" + "|".join(["---"] * len(headers)) + "|")
@@ -264,21 +402,18 @@ def _render_markdown(t: Table1, opt: Options) -> str:
             if show_overall:
                 cells.append(_cont_cell(row.overall, row.display, opt.decimals,
                                         opt.show_range))
-            for st in row.per_group:
-                cells.append(_cont_cell(st, row.display, opt.decimals,
-                                        opt.show_range))
-            if show_p:
-                cells.append(_fmt_p(row.pvalue))
-            if two_group:
-                cells.append(_fmt_smd(row.smd))
-            cells.append(row.test_name)
+            if show_groups:
+                for st in row.per_group:
+                    cells.append(_cont_cell(st, row.display, opt.decimals,
+                                            opt.show_range))
+            cells.extend(value_tail(row))
             out.append("| " + " | ".join(cells) + " |")
         else:  # CategoricalRow
             pd = opt.pct_decimals
             single = _binary_collapse(row, opt)
             if single is not None:
                 # Collapsed 2-level row: one line, value/percent of the shown
-                # level, with p/SMD/test on the same row.
+                # level, with effect/p/SMD/test on the same row.
                 label = (_md_escape(_disp_name(opt, row.name)) + " = "
                          + _md_escape(single.label) + f" — {L['n_pct']}"
                          + miss_suffix(row.n_missing_total, row.missing_per_group)
@@ -287,14 +422,11 @@ def _render_markdown(t: Table1, opt: Options) -> str:
                 if show_overall:
                     cells.append(_cat_cell(single.overall, row.overall_denom,
                                            single.overall, row.pct, pd))
-                for gi, c in enumerate(single.counts):
-                    cells.append(_cat_cell(c, row.denom_per_group[gi],
-                                           single.overall, row.pct, pd))
-                if show_p:
-                    cells.append(_fmt_p(row.pvalue))
-                if two_group:
-                    cells.append(_fmt_smd(row.smd))
-                cells.append(row.test_name)
+                if show_groups:
+                    for gi, c in enumerate(single.counts):
+                        cells.append(_cat_cell(c, row.denom_per_group[gi],
+                                               single.overall, row.pct, pd))
+                cells.extend(value_tail(row, with_level=False))
                 out.append("| " + " | ".join(cells) + " |")
                 continue
             header_label = (_md_escape(_disp_name(opt, row.name)) + f" — {L['n_pct']}"
@@ -304,26 +436,20 @@ def _render_markdown(t: Table1, opt: Options) -> str:
             cells = [header_label]
             if show_overall:
                 cells.append("")
-            cells.extend([""] * len(t.groups))
-            if show_p:
-                cells.append(_fmt_p(row.pvalue))
-            if two_group:
-                cells.append(_fmt_smd(row.smd))
-            cells.append(row.test_name)
+            if show_groups:
+                cells.extend([""] * len(t.groups))
+            cells.extend(value_tail(row))
             out.append("| " + " | ".join(cells) + " |")
             for lvl in row.levels:
                 lcells = [" " + _md_escape(lvl.label)]
                 if show_overall:
                     lcells.append(_cat_cell(lvl.overall, row.overall_denom,
                                             lvl.overall, row.pct, pd))
-                for gi, c in enumerate(lvl.counts):
-                    lcells.append(_cat_cell(c, row.denom_per_group[gi],
-                                            lvl.overall, row.pct, pd))
-                if show_p:
-                    lcells.append("")
-                if two_group:
-                    lcells.append("")
-                lcells.append("")
+                if show_groups:
+                    for gi, c in enumerate(lvl.counts):
+                        lcells.append(_cat_cell(c, row.denom_per_group[gi],
+                                                lvl.overall, row.pct, pd))
+                lcells.extend(blank_tail())
                 out.append("| " + " | ".join(lcells) + " |")
 
     out.append("")
@@ -340,8 +466,12 @@ def _render_markdown(t: Table1, opt: Options) -> str:
     else:
         pct_desc = L["pct_row"]
     legend = [L["leg_notation"] + pct_desc + "."]
+    if show_effect:
+        legend.append(L["leg_effect"])
     if show_p:
         legend.append(_leg_p_for(L, opt))
+    if show_padj:
+        legend.append(_leg_padj(L, t, opt))
     if two_group:
         legend.append(L["leg_smd"])
     out.extend(legend)
@@ -379,22 +509,45 @@ def _csv_safe(field: str) -> str:
 def _render_delimited(t: Table1, opt: Options, delim: str) -> str:
     import csv as _csv
 
-    show_overall = opt.overall
-    show_p = opt.show_pvalue
-    two_group = len(t.groups) == 2
+    two_group, show_p, show_effect, show_padj, single_group = _col_flags(t, opt)
+    show_overall = True if single_group else opt.overall
+    show_groups = not single_group
+    show_test = not single_group
     buf = io.StringIO()
     writer = _csv.writer(buf, delimiter=delim, lineterminator="\n")
 
     header = ["characteristic", "level"]
     if show_overall:
         header.append(f"overall_N={t.overall_size}")
-    header += [f"{g}_n={n}" for g, n in zip(t.groups, t.group_sizes)]
+    if show_groups:
+        header += [f"{g}_n={n}" for g, n in zip(t.groups, t.group_sizes)]
     if show_p:
         header.append("p_value")
-    header += ["test", "n_missing"]
+    if show_test:
+        header.append("test")
+    header.append("n_missing")
     if two_group:
         header.append("smd")
+    # New analytic columns are appended at the END so existing column indices
+    # stay stable for downstream parsers.
+    if show_effect:
+        header.append("effect_95ci")
+    if show_padj:
+        header.append("p_adjusted")
     writer.writerow([_csv_safe(h) for h in header])
+
+    def value_tail(row, with_level: bool = True) -> List[str]:
+        tail: List[str] = []
+        if show_effect:
+            pre = _effect_index_prefix(row.effect, _csv_safe) if with_level else ""
+            tail.append(pre + _fmt_effect(row.effect, opt.decimals,
+                                          opt.pct_decimals))
+        if show_padj:
+            tail.append(_fmt_p(row.p_adjusted))
+        return tail
+
+    def blank_tail() -> List[str]:
+        return [""] * (int(show_effect) + int(show_padj))
 
     # Only DATA-derived cells (variable name, level label) are formula-guarded;
     # tool-generated numeric cells (means, counts, p-values, SMD) are written
@@ -407,14 +560,18 @@ def _render_delimited(t: Table1, opt: Options, delim: str) -> str:
             if show_overall:
                 line.append(_cont_cell(row.overall, row.display, opt.decimals,
                                        opt.show_range))
-            for st in row.per_group:
-                line.append(_cont_cell(st, row.display, opt.decimals,
-                                       opt.show_range))
+            if show_groups:
+                for st in row.per_group:
+                    line.append(_cont_cell(st, row.display, opt.decimals,
+                                           opt.show_range))
             if show_p:
                 line.append(_fmt_p(row.pvalue))
-            line += [row.test_name, str(row.n_missing_total)]
+            if show_test:
+                line.append(row.test_name)
+            line.append(str(row.n_missing_total))
             if two_group:
                 line.append(_fmt_smd(row.smd))
+            line += value_tail(row)
             writer.writerow([str(x) for x in line])
         else:
             pd = opt.pct_decimals
@@ -424,39 +581,51 @@ def _render_delimited(t: Table1, opt: Options, delim: str) -> str:
                 if show_overall:
                     line.append(_cat_cell(single.overall, row.overall_denom,
                                           single.overall, row.pct, pd))
-                for gi, c in enumerate(single.counts):
-                    line.append(_cat_cell(c, row.denom_per_group[gi],
-                                          single.overall, row.pct, pd))
+                if show_groups:
+                    for gi, c in enumerate(single.counts):
+                        line.append(_cat_cell(c, row.denom_per_group[gi],
+                                              single.overall, row.pct, pd))
                 if show_p:
                     line.append(_fmt_p(row.pvalue))
-                line += [row.test_name, str(row.n_missing_total)]
+                if show_test:
+                    line.append(row.test_name)
+                line.append(str(row.n_missing_total))
                 if two_group:
                     line.append(_fmt_smd(row.smd))
+                line += value_tail(row, with_level=False)
                 writer.writerow([str(x) for x in line])
                 continue
             line = [sname, "n(%)"]
             if show_overall:
                 line.append("")
-            line += [""] * len(t.groups)
+            if show_groups:
+                line += [""] * len(t.groups)
             if show_p:
                 line.append("")
-            line += [row.test_name, str(row.n_missing_total)]
+            if show_test:
+                line.append(row.test_name)
+            line.append(str(row.n_missing_total))
             if two_group:
                 line.append("")
+            line += value_tail(row)
             writer.writerow([str(x) for x in line])
             for lvl in row.levels:
                 lline = [sname, _csv_safe(lvl.label)]
                 if show_overall:
                     lline.append(_cat_cell(lvl.overall, row.overall_denom,
                                            lvl.overall, row.pct, pd))
-                for gi, c in enumerate(lvl.counts):
-                    lline.append(_cat_cell(c, row.denom_per_group[gi],
-                                           lvl.overall, row.pct, pd))
+                if show_groups:
+                    for gi, c in enumerate(lvl.counts):
+                        lline.append(_cat_cell(c, row.denom_per_group[gi],
+                                               lvl.overall, row.pct, pd))
                 if show_p:
                     lline.append("")
-                lline += ["", ""]
+                if show_test:
+                    lline.append("")
+                lline.append("")  # n_missing (blank on a level sub-row)
                 if two_group:
                     lline.append("")
+                lline += blank_tail()
                 writer.writerow([str(x) for x in lline])
     return buf.getvalue()
 
@@ -480,6 +649,16 @@ def _render_json(t: Table1, opt: Options) -> str:
             "q3": _finite(st.q3), "min": _finite(st.vmin), "max": _finite(st.vmax),
         }
 
+    def effect(e):
+        if e is None:
+            return None
+        return {
+            "estimate": _finite(e.estimate), "ci_low": _finite(e.lo),
+            "ci_high": _finite(e.hi), "kind": e.kind, "conf": e.conf,
+            "index_level": getattr(e, "index_level", None),
+            "reference_level": getattr(e, "reference_level", None),
+        }
+
     rows = []
     for row in t.rows:
         disp = _disp_name(opt, row.name)
@@ -488,8 +667,9 @@ def _render_json(t: Table1, opt: Options) -> str:
                 "name": row.name, "label": disp, "kind": "continuous",
                 "display": row.display, "overall": stat(row.overall),
                 "groups": [stat(s) for s in row.per_group],
-                "p_value": _finite(row.pvalue), "test": row.test_name,
-                "smd": _finite(row.smd),
+                "p_value": _finite(row.pvalue),
+                "p_adjusted": _finite(row.p_adjusted), "test": row.test_name,
+                "smd": _finite(row.smd), "effect": effect(row.effect),
                 "n_missing": row.n_missing_total, "notes": row.notes,
             })
         else:
@@ -500,8 +680,9 @@ def _render_json(t: Table1, opt: Options) -> str:
                 "missing_per_group": row.missing_per_group,
                 "levels": [{"label": l.label, "counts": l.counts,
                             "overall": l.overall} for l in row.levels],
-                "p_value": _finite(row.pvalue), "test": row.test_name,
-                "smd": _finite(row.smd),
+                "p_value": _finite(row.pvalue),
+                "p_adjusted": _finite(row.p_adjusted), "test": row.test_name,
+                "smd": _finite(row.smd), "effect": effect(row.effect),
                 "n_missing": row.n_missing_total, "notes": row.notes,
             })
     obj = {
@@ -514,6 +695,197 @@ def _render_json(t: Table1, opt: Options) -> str:
     return json.dumps(obj, ensure_ascii=False, indent=2, allow_nan=False)
 
 
+# --------------------------------------------------------------------------- #
+# HTML  (self-contained <table>, ready to paste into Word / a journal system)
+# --------------------------------------------------------------------------- #
+def _h(s: str) -> str:
+    """HTML-escape a data string (quotes included)."""
+    return html.escape(str(s), quote=True)
+
+
+def _md_inline_html(s: str) -> str:
+    """Escape a legend/note string, then turn **bold** markdown into <strong>."""
+    esc = html.escape(s, quote=False)
+    parts = esc.split("**")
+    # Odd-indexed segments are the emphasized ones (paired **...**).
+    out = []
+    for i, seg in enumerate(parts):
+        out.append(f"<strong>{seg}</strong>" if i % 2 == 1 else seg)
+    return "".join(out)
+
+
+def _render_html(t: Table1, opt: Options) -> str:
+    L = _lang(opt)
+    two_group, show_p, show_effect, show_padj, single_group = _col_flags(t, opt)
+    show_overall = True if single_group else opt.overall
+    show_groups = not single_group
+    show_test = not single_group
+
+    def value_tail(row, with_level: bool = True) -> List[str]:
+        tail: List[str] = []
+        if show_effect:
+            pre = _effect_index_prefix(row.effect, _h) if with_level else ""
+            tail.append(pre + _h(_fmt_effect(row.effect, opt.decimals,
+                                             opt.pct_decimals)))
+        if show_p:
+            tail.append(_h(_fmt_p(row.pvalue)))
+        if show_padj:
+            tail.append(_h(_fmt_p(row.p_adjusted)))
+        if two_group:
+            tail.append(_h(_fmt_smd(row.smd)))
+        if show_test:
+            tail.append(_h(row.test_name))
+        return tail
+
+    def blank_tail() -> List[str]:
+        n = (int(show_effect) + int(show_p) + int(show_padj) + int(two_group)
+             + int(show_test))
+        return [""] * n
+
+    note_markers: List[str] = []
+
+    def note_suffix(notes: List[str]) -> str:
+        if not notes:
+            return ""
+        idx = len(note_markers) + 1
+        note_markers.append("; ".join(notes))
+        return f"<sup>{idx}</sup>"
+
+    def miss_suffix(n_missing: int, per_group=None) -> str:
+        if not n_missing:
+            return ""
+        base = f" · {L['missing']} {n_missing}"
+        if per_group is not None and len(t.groups) >= 2:
+            parts = [f"{g} {m}" for g, m in zip(t.groups, per_group) if m]
+            if parts:
+                base += " (" + ", ".join(parts) + ")"
+        return base
+
+    headers = [L["char"]]
+    if show_overall:
+        headers.append(f"{L['overall']} (N={t.overall_size})")
+    if show_groups:
+        for g, n in zip(t.groups, t.group_sizes):
+            headers.append(f"{g} (n={n})")
+    if show_effect:
+        headers.append(L["effect"])
+    if show_p:
+        headers.append(L["p"])
+    if show_padj:
+        headers.append(L["p_adj"])
+    if two_group:
+        headers.append(L["smd"])
+    if show_test:
+        headers.append(L["test"])
+
+    out: List[str] = ['<table class="table1">']
+    out.append(f"  <caption>{_h(L['title'])}</caption>")
+    out.append("  <thead>")
+    out.append("    <tr>" + "".join(f"<th scope=\"col\">{_h(h)}</th>"
+                                    for h in headers) + "</tr>")
+    out.append("  </thead>")
+    out.append("  <tbody>")
+
+    def emit(row_th: str, data_cells: List[str], is_level: bool = False) -> None:
+        cls = ' class="level"' if is_level else ""
+        tds = "".join(f"<td>{c}</td>" for c in data_cells)
+        out.append(f"    <tr{cls}><th scope=\"row\">{row_th}</th>{tds}</tr>")
+
+    for row in t.rows:
+        if isinstance(row, ContinuousRow):
+            per_group_missing = [st.n_missing for st in row.per_group]
+            label = (_h(_disp_name(opt, row.name) + _cont_suffix(row, L)
+                        + miss_suffix(row.n_missing_total, per_group_missing))
+                     + note_suffix(row.notes))
+            cells = []
+            if show_overall:
+                cells.append(_h(_cont_cell(row.overall, row.display,
+                                           opt.decimals, opt.show_range)))
+            if show_groups:
+                for st in row.per_group:
+                    cells.append(_h(_cont_cell(st, row.display, opt.decimals,
+                                               opt.show_range)))
+            cells.extend(value_tail(row))
+            emit(label, cells)
+        else:
+            pd = opt.pct_decimals
+            single = _binary_collapse(row, opt)
+            if single is not None:
+                label = (_h(_disp_name(opt, row.name) + " = " + single.label
+                            + f" — {L['n_pct']}"
+                            + miss_suffix(row.n_missing_total,
+                                          row.missing_per_group))
+                         + note_suffix(row.notes))
+                cells = []
+                if show_overall:
+                    cells.append(_h(_cat_cell(single.overall, row.overall_denom,
+                                              single.overall, row.pct, pd)))
+                if show_groups:
+                    for gi, c in enumerate(single.counts):
+                        cells.append(_h(_cat_cell(c, row.denom_per_group[gi],
+                                                  single.overall, row.pct, pd)))
+                cells.extend(value_tail(row, with_level=False))
+                emit(label, cells)
+                continue
+            header_label = (_h(_disp_name(opt, row.name) + f" — {L['n_pct']}"
+                               + miss_suffix(row.n_missing_total,
+                                             row.missing_per_group))
+                            + note_suffix(row.notes))
+            cells = []
+            if show_overall:
+                cells.append("")
+            if show_groups:
+                cells.extend([""] * len(t.groups))
+            cells.extend(value_tail(row))
+            emit(header_label, cells)
+            for lvl in row.levels:
+                lcells = []
+                if show_overall:
+                    lcells.append(_h(_cat_cell(lvl.overall, row.overall_denom,
+                                               lvl.overall, row.pct, pd)))
+                if show_groups:
+                    for gi, c in enumerate(lvl.counts):
+                        lcells.append(_h(_cat_cell(c, row.denom_per_group[gi],
+                                                   lvl.overall, row.pct, pd)))
+                lcells.extend(blank_tail())
+                # &#160; (numeric NBSP) keeps the output valid XHTML/XML too.
+                emit("&#160;" + _h(lvl.label), lcells, is_level=True)
+
+    out.append("  </tbody>")
+    out.append("</table>")
+
+    # Legend / notes / warnings mirror the markdown output.
+    if opt.pct == "col":
+        incl_missing = (getattr(opt, "missing_as_level", False) and
+                        any(isinstance(r, CategoricalRow) and r.n_missing_total > 0
+                            for r in t.rows))
+        pct_desc = L["pct_col_incl_missing"] if incl_missing else L["pct_col"]
+    else:
+        pct_desc = L["pct_row"]
+    legend = [L["leg_notation"] + pct_desc + "."]
+    if show_effect:
+        legend.append(L["leg_effect"])
+    if show_p:
+        legend.append(_leg_p_for(L, opt))
+    if show_padj:
+        legend.append(_leg_padj(L, t, opt))
+    if two_group:
+        legend.append(L["leg_smd"])
+    for line in legend:
+        out.append(f'<p class="legend">{_md_inline_html(line)}</p>')
+    if note_markers:
+        out.append('<ol class="notes">')
+        for n in note_markers:
+            out.append(f"  <li>{_h(n)}</li>")
+        out.append("</ol>")
+    if t.warnings:
+        out.append('<ul class="warnings">')
+        for w in t.warnings:
+            out.append(f"  <li>{_h(w)}</li>")
+        out.append("</ul>")
+    return "\n".join(out)
+
+
 def render(t: Table1, opt: Options, fmt: str = "md") -> str:
     if fmt == "md":
         return _render_markdown(t, opt)
@@ -523,4 +895,6 @@ def render(t: Table1, opt: Options, fmt: str = "md") -> str:
         return _render_delimited(t, opt, "\t")
     if fmt == "json":
         return _render_json(t, opt)
+    if fmt == "html":
+        return _render_html(t, opt)
     raise ValueError(f"알 수 없는 출력 형식: {fmt}")
