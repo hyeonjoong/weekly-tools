@@ -18,9 +18,11 @@ from .analyze import (
     AnalysisResult,
     BandPower,
     EpochResult,
+    SignalQuality,
     Spectrum,
     analyze,
     resolve_fs,
+    signal_quality,
 )
 from .dataio import SignalData, infer_fs, load_signal
 from .report import render_csv, render_text, to_dict
@@ -28,6 +30,7 @@ from .report import render_csv, render_text, to_dict
 __all__ = [
     "analyze",
     "resolve_fs",
+    "signal_quality",
     "load_signal",
     "infer_fs",
     "render_text",
@@ -37,5 +40,6 @@ __all__ = [
     "Spectrum",
     "BandPower",
     "EpochResult",
+    "SignalQuality",
     "SignalData",
 ]

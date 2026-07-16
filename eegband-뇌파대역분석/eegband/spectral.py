@@ -27,8 +27,11 @@ __all__ = [
     "band_powers",
     "total_power",
     "peak_frequency",
+    "peak_frequency_prominent",
     "spectral_edge_frequency",
+    "spectral_entropy",
     "band_ratios",
+    "median_bias",
 ]
 
 # Standard EEG bands (name, low_hz, high_hz). Delta's lower edge is 0.5 Hz (SWA).
@@ -41,14 +44,62 @@ DEFAULT_BANDS: List[Tuple[str, float, float]] = [
 ]
 
 
+_DETREND_MODES = ("constant", "linear", "none")
+
+
+def median_bias(n: int) -> float:
+    """Bias-correction divisor for the median of ``n`` periodograms.
+
+    The median of ``n`` iid exponential (χ²₂/2) periodogram estimates is a biased
+    estimator of the mean; dividing by this factor makes it unbiased. Matches
+    ``scipy.signal._spectral_py._median_bias`` exactly so ``average='median'`` agrees
+    with SciPy.
+    """
+    if n <= 0:
+        raise ValueError("n must be >= 1")
+    bias = 1.0
+    ii_2 = 2  # 2*1
+    for _ in range(1, (n - 1) // 2 + 1):
+        bias += 1.0 / (ii_2 + 1) - 1.0 / ii_2
+        ii_2 += 2
+    return bias
+
+
+def _detrend_segment(seg: List[float], mode: str) -> List[float]:
+    """Remove a per-segment trend: 'constant' (mean), 'linear' (least-squares line),
+    or 'none'. Linear detrend matches scipy.signal.detrend(type='linear')."""
+    if mode == "none":
+        return seg
+    m = len(seg)
+    if mode == "constant" or m < 2:
+        mean = math.fsum(seg) / m
+        return [v - mean for v in seg]
+    # Linear least-squares fit y = a + b·t over t = 0..m-1, then subtract it.
+    # Closed form using integer sums of t and t²; robust and dependency-free.
+    t_mean = (m - 1) / 2.0
+    sxx = math.fsum((t - t_mean) ** 2 for t in range(m))
+    y_mean = math.fsum(seg) / m
+    sxy = math.fsum((t - t_mean) * (seg[t] - y_mean) for t in range(m))
+    b = sxy / sxx if sxx > 0 else 0.0
+    a = y_mean - b * t_mean
+    return [seg[t] - (a + b * t) for t in range(m)]
+
+
 def welch_psd(x: Sequence[float], fs: float, nperseg: Optional[int] = None,
               noverlap: Optional[int] = None, detrend: str = "constant",
+              average: str = "mean",
               ) -> Tuple[List[float], List[float], Dict[str, int]]:
     """Estimate the one-sided PSD (µV²/Hz) of ``x`` via Welch's method.
 
     Returns (freqs, psd, meta) where meta has the resolved nperseg/noverlap/nfft/n_seg.
     Matches scipy.signal.welch(x, fs, window='hann', nperseg, noverlap, nfft=next_pow2,
-    detrend='constant', scaling='density', average='mean').
+    detrend=detrend, scaling='density', average=average).
+
+    detrend : 'constant' (per-segment mean removal, default), 'linear' (per-segment
+        least-squares line removal — strips slow drift so it does not leak into
+        delta), or 'none'.
+    average : 'mean' (default) or 'median' (robust to transient artifacts; a
+        bias-correction divisor keeps it unbiased for the true PSD).
     """
     xs = [float(v) for v in x]
     n = len(xs)
@@ -56,6 +107,10 @@ def welch_psd(x: Sequence[float], fs: float, nperseg: Optional[int] = None,
         raise ValueError("cannot compute a spectrum of an empty signal")
     if fs <= 0:
         raise ValueError("sampling rate fs must be positive")
+    if detrend not in _DETREND_MODES:
+        raise ValueError(f"detrend must be one of {_DETREND_MODES}, got {detrend!r}")
+    if average not in ("mean", "median"):
+        raise ValueError(f"average must be 'mean' or 'median', got {average!r}")
 
     if nperseg is None:
         nperseg = n
@@ -83,30 +138,43 @@ def welch_psd(x: Sequence[float], fs: float, nperseg: Optional[int] = None,
     if not starts:
         starts = [0]
 
-    acc = [0.0] * n_out
+    scale = 1.0 / (fs * u_pow)
+    freqs = [k * fs / nfft for k in range(n_out)]
+    nyq = (nfft % 2 == 0)
+
+    # Per-segment one-sided scaled periodograms, so 'median' averaging can operate
+    # on the fully-scaled estimates exactly as SciPy does.
+    segs_psd: List[List[float]] = []
     for s in starts:
         seg = xs[s:s + nperseg]
-        if detrend == "constant":
-            m = math.fsum(seg) / len(seg)
-            seg = [v - m for v in seg]
+        seg = _detrend_segment(seg, detrend)
         wseg = [seg[i] * win[i] for i in range(nperseg)]
         padded = [complex(v, 0.0) for v in wseg] + [0j] * (nfft - nperseg)
         spec = fft(padded)
+        row = [0.0] * n_out
         for k in range(n_out):
             re = spec[k].real
             im = spec[k].imag
-            acc[k] += re * re + im * im
+            val = (re * re + im * im) * scale
+            if k != 0 and not (nyq and k == n_out - 1):
+                val *= 2.0
+            row[k] = val
+        segs_psd.append(row)
 
-    n_seg = len(starts)
-    scale = 1.0 / (fs * u_pow)
-    freqs = [k * fs / nfft for k in range(n_out)]
-    psd: List[float] = []
-    nyq = (nfft % 2 == 0)
-    for k in range(n_out):
-        val = (acc[k] / n_seg) * scale
-        if k != 0 and not (nyq and k == n_out - 1):
-            val *= 2.0
-        psd.append(val)
+    n_seg = len(segs_psd)
+    psd: List[float] = [0.0] * n_out
+    if average == "mean":
+        for row in segs_psd:
+            for k in range(n_out):
+                psd[k] += row[k]
+        psd = [v / n_seg for v in psd]
+    else:  # median with bias correction
+        bias = median_bias(n_seg)
+        for k in range(n_out):
+            col = sorted(row[k] for row in segs_psd)
+            mid = len(col) // 2
+            med = col[mid] if len(col) % 2 else 0.5 * (col[mid - 1] + col[mid])
+            psd[k] = med / bias
 
     meta = {"nperseg": nperseg, "noverlap": noverlap, "nfft": nfft, "n_seg": n_seg}
     return freqs, psd, meta
@@ -181,6 +249,42 @@ def peak_frequency(freqs: Sequence[float], psd: Sequence[float],
     return best_f
 
 
+# A genuine oscillatory peak must rise this many times above the in-band median PSD.
+# Empirically real EEG peaks (alpha rhythm, sleep spindle) sit 20–2500× the band
+# median, while the argmax of a peakless noisy band stays < 2×; 3× separates them.
+_MIN_PROMINENCE_RATIO = 3.0
+
+
+def peak_frequency_prominent(freqs: Sequence[float], psd: Sequence[float],
+                             lo: float, hi: float,
+                             min_ratio: float = _MIN_PROMINENCE_RATIO,
+                             ) -> Tuple[Optional[float], bool]:
+    """Return (argmax frequency in [lo, hi], is_prominent).
+
+    ``is_prominent`` is True only when the in-band maximum is a genuine spectral
+    hump rather than the argmax of noise on a 1/f slope. Three conditions: the peak
+    is strictly interior to the band (not pinned at an edge), it exceeds the PSD at
+    *both* band edges, and it rises at least ``min_ratio``× above the in-band median
+    PSD. This distinguishes a real Individual Alpha Frequency / spindle from a
+    peakless band. Callers suppress a spurious "peak" when this is False.
+    """
+    idx = [i for i, f in enumerate(freqs) if lo <= f <= hi]
+    if not idx:
+        return None, False
+    best = max(idx, key=lambda i: psd[i])
+    peak_f = freqs[best]
+    first, last = idx[0], idx[-1]
+    interior = first < best < last
+    band_vals = sorted(psd[i] for i in idx)
+    m = len(band_vals)
+    median = (band_vals[m // 2] if m % 2
+              else 0.5 * (band_vals[m // 2 - 1] + band_vals[m // 2]))
+    ratio_ok = median > 0 and psd[best] >= min_ratio * median
+    prominent = (interior and psd[best] > psd[first] and psd[best] > psd[last]
+                 and psd[best] > 0.0 and ratio_ok)
+    return peak_f, prominent
+
+
 def spectral_edge_frequency(freqs: Sequence[float], psd: Sequence[float],
                             lo: float, hi: float, frac: float = 0.95,
                             ) -> Optional[float]:
@@ -234,6 +338,37 @@ def spectral_edge_frequency(freqs: Sequence[float], psd: Sequence[float],
                 u = w
             return xs[i - 1] + u
     return xs[-1]
+
+
+def spectral_entropy(freqs: Sequence[float], psd: Sequence[float],
+                     lo: float, hi: float, normalize: bool = True
+                     ) -> Optional[float]:
+    """Shannon spectral entropy of the PSD bins in [lo, hi].
+
+    The PSD bins inside the band are normalized to a probability distribution
+    ``p_k = psd_k / Σ psd`` and H = −Σ p_k ln p_k is returned (empty bins contribute
+    0, since p·ln p → 0). With ``normalize=True`` (default) H is divided by ln(M)
+    where M is the *total* number of frequency bins in [lo, hi], giving a value in
+    [0, 1]: ~1 for a flat (white) spectrum, near 0 for a single dominant rhythm. A
+    spectral flatness / complexity index. Returns None when the band spans < 2 bins
+    or carries no power.
+    """
+    in_band = [p for f, p in zip(freqs, psd) if lo <= f <= hi]
+    m = len(in_band)              # total bins in band (denominator uses ln(m))
+    if m < 2:
+        return None
+    ps = [p for p in in_band if p > 0.0]
+    total = math.fsum(ps)
+    if total <= 0:
+        return None
+    h = 0.0
+    for p in ps:
+        q = p / total
+        h -= q * math.log(q)
+    if normalize:
+        denom = math.log(m)
+        return h / denom if denom > 0 else 0.0
+    return h
 
 
 def band_ratios(power_by_name: Dict[str, float]) -> Dict[str, float]:
