@@ -14,6 +14,16 @@ from typing import Dict, List, Optional, Sequence
 
 from . import cat_tests, smd
 from .dataio import Frame, classify, is_missing, is_numeric_token, parse_float
+from .effects import (
+    Effect,
+    hodges_lehmann,
+    mean_ci,
+    mean_difference,
+    median_ci,
+    proportion_ci,
+    risk_difference,
+)
+from .multiplicity import adjust_pvalues, normalize_method
 from .normality import shapiro_wilk
 from .tests_stat import (
     kruskal_wallis,
@@ -120,7 +130,7 @@ def _msg(lang: str, key: str, **kw) -> str:
 
 @dataclass
 class Options:
-    group_col: str
+    group_col: Optional[str]                    # None -> single-group table
     var_cols: Optional[List[str]] = None       # None -> every non-group column
     continuous: List[str] = field(default_factory=list)   # forced continuous
     categorical: List[str] = field(default_factory=list)  # forced categorical
@@ -145,6 +155,10 @@ class Options:
     show_pvalue: bool = True        # False -> omit the p-value column (CONSORT: RCT
                                     # baseline p-values are discouraged; use SMD)
     show_range: bool = False        # True -> append (min-max) to continuous cells
+    effect: bool = False            # True -> compute a two-group effect + 95% CI
+                                    # (mean/HL difference; binary risk difference)
+    padjust: str = "none"           # multiplicity correction across variables:
+                                    # none | bonferroni | holm | bh | by
     lang: str = "ko"               # ko | en  (rendered label language)
     labels: Dict[str, str] = field(default_factory=dict)  # column -> display name
 
@@ -174,6 +188,8 @@ class ContinuousRow:
     n_missing_total: int
     notes: List[str] = field(default_factory=list)
     kind: str = "continuous"
+    effect: Optional[Effect] = None
+    p_adjusted: Optional[float] = None
 
 
 @dataclass
@@ -197,6 +213,8 @@ class CategoricalRow:
     pct: str
     notes: List[str] = field(default_factory=list)
     kind: str = "categorical"
+    effect: Optional[Effect] = None
+    p_adjusted: Optional[float] = None
 
 
 @dataclass
@@ -354,7 +372,9 @@ def _continuous_row(name: str, group_cells: List[List[str]], opt: Options
     k = len(per_vals)
     sizes = [len(v) for v in per_vals]
     try:
-        if k == 2:
+        if k < 2:
+            pass  # single-group descriptive table: no between-group test
+        elif k == 2:
             if min(sizes) < 2:
                 notes.append(_msg(opt.lang, "skip_lt2"))
             elif use_nonparam:
@@ -406,13 +426,26 @@ def _continuous_row(name: str, group_cells: List[List[str]], opt: Options
         pvalue = None
 
     smd_val = None
+    effect_val: Optional[Effect] = None
     if k == 2:
         smd_val = smd.continuous_smd(per_vals[0], per_vals[1])
+        if opt.effect:
+            # Keep the effect coherent with the reported test: a parametric
+            # test -> difference in means with the matching (pooled/Welch) CI;
+            # a rank test -> Hodges-Lehmann median shift.
+            if test_name == "Student t":
+                effect_val = mean_difference(per_vals[0], per_vals[1],
+                                             kind="student")
+            elif test_name == "Welch t":
+                effect_val = mean_difference(per_vals[0], per_vals[1],
+                                             kind="welch")
+            elif test_name == "Mann-Whitney U":
+                effect_val = hodges_lehmann(per_vals[0], per_vals[1])
 
     return ContinuousRow(
         name=name, per_group=per_group, overall=overall, display=display,
         test_name=test_name, pvalue=pvalue, smd=smd_val,
-        n_missing_total=sum(per_missing), notes=notes)
+        n_missing_total=sum(per_missing), notes=notes, effect=effect_val)
 
 
 # --------------------------------------------------------------------------- #
@@ -481,41 +514,65 @@ def _categorical_row(name: str, group_cells: List[List[str]], opt: Options
     # categories.
     test_levels = list(range(n_real))
     table = [[counts[li][gi] for gi in range(k)] for li in test_levels]
-    try:
-        is_2x2 = len(table) == 2 and k == 2
-        if is_2x2 and (opt.force_fisher or cat_tests.min_expected(table) < 5):
-            res = cat_tests.fisher_exact_2x2(table)
-            test_name, pvalue = "Fisher exact", res.pvalue
-        else:
-            res = cat_tests.chi_square(table)
-            test_name, pvalue = "Pearson χ²", res.pvalue
-            if res.min_expected < 5:
-                notes.append(_msg(opt.lang, "chi_expected_low"))
-    except ValueError:
-        notes.append(_msg(opt.lang, "test_failed"))
-        test_name, pvalue = "—", None
+    if k >= 2:  # a single-group descriptive table carries no association test
+        try:
+            is_2x2 = len(table) == 2 and k == 2
+            if is_2x2 and (opt.force_fisher or cat_tests.min_expected(table) < 5):
+                res = cat_tests.fisher_exact_2x2(table)
+                test_name, pvalue = "Fisher exact", res.pvalue
+            else:
+                res = cat_tests.chi_square(table)
+                test_name, pvalue = "Pearson χ²", res.pvalue
+                if res.min_expected < 5:
+                    notes.append(_msg(opt.lang, "chi_expected_low"))
+        except ValueError:
+            notes.append(_msg(opt.lang, "test_failed"))
+            test_name, pvalue = "—", None
 
     if pvalue is not None and (math.isnan(pvalue) or math.isinf(pvalue)):
         pvalue = None
 
     smd_val = None
+    effect_val: Optional[Effect] = None
     if k == 2:
         c1 = [counts[li][0] for li in test_levels]
         c2 = [counts[li][1] for li in test_levels]
         smd_val = smd.categorical_smd(c1, c2)
+        # A scalar effect is only defined for a binary (2-level) categorical:
+        # the risk (proportion) difference of the index level. The index level
+        # is the non-reference one (mirroring --binary-single's default of
+        # showing the second level; --ref COL=level flips it).
+        if opt.effect and n_real == 2:
+            index = 1
+            ref_level = opt.ref.get(name)
+            if ref_level is not None and ref_level == real_levels[1]:
+                index = 0
+            n1 = sum(counts[li][0] for li in test_levels)  # non-missing group 0
+            n2 = sum(counts[li][1] for li in test_levels)  # non-missing group 1
+            effect_val = risk_difference(counts[index][0], n1,
+                                         counts[index][1], n2)
+            if effect_val is not None:
+                # Record which level the risk difference is FOR, so the table
+                # is not ambiguous about a binary variable's two levels.
+                effect_val.index_level = real_levels[index]
+                effect_val.reference_level = real_levels[1 - index]
 
     return CategoricalRow(
         name=name, levels=cat_levels, denom_per_group=denom_per_group,
         overall_denom=overall_denom, missing_per_group=missing_per_group,
         test_name=test_name, pvalue=pvalue, smd=smd_val,
-        n_missing_total=sum(missing_per_group), pct=opt.pct, notes=notes)
+        n_missing_total=sum(missing_per_group), pct=opt.pct, notes=notes,
+        effect=effect_val)
 
 
 # --------------------------------------------------------------------------- #
 # top level
 # --------------------------------------------------------------------------- #
 def build_table1(frame: Frame, opt: Options) -> Table1:
-    if not frame.has(opt.group_col):
+    # A missing group_col (== None) is a whole-cohort DESCRIPTIVE table: one
+    # "Overall" column, no tests / SMD / effect / adjusted p.
+    single_group = opt.group_col is None
+    if not single_group and not frame.has(opt.group_col):
         raise ValueError(
             f"그룹 열 '{opt.group_col}' 을(를) 찾을 수 없습니다. "
             f"헤더: {frame.header}")
@@ -534,40 +591,48 @@ def build_table1(frame: Frame, opt: Options) -> Table1:
     if not var_cols:
         raise ValueError("분석할 변수 열이 없습니다.")
 
-    # Retain rows with a non-missing group; record group order (first-seen).
-    group_raw = frame.column(opt.group_col)
-    keep_idx: List[int] = []
-    dropped_group = 0
-    group_order: List[str] = []
-    for i, g in enumerate(group_raw):
-        if is_missing(g):
-            dropped_group += 1
-            continue
-        lab = g.strip()
-        if lab not in group_order:
-            group_order.append(lab)
-        keep_idx.append(i)
-    if dropped_group:
-        warnings.append(_msg(opt.lang, "warn_group_missing", n=dropped_group))
-    if len(group_order) < 2:
-        raise ValueError(
-            f"그룹이 2개 미만입니다(발견: {group_order or '없음'}). "
-            "'--group' 열에 2개 이상의 그룹 라벨이 필요합니다.")
+    if single_group:
+        # Every row belongs to one synthetic "Overall" group.
+        overall_label = "Overall" if (opt.lang or "ko") == "en" else "전체"
+        keep_idx = list(range(frame.nrows))
+        group_order = [overall_label]
+        row_index_by_group = {overall_label: list(keep_idx)}
+    else:
+        # Retain rows with a non-missing group; record group order (first-seen).
+        group_raw = frame.column(opt.group_col)
+        keep_idx = []
+        dropped_group = 0
+        group_order = []
+        for i, g in enumerate(group_raw):
+            if is_missing(g):
+                dropped_group += 1
+                continue
+            lab = g.strip()
+            if lab not in group_order:
+                group_order.append(lab)
+            keep_idx.append(i)
+        if dropped_group:
+            warnings.append(_msg(opt.lang, "warn_group_missing", n=dropped_group))
+        if len(group_order) < 2:
+            raise ValueError(
+                f"그룹이 2개 미만입니다(발견: {group_order or '없음'}). "
+                "'--group' 열에 2개 이상의 그룹 라벨이 필요합니다. "
+                "(전체 코호트를 요약하려면 '--group' 없이 실행하세요.)")
 
-    # Warn on group labels that differ only in case (e.g. "Device" vs "device"):
-    # almost always one arm split by a data-entry inconsistency, which would
-    # otherwise silently render as extra arms.
-    by_lower: Dict[str, List[str]] = {}
-    for g in group_order:
-        by_lower.setdefault(g.lower(), []).append(g)
-    for variants in by_lower.values():
-        if len(variants) > 1:
-            warnings.append(_msg(opt.lang, "warn_group_case",
-                                 labels=", ".join(variants)))
+        # Warn on group labels that differ only in case (e.g. "Device" vs
+        # "device"): almost always one arm split by a data-entry inconsistency,
+        # which would otherwise silently render as extra arms.
+        by_lower: Dict[str, List[str]] = {}
+        for g in group_order:
+            by_lower.setdefault(g.lower(), []).append(g)
+        for variants in by_lower.values():
+            if len(variants) > 1:
+                warnings.append(_msg(opt.lang, "warn_group_case",
+                                     labels=", ".join(variants)))
 
-    row_index_by_group: Dict[str, List[int]] = {g: [] for g in group_order}
-    for i in keep_idx:
-        row_index_by_group[group_raw[i].strip()].append(i)
+        row_index_by_group = {g: [] for g in group_order}
+        for i in keep_idx:
+            row_index_by_group[group_raw[i].strip()].append(i)
     group_sizes = [len(row_index_by_group[g]) for g in group_order]
     overall_size = sum(group_sizes)
 
@@ -640,11 +705,25 @@ def build_table1(frame: Frame, opt: Options) -> Table1:
     if not rows:
         raise ValueError("요약할 수 있는 변수가 없습니다(모두 결측/제외).")
 
+    # Multiple-comparison adjustment across the per-variable primary p-values
+    # (one per row, never per level). Untestable variables (pvalue None) pass
+    # through and do not count toward the family size.
+    padjust = normalize_method(opt.padjust)
+    if padjust != "none":
+        adj = adjust_pvalues([getattr(r, "pvalue", None) for r in rows], padjust)
+        for r, a in zip(rows, adj):
+            r.p_adjusted = a
+
     meta = {
         "group_col": opt.group_col,
         "alpha_norm": opt.alpha_norm,
         "pct": opt.pct,
+        "single_group": single_group,
         "two_group": len(group_order) == 2,
+        "padjust": padjust,
+        # An effect/CI column is only actually present for a two-group table
+        # (between-group difference) or, in descriptive mode, a one-sample CI.
+        "effect": bool(opt.effect) and (len(group_order) == 2 or single_group),
     }
     return Table1(groups=group_order, group_sizes=group_sizes,
                   overall_size=overall_size, rows=rows,

@@ -39,8 +39,10 @@ def _build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument("csv", help="입력 CSV 파일 경로")
-    p.add_argument("--group", "-g", required=True,
-                   help="그룹(군) 라벨이 담긴 열 이름 (예: arm, treatment)")
+    p.add_argument("--group", "-g", default=None,
+                   help="그룹(군) 라벨이 담긴 열 이름 (예: arm, treatment). "
+                        "생략하면 전체 코호트를 한 열로 요약하는 기술통계표"
+                        "(검정·SMD·차이·보정 없음)를 만듭니다")
     p.add_argument("--vars",
                    help="요약할 변수 열들(쉼표 구분). 미지정 시 그룹 열을 뺀 전체")
     p.add_argument("--continuous",
@@ -84,6 +86,15 @@ def _build_parser() -> argparse.ArgumentParser:
                         "p값 대신 SMD로 균형을 보고)")
     p.add_argument("--range", dest="range", action="store_true",
                    help="연속형 셀에 (최소–최대) 범위 추가")
+    p.add_argument("--effect", action="store_true",
+                   help="두 군 차이(95%% CI) 열 추가: 연속형은 평균차(모수)/"
+                        "Hodges-Lehmann 중앙값차(비모수), 이진형은 위험차(%%p, "
+                        "Newcombe). 2군 비교에만 적용")
+    p.add_argument("--padjust", choices=["none", "bonferroni", "holm",
+                                         "bh", "by"], default="none",
+                   help="변수별 p값에 다중비교 보정 열 추가: none(기본)·bonferroni·"
+                        "holm·bh(Benjamini-Hochberg)·by(Benjamini-Yekutieli). "
+                        "무작위배정 시험의 기저 p값 보정은 비권장(비교/관찰 연구용)")
     p.add_argument("--lang", choices=["ko", "en"], default="ko",
                    help="표 라벨 언어: ko(기본)·en(영문 저널 제출용)")
     p.add_argument("--labels", nargs="*", metavar="COL=이름", default=None,
@@ -91,8 +102,8 @@ def _build_parser() -> argparse.ArgumentParser:
                         "ahi='AHI (events/h)')")
     p.add_argument("--decimals", type=int, default=1,
                    help="연속형 통계 소수 자릿수 (기본 1, 음수 불가)")
-    p.add_argument("--format", "-f", choices=["md", "csv", "tsv", "json"],
-                   default="md", help="출력 형식 (기본 md)")
+    p.add_argument("--format", "-f", choices=["md", "csv", "tsv", "json", "html"],
+                   default="md", help="출력 형식 (기본 md; html = Word/저널 붙여넣기용)")
     p.add_argument("--delimiter",
                    help="입력 CSV 구분자(미지정 시 자동 감지)")
     p.add_argument("-o", "--out", help="출력 파일 경로(미지정 시 화면 출력)")
@@ -164,7 +175,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 2
 
     opt = Options(
-        group_col=args.group,
+        group_col=args.group,   # None -> single-group descriptive table
         var_cols=_split(args.vars) or None,
         continuous=_split(args.continuous),
         categorical=_split(args.categorical),
@@ -183,6 +194,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         decimals=args.decimals,
         show_pvalue=not args.no_pvalue,
         show_range=args.range,
+        effect=args.effect,
+        padjust=args.padjust,
         lang=args.lang,
         labels=labels,
     )
@@ -190,6 +203,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         table = build_table1(frame, opt)
     except ValueError as exc:
         print(f"분석 오류: {exc}", file=sys.stderr)
+        return 2
+    except OverflowError:
+        # Astronomically-large magnitudes (~1e308) overflow a sum-of-squares.
+        # Never let the traceback reach the researcher; ask them to rescale.
+        print("분석 오류: 값의 크기가 너무 커서 계산할 수 없습니다"
+              "(예: 1e308 규모). 단위를 바꿔 값을 축소한 뒤 다시 실행하세요.",
+              file=sys.stderr)
         return 2
 
     text = render(table, opt, fmt=args.format)
