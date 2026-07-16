@@ -10,12 +10,13 @@
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence
 
 import numpy as np
 
-from .stats import chi2_sf
+from .stats import chi2_sf, ncx2_nc_for_quantile, ncx2_sf
 
 
 def correlation_matrix(x: np.ndarray) -> np.ndarray:
@@ -231,6 +232,194 @@ def paf_loadings(r: np.ndarray, k: int, max_iter: int = 100,
                      converged=converged, heywood=heywood)
 
 
+@dataclass
+class MLResult:
+    loadings: np.ndarray        # (p, k) 비회전 최대우도 적재
+    uniquenesses: np.ndarray    # (p,) 고유분산 Ψ
+    communalities: np.ndarray   # (p,) = 1 − Ψ
+    criterion: float            # 최소화된 불일치함수 F_min (Lawley-Maxwell)
+    n_iter: int
+    converged: bool
+    heywood: bool               # Ψ가 하한에 붙은 문항 존재(부적절해)
+
+
+# ML 고유분산의 하한. 0이면 목적함수가 발산하므로 R의 factanal과 같은 관례값을 쓴다.
+_ML_PSI_MIN = 0.005
+
+
+def _ml_objective(psi: np.ndarray, r: np.ndarray, k: int) -> float:
+    """Lawley-Maxwell 프로파일 불일치함수 F(Ψ).
+
+    Ψ가 주어지면 Λ는 해석적으로 결정되므로, 우도는 Ψ만의 함수로 축약된다:
+    F(Ψ) = Σ_{j>k} (λ_j − ln λ_j − 1),  λ_j = Ψ^{-1/2} R Ψ^{-1/2} 의 고유값(내림차순).
+    """
+    sc = 1.0 / np.sqrt(psi)
+    sstar = r * np.outer(sc, sc)
+    e = np.linalg.eigvalsh(sstar)[::-1][k:]
+    if np.any(e <= 1e-12):      # 비양정부호/특이 → 이 Ψ는 실행 불가 영역
+        return 1e10
+    return float(np.sum(e - np.log(e) - 1.0))
+
+
+def _ml_loadings_given_psi(psi: np.ndarray, r: np.ndarray, k: int) -> np.ndarray:
+    """주어진 Ψ에서 우도를 최대화하는 적재 Λ = Ψ^{1/2} · V_k · sqrt(max(λ_k − 1, 0))."""
+    sc = 1.0 / np.sqrt(psi)
+    sstar = r * np.outer(sc, sc)
+    vals, vecs = np.linalg.eigh(sstar)
+    order = np.argsort(vals)[::-1][:k]
+    load = vecs[:, order] * np.sqrt(np.clip(vals[order] - 1.0, 0.0, None))
+    return load * np.sqrt(psi)[:, None]
+
+
+def _ml_gradient(psi: np.ndarray, r: np.ndarray, k: int) -> np.ndarray:
+    """∂F/∂ψ_i = diag(ΛΛᵀ + Ψ − R)_i / ψ_i²  (프로파일 목적함수의 해석적 기울기)."""
+    load = _ml_loadings_given_psi(psi, r, k)
+    g = load @ load.T + np.diag(psi) - r
+    return np.diag(g) / psi ** 2
+
+
+def ml_factor_analysis(r: np.ndarray, k: int, max_iter: int = 500,
+                       tol: float = 1e-9) -> MLResult:
+    """최대우도(ML) 공통요인 추출 — 다변량 정규 가정 하의 요인모형 적합.
+
+    PCA/PAF와 달리 ML은 **확률모형**을 적합하므로 χ² 적합도 검정과 RMSEA/TLI/CFI 같은
+    공식 적합도지수를 낼 수 있다(EFA 게재 표에서 리뷰어가 요구하는 지표). R의 `factanal`,
+    SPSS의 '최대우도' 추출과 같은 계열이며, 프로파일 우도 F(Ψ)를 고유분산 Ψ에 대해
+    상자제약(0.005 ≤ ψ ≤ 1) 최소화한 뒤 Λ를 해석적으로 복원한다.
+
+    최적화는 사영 Barzilai-Borwein 기울기법 + 백트래킹 선탐색(scipy 불필요).
+    초기값은 factanal과 동일한 ψ_i = (1 − k/(2p)) / R⁻¹_ii.
+    Ψ가 하한에 붙으면 Heywood 케이스로 플래그한다.
+    """
+    p = r.shape[0]
+    if k < 1 or k >= p:
+        raise ValueError(f"ML 추출의 요인 수는 1..{p - 1} 범위여야 합니다.")
+
+    inv_diag = np.diag(_safe_inv(r)).astype(float)
+    inv_diag = np.where(inv_diag > 1e-12, inv_diag, 1.0)
+    psi = np.clip((1.0 - 0.5 * k / p) / inv_diag, _ML_PSI_MIN, 1.0)
+
+    def f(v):
+        return _ml_objective(v, r, k)
+
+    def g(v):
+        return _ml_gradient(v, r, k)
+
+    fx = f(psi)
+    gx = g(psi)
+    step = 1.0 / max(1e-12, float(np.max(np.abs(gx))))
+    converged = False
+    n_iter = 0
+    for it in range(1, max_iter + 1):
+        n_iter = it
+        # 사영 백트래킹: 실행가능 상자 안으로 사영한 뒤 충분감소(Armijo)를 만족할 때까지 축소.
+        ok = False
+        for _ in range(60):
+            xn = np.clip(psi - step * gx, _ML_PSI_MIN, 1.0)
+            fn = f(xn)
+            d = psi - xn
+            if fn <= fx - 1e-4 * float(gx @ d):
+                ok = True
+                break
+            step *= 0.5
+        if not ok:
+            converged = True     # 더 이상 감소 방향을 찾지 못함 = 정류점
+            break
+        gn = g(xn)
+        s = xn - psi
+        y = gn - gx
+        psi, fx, gx = xn, fn, gn
+        if float(np.max(np.abs(s))) < tol:
+            converged = True
+            break
+        sy = float(s @ y)
+        # BB 스텝(곡률 정보). 음/영 곡률이면 보수적으로 확장만 한다.
+        step = float(s @ s) / sy if sy > 1e-14 else min(step * 2.0, 1e8)
+
+    load = _ml_loadings_given_psi(psi, r, k)
+    heywood = bool(np.any(psi <= _ML_PSI_MIN + 1e-12))
+    return MLResult(loadings=load, uniquenesses=psi, communalities=1.0 - psi,
+                    criterion=float(fx), n_iter=n_iter, converged=converged,
+                    heywood=heywood)
+
+
+def ml_max_factors(p: int) -> int:
+    """자유도가 양수로 남는 ML 요인 수의 상한(모형 식별 가능 최대 k)."""
+    k = 0
+    while ml_df(p, k + 1) > 0:
+        k += 1
+    return k
+
+
+def ml_df(p: int, k: int) -> int:
+    """ML 요인모형의 자유도: [(p−k)² − (p+k)] / 2."""
+    return int(((p - k) ** 2 - (p + k)) // 2)
+
+
+def fit_indices(criterion: float, n: int, p: int, k: int,
+                null_chi_square: Optional[float] = None) -> dict:
+    """ML 요인해의 공식 적합도지수(χ², RMSEA+90% CI, TLI, CFI, AIC/BIC).
+
+    - χ² = [ (n−1) − (2p+5)/6 − 2k/3 ] · F_min  (Bartlett 보정, factanal과 동일)
+    - RMSEA = sqrt( max(χ²−df, 0) / (df·(n−1)) ),  90% CI는 비중심 카이제곱 역산(Steiger).
+    - p_close: 근접적합 검정 H0: RMSEA ≤ .05 의 p값.
+    - TLI/CFI는 독립모형(모든 상관=0)을 기준선으로 삼는다. 독립모형의 χ²는 Bartlett
+      통계량과 정확히 같다(k=0에서 F = −ln|R| 이므로) — null_chi_square로 넘긴다.
+    - AIC/BIC는 χ²에 대한 상대값(χ²−2df, χ²−df·ln n)으로, k 비교에만 쓴다(작을수록 좋음).
+
+    df ≤ 0(과다모수화로 모형 식별 불가)이면 None 필드로 반환한다.
+    """
+    df = ml_df(p, k)
+    out: dict = {"df": df, "criterion": float(criterion)}
+    if df <= 0:
+        out.update({"chi_square": None, "p_value": None, "rmsea": None,
+                    "rmsea_lo": None, "rmsea_hi": None, "p_close": None,
+                    "tli": None, "cfi": None, "aic": None, "bic": None,
+                    "identified": False})
+        return out
+
+    mult = (n - 1) - (2.0 * p + 5.0) / 6.0 - (2.0 * k) / 3.0
+    chi = float(max(mult, 0.0) * criterion)
+    out["identified"] = True
+    out["chi_square"] = chi
+    out["p_value"] = float(chi2_sf(chi, df)) if chi > 0 else 1.0
+
+    denom = df * (n - 1.0)
+    out["rmsea"] = float(math.sqrt(max(chi - df, 0.0) / denom)) if denom > 0 else None
+    # 90% CI: CDF가 비중심모수에 대해 단조감소하므로 상측확률 .95→하한, .05→상한.
+    try:
+        lo_nc = ncx2_nc_for_quantile(chi, df, 0.95)
+        hi_nc = ncx2_nc_for_quantile(chi, df, 0.05)
+        out["rmsea_lo"] = float(math.sqrt(lo_nc / denom))
+        out["rmsea_hi"] = float(math.sqrt(hi_nc / denom))
+        # 근접적합 검정(PCLOSE): H0: RMSEA ≤ .05 → λ0 = .05²·df·(n−1)
+        # 상측꼬리를 직접 합산(ncx2_sf)한다 — 1−CDF로는 아주 작은 p값이 상쇄로 뭉개진다.
+        nc0 = 0.05 ** 2 * denom
+        out["p_close"] = float(ncx2_sf(chi, df, nc0))
+    except (ValueError, OverflowError):
+        out["rmsea_lo"] = out["rmsea_hi"] = out["p_close"] = None
+
+    if null_chi_square is not None and null_chi_square > 0:
+        df0 = p * (p - 1) / 2.0
+        d_m = max(chi - df, 0.0)
+        d_0 = max(null_chi_square - df0, 0.0)
+        # CFI 분모는 두 비중심성의 최댓값(Bentler) — 모형이 기준선보다 나쁠 때도 [0,1] 유계.
+        out["cfi"] = float(1.0 - d_m / max(d_0, d_m)) if max(d_0, d_m) > 0 else 1.0
+        ratio0 = null_chi_square / df0 if df0 > 0 else None
+        if ratio0 is not None and abs(ratio0 - 1.0) > 1e-12:
+            tli = (ratio0 - chi / df) / (ratio0 - 1.0)
+            out["tli"] = float(tli)
+        else:
+            out["tli"] = None
+    else:
+        out["cfi"] = None
+        out["tli"] = None
+
+    out["aic"] = float(chi - 2.0 * df)
+    out["bic"] = float(chi - df * math.log(n)) if n > 1 else None
+    return out
+
+
 def velicer_map(r: np.ndarray, max_components: Optional[int] = None) -> dict:
     """Velicer의 MAP(최소평균편상관) 검정: 유지 요인 수를 편상관으로 결정.
 
@@ -440,6 +629,108 @@ def subscale_scores(x: np.ndarray, groups: Sequence[int], k: int,
         sub = x[:, idx]
         out[:, f] = sub.sum(axis=1) if method == "sum" else sub.mean(axis=1)
     return out
+
+
+def item_descriptives(x: np.ndarray, scale_min: Optional[float] = None,
+                      scale_max: Optional[float] = None) -> List[Dict]:
+    """문항별 기술통계: 평균·SD·왜도·첨도·최솟값/최댓값·바닥/천장 비율.
+
+    척도 타당화 논문의 'Table 1'이자, 이 도구의 다른 선택을 결정해 주는 근거다:
+    - **바닥/천장 효과**: 응답이 척도 양 끝에 몰리면(관례상 >15%) 그 문항은 변별력이
+      거의 없다. COSMIN이 별도 측정속성으로 다루며, 요인분석은 이를 알려주지 않는다
+      (분산이 줄어든 문항도 적재는 높게 나올 수 있다).
+    - **왜도/첨도**: |왜도|>2 또는 |첨도|>7 이면(Curran, West & Finch 1996) 다변량
+      정규성 가정이 깨져 ML·피어슨이 부적절해진다 → 폴리코릭 전환의 객관적 근거.
+
+    왜도·첨도는 적률 기반(g1, g2 = 초과첨도)이며 표본분산은 ddof=1을 쓴다.
+    scale_min/max가 주어지면 그 값을, 없으면 관측 최솟값/최댓값을 바닥/천장 기준으로 쓴다.
+    """
+    n, p = x.shape
+    out: List[Dict] = []
+    for i in range(p):
+        col = x[:, i]
+        mu = float(col.mean())
+        sd = float(col.std(ddof=1)) if n > 1 else 0.0
+        m2 = float(((col - mu) ** 2).mean())
+        if m2 > 1e-12:
+            skew = float(((col - mu) ** 3).mean() / m2 ** 1.5)
+            kurt = float(((col - mu) ** 4).mean() / m2 ** 2 - 3.0)
+        else:
+            skew = kurt = 0.0     # 상수 문항은 모양이 정의되지 않음
+        lo = scale_min if scale_min is not None else float(col.min())
+        hi = scale_max if scale_max is not None else float(col.max())
+        floor = float(np.mean(np.isclose(col, lo))) if n else 0.0
+        ceil = float(np.mean(np.isclose(col, hi))) if n else 0.0
+        out.append({
+            "mean": mu, "sd": sd, "skew": skew, "kurtosis": kurt,
+            "min": float(col.min()), "max": float(col.max()),
+            "floor_prop": floor, "ceiling_prop": ceil,
+            "n_categories": int(np.unique(col).size),
+            "extreme_threshold": floor_ceiling_threshold(int(np.unique(col).size)),
+        })
+    return out
+
+
+# COSMIN 관례의 바닥/천장 기준(총점·다범주 기준). 문항 단위에는 그대로 쓰면 안 된다.
+FLOOR_CEILING_BASE = 0.15
+
+
+def floor_ceiling_threshold(n_categories: int) -> float:
+    """문항의 바닥/천장 효과 판정 기준을 응답 범주 수에 맞춰 정한다.
+
+    '끝 범주 응답 >15%'라는 관례는 **총점**(범주가 많은 값)에서 나온 기준이다. 5점
+    리커트 문항은 균등하게 답해도 각 끝 범주가 20%라, 15%를 그대로 문항에 적용하면
+    정상 문항까지 전부 '바닥/천장 효과'로 잡힌다(거짓 경보).
+
+    그래서 균등응답 기대치(1/C)의 1.5배와 15% 중 **큰 값**을 쓴다:
+    5점 → 30%, 7점 → 21.4%, 범주가 많거나 연속형 → 15%로 수렴.
+    """
+    if n_categories < 2:
+        return 1.0          # 상수 문항은 여기서 잡지 않는다(분산 0으로 따로 걸림)
+    return max(FLOOR_CEILING_BASE, 1.5 / n_categories)
+
+
+def alpha_if_deleted(x: np.ndarray, groups: Sequence[int], k: int) -> np.ndarray:
+    """문항 i를 뺐을 때 그 문항이 속한 요인의 Cronbach α (p,).
+
+    척도 개발에서 가장 실행에 옮기기 쉬운 숫자다: "이 문항을 지우면 신뢰도가 오르나?"
+    현재 α보다 **높아지면** 그 문항은 하위척도를 갉아먹고 있다는 뜻이다.
+    요인 내 문항이 3개 미만이면(빼고 나면 2개 미만이라 α 정의 불가) NaN.
+    """
+    p = x.shape[1]
+    groups = np.asarray(list(groups))
+    out = np.full(p, np.nan)
+    for i in range(p):
+        mates = np.where((groups == groups[i]) & (np.arange(p) != i))[0]
+        if mates.size < 2:
+            continue
+        a = cronbach_alpha(x[:, mates])
+        if a is not None:
+            out[i] = a
+    return out
+
+
+def regression_factor_scores(x: np.ndarray, loadings: np.ndarray, r: np.ndarray,
+                             phi: Optional[np.ndarray] = None) -> np.ndarray:
+    """Thurstone 회귀법 요인점수 (n, k) — 표준화 응답을 요인에 회귀해 추정한다.
+
+    W = R⁻¹ · S,  F = Z · W.  Z는 열별 표준화(z) 응답, S는 구조행렬(요인-문항 상관;
+    직교회전이면 S=Λ, 사교회전이면 S=ΛΦ). SPSS의 '회귀(regression)' 요인점수와 같은 계열.
+
+    합산점수(sum/mean)와 달리 **모든 문항의 적재를 가중치로** 반영하므로, 교차적재나
+    적재 크기 차이가 있는 척도에서 요인을 더 충실히 대표한다. 다만 요인해에 의존하고
+    표본 특이적이라, 척도 개발 단계에서는 합산점수를 함께 보는 것이 관례다.
+
+    R이 특이하면 유사역행렬(pinv)로 대체한다. 반환 점수는 표준화 스케일(대략 평균0)이다.
+    """
+    s = loadings if phi is None else loadings @ phi
+    w = _safe_inv(r) @ s
+    mu = x.mean(axis=0)
+    sd = x.std(axis=0, ddof=1)
+    # 분산 0인 문항은 z 정의 불가 → 해당 문항 기여를 0으로 두어 NaN 전파를 막는다.
+    sd = np.where(sd > 1e-12, sd, np.inf)
+    z = (x - mu) / sd
+    return z @ w
 
 
 def reproduced_correlation(loadings: np.ndarray,

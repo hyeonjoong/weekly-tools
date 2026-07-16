@@ -145,7 +145,7 @@ def test_analyze_paf_less_optimistic_than_pca():
 def test_analyze_invalid_extraction_errors():
     prep = _two_factor_data()
     with pytest.raises(ValueError, match="extraction"):
-        analyze(prep, parallel_iter=0, extraction="ml")
+        analyze(prep, parallel_iter=0, extraction="mle")
 
 
 def test_paf_eigenvalues_still_from_full_r():
@@ -278,8 +278,10 @@ def test_loadings_table_csv_structure_and_values():
     # 요약 행 존재 확인(논문 표 footer)
     flat = {r[0] for r in rows if r}
     for tag in ("_SS_loadings", "_pct_variance", "_cumulative_pct",
-                "_omega", "_cronbach_alpha", "_factor_correlation"):
+                "_omega", "_cronbach_alpha"):
         assert tag in flat
+    # Φ 행은 '어느 회전 기준인지'를 이름에 담는다(직교 해에 Φ를 함께 보고하는 사고 방지).
+    assert any(str(c).startswith("_factor_correlation") for c in flat)
 
 
 def test_loadings_table_csv_rounds_floats():
@@ -467,8 +469,13 @@ def test_scores_out_no_id_uses_row_numbers(tmp_path, capsys):
     p = tmp_path / "d.csv"
     rng = np.random.default_rng(3)
     lines = ["Q1,Q2,Q3,Q4"]
+    # 방향이 일관된 2요인 구조로 만든다. 순수 난수는 문항 방향이 제멋대로라
+    # 역문항 미처리 가드(주적재 음수)에 정당하게 걸려 합산점수 저장이 거부된다.
     for _ in range(40):
-        lines.append(",".join(map(str, rng.integers(1, 6, 4))))
+        f1, f2 = rng.normal(), rng.normal()
+        vals = [f1 + 0.3 * rng.normal(), f1 + 0.3 * rng.normal(),
+                f2 + 0.3 * rng.normal(), f2 + 0.3 * rng.normal()]
+        lines.append(",".join(f"{int(np.clip(round(v * 1.2 + 3), 1, 5))}" for v in vals))
     p.write_text("\n".join(lines) + "\n", encoding="utf-8")
     out = tmp_path / "s.csv"
     rc = run([str(p), "--parallel-iter", "0", "--scores-out", str(out), "--n-factors", "2"])
@@ -494,7 +501,8 @@ def test_scores_out_no_id_uses_original_row_numbers(tmp_path):
     # ID가 없고 결측으로 행이 삭제되면, row 열은 '원본 CSV 행번호'여야 한다(순번 아님).
     # 2번째 데이터행(원본 row 2)에 결측을 넣어 삭제 → 남은 원본 행번호 1,3,4,5.
     p = tmp_path / "d.csv"
-    p.write_text("Q1,Q2,Q3,Q4\n1,2,3,4\n2,,3,4\n5,1,2,3\n3,4,5,1\n4,2,1,5\n",
+    # 문항 방향이 일관된(모두 같은 쪽으로 움직이는) 값 — 역문항 가드에 걸리지 않게.
+    p.write_text("Q1,Q2,Q3,Q4\n1,1,2,2\n2,,3,4\n5,5,4,4\n3,3,3,3\n4,4,5,5\n",
                  encoding="utf-8")
     out = tmp_path / "s.csv"
     rc = run([str(p), "--parallel-iter", "0", "--scores-out", str(out), "--n-factors", "2"])

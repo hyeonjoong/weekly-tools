@@ -4,17 +4,20 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "factorscan"
-version = "0.1.0"
-description = "설문 척도 요인분석·타당도 진단: KMO · Bartlett · 고유값/평행분석 · 요인적재량(Varimax) · 공통성 · 문항-총점 상관"
+version = "0.2.0"
+description = "설문 척도 요인분석·타당도 진단: KMO · Bartlett · 요인 수(평행분석/MAP/ML 적합도) · PCA/PAF/ML 추출 · Varimax/Promax 회전 · 폴리코릭 · 결측 진단 (CSV/TSV/XLSX)"
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
 authors = [{ name = "hyeonjoong", email = "hyeonjoongk@gmail.com" }]
-keywords = ["factor-analysis", "EFA", "KMO", "Bartlett", "psychometrics", "survey", "validity", "clinical"]
+keywords = ["factor-analysis", "EFA", "KMO", "Bartlett", "psychometrics", "survey", "validity", "clinical",
+            "RMSEA", "maximum-likelihood", "polychoric", "parallel-analysis", "scale-validation"]
 dependencies = ["numpy>=1.21"]
 
 [project.optional-dependencies]
-test = ["pytest>=7.0"]
+# scipy는 '테스트 전용 오라클'이다(폴리코릭 적분·분포함수를 독립 검증). 배포 패키지는
+# 여전히 numpy만 의존한다 — factorscan/*.py 어디에서도 scipy를 import하지 않는다.
+test = ["pytest>=7.0", "scipy>=1.7"]
 
 [project.scripts]
 factorscan = "factorscan.cli:main"

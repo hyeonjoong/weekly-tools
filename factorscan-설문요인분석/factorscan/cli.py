@@ -15,7 +15,7 @@ from typing import List, Optional
 
 from . import __version__
 from .analyze import analyze
-from .dataio import (DataError, Dataset, apply_reverse, listwise, load_csv,
+from .dataio import (DataError, Dataset, apply_reverse, listwise, load_table,
                      reverse_range_violations, select_items)
 from .report import render
 
@@ -32,7 +32,9 @@ def build_parser() -> argparse.ArgumentParser:
         description="설문 척도 요인분석·타당도 진단: KMO · Bartlett · 고유값/평행분석 · "
                     "요인적재량(Varimax) · 공통성 · 문항-총점 상관",
     )
-    p.add_argument("csv", help="설문 응답 CSV 경로 (행=응답자, 열=문항)")
+    p.add_argument("csv", metavar="입력파일",
+                   help="설문 응답 파일 (행=응답자, 열=문항). "
+                        ".csv · .tsv · 엑셀 .xlsx 를 확장자로 자동 판별")
     p.add_argument("-c", "--config", help="설정 JSON (items/reverse/scale_range/id_cols)")
     p.add_argument("--items", help="분석할 문항 열, 쉼표구분 (미지정 시 숫자열 자동선택)")
     p.add_argument("--id-col", action="append", default=[], metavar="이름",
@@ -43,27 +45,41 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--na", action="append", default=[], metavar="값",
                    help="결측으로 처리할 추가 문자열(여러 번 지정 가능)")
     p.add_argument("--encoding", default="utf-8-sig",
-                   help="CSV 인코딩(기본 utf-8-sig; 한국어 엑셀 파일은 cp949/euc-kr)")
+                   help="CSV/TSV 인코딩(기본 utf-8-sig; 한국어 엑셀이 저장한 CSV는 cp949/euc-kr). "
+                        ".xlsx 에는 적용되지 않음")
+    p.add_argument("--sheet", metavar="이름",
+                   help="엑셀(.xlsx) 입력에서 읽을 시트 이름(기본: 첫 번째 시트)")
+    p.add_argument("--delimiter", metavar="문자",
+                   help="구분자 직접 지정(예: ';'). 기본은 확장자로 판별(.tsv→탭, 그 외→쉼표)")
     p.add_argument("-k", "--n-factors", type=int,
                    help="유지할 요인 수(미지정 시 평행분석 기준, 평행분석 끄면 Kaiser)")
-    p.add_argument("--extraction", choices=["pca", "paf"], default="pca",
-                   help="추출 방식: pca(주성분, SPSS 기본) · paf(주축분해, 공통요인 모형)")
+    p.add_argument("--extraction", choices=["pca", "paf", "ml"], default="pca",
+                   help="추출 방식: pca(주성분, SPSS 기본) · paf(주축분해, 공통요인 모형) · "
+                        "ml(최대우도, χ²/RMSEA/TLI/CFI 적합도지수 제공)")
+    p.add_argument("--fit-scan", action="store_true",
+                   help="요인 수 k=1..최대까지 ML 적합도지수를 훑어 표로 제시(--extraction ml 필요)")
     p.add_argument("--correlation", choices=["pearson", "polychoric"], default="pearson",
                    help="상관 방식: pearson(기본) · polychoric(순서형 리커트 잠재상관)")
     p.add_argument("--rotation", choices=["varimax", "promax", "none"], default="varimax",
                    help="회전 방식: varimax(직교, 기본) · promax(사교, 요인상관 허용) · none")
     p.add_argument("--parallel-iter", type=int, default=100,
                    help="평행분석 반복수(0이면 생략, 기본 100)")
-    p.add_argument("--seed", type=int, default=42, help="평행분석 난수 시드(재현용)")
+    p.add_argument("--seed", type=int, default=42, help="평행분석·부트스트랩 난수 시드(재현용)")
+    p.add_argument("--bootstrap", type=int, default=0, metavar="N",
+                   help="부트스트랩 재표본 N개로 적재량 95%% 신뢰구간과 요인 수 안정성을 추정"
+                        "(예: 500. 0이면 생략, 기본 0)")
     p.add_argument("--min-loading", type=float, default=0.40,
                    help="주요 적재/교차적재 판정 임계값(기본 0.40)")
     p.add_argument("--json", action="store_true", help="사람용 보고서 대신 JSON 출력")
     p.add_argument("--csv-out", metavar="경로",
                    help="문항×요인 적재표를 CSV 파일로 저장(논문 부록·엑셀용, utf-8-sig)")
+    p.add_argument("--eigen-out", metavar="경로",
+                   help="고유값·평행분석 기준선을 CSV로 저장(엑셀에서 스크리 도표를 그릴 표)")
     p.add_argument("--scores-out", metavar="경로",
                    help="응답자별 하위척도(요인) 점수를 CSV로 저장(결측제거 표본 기준)")
-    p.add_argument("--score-method", choices=["sum", "mean"], default="sum",
-                   help="하위척도 점수 계산: sum(합산, 기본) 또는 mean(평균)")
+    p.add_argument("--score-method", choices=["sum", "mean", "regression"], default="sum",
+                   help="하위척도 점수 계산: sum(합산, 기본) · mean(평균) · "
+                        "regression(Thurstone 회귀 요인점수, 전 문항 적재 가중·표준화)")
     p.add_argument("-V", "--version", action="version", version=f"factorscan {__version__}")
     return p
 
@@ -140,13 +156,36 @@ def run(argv: Optional[List[str]] = None) -> int:
     if not (0.0 <= args.min_loading <= 1.0):
         print("오류: --min-loading 은 0.0~1.0 사이여야 합니다.", file=sys.stderr)
         return 2
+    # 구분자는 정확히 한 글자여야 한다(csv 모듈 제약). 셸이 확장하지 않는 '\t'를
+    # 그대로 넘기는 것이 가장 흔한 실수라, 탭으로 해석해 준다.
+    if args.delimiter is not None:
+        if args.delimiter in ("\\t", "\\\\t", "tab", "TAB"):
+            args.delimiter = "\t"
+        if len(args.delimiter) != 1:
+            print(f"오류: --delimiter 는 한 글자여야 합니다(받은 값: '{args.delimiter}'). "
+                  f"탭 구분이면 --delimiter '\\t' 또는 파일 확장자를 .tsv 로 하세요.",
+                  file=sys.stderr)
+            return 2
+
+    # 적합도지수는 확률모형(ML)에서만 정의된다 — 조용히 무시하지 않고 명확히 거절한다.
+    if args.bootstrap < 0:
+        print("오류: --bootstrap 은 0 이상이어야 합니다.", file=sys.stderr)
+        return 2
+    if 0 < args.bootstrap < 100:
+        print(f"⚠ 경고: 부트스트랩 재표본이 적습니다(--bootstrap {args.bootstrap}). "
+              f"백분위 신뢰구간은 보통 500회 이상을 권장합니다.", file=sys.stderr)
+    if args.fit_scan and args.extraction != "ml":
+        print("오류: --fit-scan 은 --extraction ml 에서만 쓸 수 있습니다"
+              "(χ²/RMSEA 등 적합도지수는 최대우도 모형에서만 정의됩니다).", file=sys.stderr)
+        return 2
     if scale_min is not None and scale_max is not None and scale_min >= scale_max:
         print(f"오류: --scale-min({scale_min:g})은 --scale-max({scale_max:g})보다 작아야 합니다.",
               file=sys.stderr)
         return 2
 
     try:
-        columns = load_csv(args.csv, na_values=args.na, encoding=args.encoding)
+        columns = load_table(args.csv, na_values=args.na, encoding=args.encoding,
+                             sheet=args.sheet, delimiter=args.delimiter)
         # 지정한 ID 열이 실제로 없으면(오타·인코딩 깨짐) 조용히 넘기지 말고 알린다.
         unknown_id = [c for c in id_cols if c not in columns]
         if unknown_id:
@@ -176,6 +215,10 @@ def run(argv: Optional[List[str]] = None) -> int:
             min_loading=args.min_loading,
             extraction=args.extraction,
             correlation=args.correlation,
+            fit_scan=args.fit_scan,
+            scale_min=scale_min,
+            scale_max=scale_max,
+            bootstrap=args.bootstrap,
         )
     except (DataError, ValueError) as exc:
         print(f"오류: {exc}", file=sys.stderr)
@@ -196,6 +239,18 @@ def run(argv: Optional[List[str]] = None) -> int:
             return 1
         print(f"✓ 적재표를 저장했습니다: {args.csv_out}", file=sys.stderr)
 
+    if args.eigen_out:
+        from .report import eigen_table_csv
+        text = eigen_table_csv(result)
+        try:
+            with open(args.eigen_out, "w", encoding="utf-8-sig", newline="") as fh:
+                fh.write(text)
+        except OSError as exc:
+            print(f"고유값 CSV 저장 실패: {exc}", file=sys.stderr)
+            return 1
+        print(f"✓ 고유값·평행분석 표를 저장했습니다: {args.eigen_out} "
+              f"(엑셀에서 꺾은선 그래프 → 스크리 도표)", file=sys.stderr)
+
     if args.scores_out:
         import numpy as _np
         from .report import scores_table_csv
@@ -206,8 +261,13 @@ def run(argv: Optional[List[str]] = None) -> int:
                 id_pairs.append((name, [str(v) for v in columns[name][mask]]))
         # ID가 없을 때 원본 CSV 행번호로 역추적 가능하게(결측삭제로 순번 어긋남 방지).
         row_numbers = (_np.where(mask)[0] + 1).tolist() if mask is not None else None
-        text = scores_table_csv(result, prep.matrix, id_pairs,
-                                method=args.score_method, row_numbers=row_numbers)
+        try:
+            text = scores_table_csv(result, prep.matrix, id_pairs,
+                                    method=args.score_method, row_numbers=row_numbers)
+        except ValueError as exc:
+            # 오염된 점수를 쓰느니 파일을 만들지 않는다(원인·해결책은 예외 메시지에 담겨 있다).
+            print(f"오류: {exc}", file=sys.stderr)
+            return 1
         try:
             with open(args.scores_out, "w", encoding="utf-8-sig", newline="") as fh:
                 fh.write(text)
