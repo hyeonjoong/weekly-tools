@@ -205,6 +205,8 @@ class Prepared:
     n_used: int
     n_dropped: int
     coercion: Dict[str, int] = field(default_factory=dict)
+    # 원자료(raw) 행 중 결측제거 후 살아남은 행의 불리언 마스크 — ID 정렬·점수 내보내기용.
+    row_mask: Optional[np.ndarray] = None
 
 
 def listwise(ds: Dataset) -> Prepared:
@@ -218,4 +220,5 @@ def listwise(ds: Dataset) -> Prepared:
         n_used=int(used.shape[0]),
         n_dropped=int(ds.data.shape[0] - used.shape[0]),
         coercion=dict(getattr(ds, "coercion", {})),
+        row_mask=mask,
     )
