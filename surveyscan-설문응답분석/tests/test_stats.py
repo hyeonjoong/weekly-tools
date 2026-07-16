@@ -59,3 +59,74 @@ def test_cronbach_alpha_guards():
     assert stats.cronbach_alpha([[1], [2]]) is None  # 응답자 1명
     # 총점 분산 0 (모든 응답자 동일 총점)
     assert stats.cronbach_alpha([[1, 2], [2, 1]]) is None
+
+
+def test_quantile_known():
+    xs = [2, 4, 4, 4, 5, 5, 7, 9]  # numpy 기본(선형보간)과 동일
+    assert stats.quantile(xs, 0.25) == pytest.approx(4.0)
+    assert stats.quantile(xs, 0.75) == pytest.approx(5.5)
+    assert stats.quantile(xs, 0.0) == 2.0
+    assert stats.quantile(xs, 1.0) == 9.0
+    assert stats.quantile([7], 0.5) == 7.0
+    assert stats.quantile([], 0.5) is None
+    with pytest.raises(ValueError):
+        stats.quantile(xs, 1.5)
+
+
+def test_skewness_kurtosis_known():
+    xs = [2, 4, 4, 4, 5, 5, 7, 9]  # scipy bias=False 참조값
+    assert stats.skewness(xs) == pytest.approx(0.8184875533567996, abs=1e-9)
+    assert stats.kurtosis(xs) == pytest.approx(0.9406249999999998, abs=1e-9)
+
+
+def test_skewness_kurtosis_guards():
+    assert stats.skewness([1, 2]) is None  # n<3
+    assert stats.kurtosis([1, 2, 3]) is None  # n<4
+    # 분산 0
+    assert stats.skewness([5, 5, 5, 5]) is None
+    assert stats.kurtosis([5, 5, 5, 5]) is None
+
+
+def test_symmetric_distribution_zero_skew():
+    xs = [1, 2, 3, 4, 5]  # 평균 3 중심으로 대칭 -> 왜도 0
+    assert stats.skewness(xs) == pytest.approx(0.0, abs=1e-12)
+
+
+def test_cronbach_alpha_ci_feldt():
+    # 문헌 예시: alpha=0.90, n=100, k=10, 95% -> [0.868, 0.927]
+    ci = stats.cronbach_alpha_ci(0.90, 100, 10, 0.95)
+    assert ci[0] == pytest.approx(0.868, abs=1e-3)
+    assert ci[1] == pytest.approx(0.927, abs=1e-3)
+    # 하한 < alpha < 상한
+    assert ci[0] < 0.90 < ci[1]
+
+
+def test_cronbach_alpha_ci_guards():
+    assert stats.cronbach_alpha_ci(None, 50, 5) is None
+    assert stats.cronbach_alpha_ci(0.8, 1, 5) is None  # 응답자<2
+    assert stats.cronbach_alpha_ci(0.8, 50, 1) is None  # 문항<2
+    # 상한은 1.0으로 클램프
+    ci = stats.cronbach_alpha_ci(0.999, 200, 20, 0.95)
+    assert ci[1] <= 1.0
+
+
+def test_sem_from_alpha():
+    # SEM = SD * sqrt(1-alpha)
+    assert stats.sem_from_alpha(10.0, 0.75) == pytest.approx(5.0)
+    assert stats.sem_from_alpha(10.0, 1.0) == pytest.approx(0.0)
+    assert stats.sem_from_alpha(None, 0.8) is None
+    assert stats.sem_from_alpha(5.0, None) is None
+    # alpha>1 이면 정의불가
+    assert stats.sem_from_alpha(5.0, 1.2) is None
+
+
+def test_t_ci_mean():
+    xs = [2, 4, 4, 4, 5, 5, 7, 9]  # mean 5.0
+    lo, hi = stats.t_ci_mean(xs, 0.95)
+    assert lo < 5.0 < hi
+    # 손계산: mean=5, sd=2.138(ddof1), n=8, t.975(7)=2.3646 -> ±1.787
+    assert lo == pytest.approx(3.213, abs=1e-2)
+    assert hi == pytest.approx(6.787, abs=1e-2)
+    assert stats.t_ci_mean([3], 0.95) is None  # n<2
+    # 상수 벡터는 폭 0의 퇴화 CI (sd=0)
+    assert stats.t_ci_mean([5, 5, 5], 0.95) == (5.0, 5.0)

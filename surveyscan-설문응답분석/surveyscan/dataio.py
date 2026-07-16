@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import csv
+import math
 from typing import Dict, List, Optional, Sequence
 
 # 결측으로 간주할 문자열(소문자 비교, 공백 제거 후).
@@ -28,11 +29,17 @@ class SurveyData:
         columns: List[str],
         rows: List[Dict[str, Optional[float]]],
         unknown_id_columns: Optional[List[str]] = None,
+        id_columns: Optional[List[str]] = None,
+        id_values: Optional[List[Dict[str, str]]] = None,
     ):
         self.columns = columns
         self.rows = rows
         # --id-col 로 지정했으나 헤더에 없던 이름들(오타 감지용).
         self.unknown_id_columns = unknown_id_columns or []
+        # 분석에서 제외했지만 점수 내보내기에 다시 붙일 ID 컬럼 이름(헤더에 존재한 것만).
+        self.id_columns = id_columns or []
+        # 응답자 순서와 1:1 대응하는 ID 값(원문 문자열). rows 와 길이 동일.
+        self.id_values = id_values or []
 
     @property
     def n_respondents(self) -> int:
@@ -69,7 +76,11 @@ def _parse_cell(raw: str, na_values: set, na_numbers: Sequence[float]) -> Option
         return None
     try:
         val = float(s)
-    except ValueError:
+    except (ValueError, OverflowError):
+        return None
+    # inf/-inf/nan(예: 'inf', '1e400', '+nan') 는 통계를 오염시키고 JSON을 깨뜨리므로
+    # 결측으로 처리한다('nan'/'NaN' 문자열은 이미 DEFAULT_NA에서 걸러짐).
+    if not math.isfinite(val):
         return None
     if val in na_numbers:
         return None
@@ -103,7 +114,9 @@ def load_csv(
             raise DataError("헤더에 중복된 컬럼 이름이 있습니다: " + ", ".join(dupes))
 
         keep_cols = [h for h in header if h not in id_set]
+        id_cols_present = [h for h in header if h in id_set]
         rows: List[Dict[str, Optional[float]]] = []
+        id_values: List[Dict[str, str]] = []
         for lineno, record in enumerate(reader, start=2):
             if not record or all(c.strip() == "" for c in record):
                 continue  # 완전 빈 줄은 건너뜀
@@ -112,13 +125,22 @@ def load_csv(
                     f"{lineno}행의 열 개수({len(record)})가 헤더({len(header)})와 다릅니다."
                 )
             row: Dict[str, Optional[float]] = {}
+            ids: Dict[str, str] = {}
             for name, cell in zip(header, record):
                 if name in id_set:
+                    ids[name] = cell.strip()
                     continue
                 row[name] = _parse_cell(cell, DEFAULT_NA, na_nums)
             rows.append(row)
+            id_values.append(ids)
 
     if not rows:
         raise DataError("데이터 행이 없습니다(헤더만 존재).")
     unknown_ids = [c for c in id_set if c not in header]
-    return SurveyData(columns=keep_cols, rows=rows, unknown_id_columns=unknown_ids)
+    return SurveyData(
+        columns=keep_cols,
+        rows=rows,
+        unknown_id_columns=unknown_ids,
+        id_columns=id_cols_present,
+        id_values=id_values,
+    )

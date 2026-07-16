@@ -111,5 +111,52 @@ def test_config_bad_min_valid_ratio(tmp_path):
 def test_auto_config():
     c = auto_config(["Q1", "Q2"])
     assert c.subscales == {"전체": ["Q1", "Q2"]}
+    assert c.score_method == "mean"
     with pytest.raises(ConfigError):
         auto_config([])
+
+
+def test_config_score_method(tmp_path):
+    cfg = {"subscales": {"A": ["Q1", "Q2"]}, "score_method": "sum"}
+    path = write(tmp_path, "c.json", json.dumps(cfg))
+    c = load_config(path)
+    assert c.score_method == "sum"
+
+
+def test_config_bad_score_method(tmp_path):
+    cfg = {"subscales": {"A": ["Q1"]}, "score_method": "median"}
+    path = write(tmp_path, "c.json", json.dumps(cfg))
+    with pytest.raises(ConfigError):
+        load_config(path)
+
+
+def test_config_bool_min_valid_ratio_rejected(tmp_path):
+    # True 는 int의 하위형이라 조용히 통과하면 안 됨
+    cfg = {"subscales": {"A": ["Q1"]}, "min_valid_ratio": True}
+    path = write(tmp_path, "c.json", json.dumps(cfg))
+    with pytest.raises(ConfigError):
+        load_config(path)
+
+
+def test_config_non_numeric_scale_rejected(tmp_path):
+    cfg = {"subscales": {"A": ["Q1"]}, "scale_min": "0", "scale_max": 4}
+    path = write(tmp_path, "c.json", json.dumps(cfg))
+    with pytest.raises(ConfigError):
+        load_config(path)
+
+
+def test_load_csv_retains_id_values(tmp_path):
+    csv = "ID,Q1,Q2\nS1,1,2\nS2,3,4\n"
+    path = write(tmp_path, "d.csv", csv)
+    data = load_csv(path, id_columns=["ID"])
+    assert data.id_columns == ["ID"]
+    assert data.id_values[0]["ID"] == "S1"
+    assert data.id_values[1]["ID"] == "S2"
+
+
+def test_load_csv_tab_delimiter(tmp_path):
+    data_txt = "Q1\tQ2\n1\t2\n3\t4\n"
+    path = write(tmp_path, "d.tsv", data_txt)
+    data = load_csv(path, delimiter="\t")
+    assert data.columns == ["Q1", "Q2"]
+    assert data.n_respondents == 2

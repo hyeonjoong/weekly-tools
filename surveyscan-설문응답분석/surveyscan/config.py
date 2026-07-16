@@ -26,6 +26,9 @@ class ConfigError(ValueError):
     """config 내용이 잘못되었을 때 발생."""
 
 
+SCORE_METHODS = ("mean", "sum")
+
+
 @dataclass
 class SurveyConfig:
     subscales: Dict[str, List[str]]
@@ -34,6 +37,9 @@ class SurveyConfig:
     scale_max: Optional[float] = None
     # 응답자별 하위척도 점수를 계산할 때, 최소 이 비율 이상 응답해야 점수를 부여.
     min_valid_ratio: float = 0.5
+    # 하위척도 점수 산출 방식: "mean"(가용문항 평균) 또는 "sum"(비례배분 합).
+    # ISI·PHQ-9·GAD-7 등 임상 척도는 보통 총합(sum)으로 보고한다.
+    score_method: str = "mean"
 
     def all_items(self) -> List[str]:
         """모든 하위척도에 속한 문항 이름(중복 제거, 등장 순서 유지)."""
@@ -75,14 +81,24 @@ def _from_dict(raw: dict) -> SurveyConfig:
 
     scale_min = raw.get("scale_min")
     scale_max = raw.get("scale_max")
+    for nm, val in (("scale_min", scale_min), ("scale_max", scale_max)):
+        if val is not None and (isinstance(val, bool) or not isinstance(val, (int, float))):
+            raise ConfigError(f"'{nm}'는 숫자여야 합니다.")
     if reverse_items and (scale_min is None or scale_max is None):
         raise ConfigError("역문항(reverse_items)이 있으면 scale_min과 scale_max를 모두 지정해야 합니다.")
     if scale_min is not None and scale_max is not None and scale_min >= scale_max:
         raise ConfigError("scale_min은 scale_max보다 작아야 합니다.")
 
     min_valid_ratio = raw.get("min_valid_ratio", 0.5)
-    if not isinstance(min_valid_ratio, (int, float)) or not (0 <= min_valid_ratio <= 1):
+    if isinstance(min_valid_ratio, bool) or not isinstance(min_valid_ratio, (int, float)) \
+            or not (0 <= min_valid_ratio <= 1):
         raise ConfigError("'min_valid_ratio'는 0과 1 사이의 숫자여야 합니다.")
+
+    score_method = raw.get("score_method", "mean")
+    if score_method not in SCORE_METHODS:
+        raise ConfigError(
+            "'score_method'는 'mean' 또는 'sum' 이어야 합니다: " + repr(score_method)
+        )
 
     # 역문항이 어떤 하위척도에도 없으면 사용자의 오타일 가능성이 높다.
     known = set()
@@ -97,9 +113,10 @@ def _from_dict(raw: dict) -> SurveyConfig:
     return SurveyConfig(
         subscales=parsed,
         reverse_items=list(reverse_items),
-        scale_min=scale_min,
-        scale_max=scale_max,
+        scale_min=float(scale_min) if scale_min is not None else None,
+        scale_max=float(scale_max) if scale_max is not None else None,
         min_valid_ratio=float(min_valid_ratio),
+        score_method=score_method,
     )
 
 

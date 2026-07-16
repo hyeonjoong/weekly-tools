@@ -5,13 +5,14 @@
 from .analyze import analyze
 from .config import SurveyConfig, auto_config, load_config
 from .dataio import SurveyData, load_csv
-from .report import render
+from .report import render, render_markdown
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "analyze",
     "render",
+    "render_markdown",
     "load_csv",
     "load_config",
     "auto_config",
