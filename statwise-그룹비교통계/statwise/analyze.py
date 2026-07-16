@@ -25,9 +25,10 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
-from . import effects, location as location_mod, paired as paired_mod, tests_stat
+from . import (effects, equivalence as equiv_mod, location as location_mod,
+               paired as paired_mod, tests_stat)
 from .normality import shapiro_wilk
 from .special import t_ppf
 
@@ -39,6 +40,9 @@ __all__ = ["Group", "PairwiseResult", "AnalysisResult", "analyze",
 class Group:
     label: str
     values: List[float]
+    #: cells that were present in the source file but unusable (blank / NA /
+    #: non-numeric).  Reported for CONSORT-style accounting; 0 when unknown.
+    n_missing: int = 0
 
     @property
     def n(self) -> int:
@@ -125,6 +129,85 @@ class AnalysisResult:
     correction: str = "holm"
     # distribution-free location difference (Hodges-Lehmann) for rank tests
     location: Optional[location_mod.LocationEstimate] = None
+    # equivalence (TOST) / non-inferiority test, when a margin was supplied
+    equivalence: Optional[equiv_mod.EquivalenceResult] = None
+    # multi-endpoint bookkeeping (set by the endpoint runner, not by analyze())
+    endpoint: Optional[str] = None
+    pvalue_adj: Optional[float] = None
+
+
+@dataclass
+class EquivalenceSpec:
+    """What kind of similarity claim the user asked us to test, if any.
+
+    Exactly one of ``margin`` (TOST equivalence) or ``ni_margin``
+    (non-inferiority) may be set; both ``None`` means no equivalence analysis.
+    """
+
+    margin: Optional[Tuple[float, float]] = None
+    ni_margin: Optional[float] = None
+    ni_direction: str = "higher_is_better"
+
+    def __post_init__(self) -> None:
+        if self.margin is not None and self.ni_margin is not None:
+            raise ValueError(
+                "등가(TOST) 마진과 비열등성 마진은 동시에 지정할 수 없습니다 "
+                "(둘 중 하나만 선택하세요).")
+
+    @property
+    def active(self) -> bool:
+        return self.margin is not None or self.ni_margin is not None
+
+
+_RANK_TEST_EQUIV_NOTE = (
+    "등가/비열등성 검정은 평균차에 대한 t-모형(정규 근사)으로 계산했습니다. "
+    "선택된 주검정은 순위검정({test})이므로, 등가 결론은 평균차가 의미 있는 "
+    "요약일 때에만 유효합니다(왜곡이 심하면 해석에 주의).")
+
+
+def _equiv_model_for(test_name: str) -> Tuple[str, bool]:
+    """(t-model to use for the margin test, whether the main test was a rank test)."""
+    if test_name.startswith("Student"):
+        return "student", False
+    if test_name.startswith("Welch"):
+        return "welch", False
+    if test_name.startswith("Paired"):
+        return "paired", False
+    if test_name.startswith("Wilcoxon"):
+        return "paired", True
+    return "welch", True  # Mann-Whitney
+
+
+def _run_equivalence(a_vals: Sequence[float], b_vals: Sequence[float],
+                     test_name: str, alpha: float, spec: EquivalenceSpec,
+                     warnings: List[str]
+                     ) -> Optional[equiv_mod.EquivalenceResult]:
+    """Run the requested TOST / non-inferiority test alongside the main test.
+
+    The t-model is kept consistent with the selected superiority test so both
+    inferences describe the same difference; for a rank-based main test we fall
+    back to the Welch/paired t-model and say so.
+    """
+    if not spec.active:
+        return None
+    model, is_rank = _equiv_model_for(test_name)
+    if is_rank:
+        warnings.append(_RANK_TEST_EQUIV_NOTE.format(test=test_name))
+    try:
+        if model == "paired":
+            if spec.margin is not None:
+                return equiv_mod.tost_paired(a_vals, b_vals, spec.margin[0],
+                                             spec.margin[1], alpha)
+            return equiv_mod.noninferiority_paired(
+                a_vals, b_vals, spec.ni_margin, spec.ni_direction, alpha)
+        if spec.margin is not None:
+            return equiv_mod.tost_independent(a_vals, b_vals, spec.margin[0],
+                                              spec.margin[1], alpha, model=model)
+        return equiv_mod.noninferiority_independent(
+            a_vals, b_vals, spec.ni_margin, spec.ni_direction, alpha, model=model)
+    except ValueError as exc:
+        warnings.append(f"등가/비열등성 검정을 수행할 수 없습니다: {exc}")
+        return None
 
 
 def _finite(vals: Sequence[float], label: str) -> List[float]:
@@ -273,11 +356,20 @@ def _pairwise(groups: List[Group], kind: str, alpha: float,
 
 def analyze(named_groups: Sequence[Tuple[str, Sequence[float]]],
             alpha: float = 0.05, alpha_norm: float = 0.05,
-            posthoc: bool = True, correction: str = "holm") -> AnalysisResult:
-    """Run the full auto-selected group comparison and return an AnalysisResult."""
+            posthoc: bool = True, correction: str = "holm",
+            equivalence: Optional[EquivalenceSpec] = None,
+            missing: Optional[Dict[str, int]] = None) -> AnalysisResult:
+    """Run the full auto-selected group comparison and return an AnalysisResult.
+
+    ``equivalence`` optionally adds a TOST / non-inferiority test on the mean
+    difference (two groups only).  ``missing`` maps group label -> count of
+    unusable source cells, for CONSORT-style reporting.
+    """
     if correction not in ("holm", "bh"):
         raise ValueError("correction must be 'holm' or 'bh'")
-    groups = [Group(str(label), _finite(vals, label)) for label, vals in named_groups]
+    miss = missing or {}
+    groups = [Group(str(label), _finite(vals, label), int(miss.get(str(label), 0)))
+              for label, vals in named_groups]
     if len(groups) < 2:
         raise ValueError("need at least 2 groups to compare")
     for g in groups:
