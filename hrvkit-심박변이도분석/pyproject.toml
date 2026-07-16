@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hrvkit"
-version = "0.2.0"
+version = "0.3.0"
 description = "심박변이도(HRV) 분석기 — RR/IBI(ms) 또는 순간 HR(bpm) CSV로부터 이상박동 보정 후 시간영역·주파수영역(Welch/직접구현 FFT)·비선형(Poincaré/SampEn) 지표를 계산 (표준 라이브러리만)"
 readme = "README.md"
 requires-python = ">=3.9"

@@ -28,6 +28,17 @@ VLF_BAND = (0.003, 0.04)
 LF_BAND = (0.04, 0.15)
 HF_BAND = (0.15, 0.40)
 
+# 주파수영역 분석의 최소 기록 길이(초). HF 대역 최저 주파수(0.15 Hz)의 한 주기는
+# 6.7 s — 그 2배(≈13 s)는 있어야 HF에 빈이 잡힙니다. 여유를 둬 20 s로 둡니다.
+MIN_DURATION_SEC = 20.0
+
+# 기본 Welch 구간 길이 상한(표본). fs=4 Hz → 256/4 = 64 s 구간.
+# LF(최저 0.04 Hz → 주기 25 s)·HF는 64 s 구간으로 충분히 해상되고, 구간을 짧게 유지해
+# 평균할 구간 수를 늘리면 PSD 분산이 줄어듭니다. 반면 VLF(최저 0.003 Hz → 주기 333 s)는
+# 이 구간으로 해상되지 않아 과소추정됩니다 — VLF가 필요한 긴 기록에서는 --nperseg 로
+# 구간을 키우세요(vlf_reliable 플래그로 상태를 보고합니다).
+DEFAULT_MAX_NPERSEG = 256
+
 
 # --------------------------------------------------------------------------- #
 # FFT — iterative radix-2 Cooley–Tukey (표준 라이브러리만)
@@ -169,7 +180,7 @@ def welch_psd(x: Sequence[float], fs: float, nperseg: int = None,
 
     if nperseg is None:
         # 겹치는 구간을 몇 개 확보하도록 N/2 부근의 2의 거듭제곱, 상한 256.
-        nperseg = min(256, _prev_pow2(max(2, N // 2)))
+        nperseg = min(DEFAULT_MAX_NPERSEG, _prev_pow2(max(2, N // 2)))
     nperseg = min(nperseg, N)
     nperseg = _prev_pow2(nperseg)   # 2의 거듭제곱으로 강제
     if nperseg < 2:
@@ -209,20 +220,40 @@ def welch_psd(x: Sequence[float], fs: float, nperseg: int = None,
     return freqs, psd, meta
 
 
+def _band_bins(freqs: Sequence[float], lo: float, hi: float) -> int:
+    """[lo, hi) 대역에 들어가는 PSD 빈의 개수."""
+    return sum(1 for f in freqs if lo <= f < hi)
+
+
 def _band_power(freqs: Sequence[float], psd: Sequence[float], lo: float, hi: float) -> float:
-    """[lo, hi) 대역의 PSD를 적분(직사각형 규칙, 폭 = df)."""
+    """[lo, hi) 대역의 PSD를 적분(직사각형 규칙, 폭 = df).
+
+    대역 안에 빈이 하나도 없으면 **NaN**을 반환합니다. 0.0 을 반환하면 "파워가
+    실제로 0" 과 "주파수 해상도가 부족해 추정 불가"를 구분할 수 없어, 짧은 기록의
+    VLF가 진짜 0인 것처럼 보고되는 침묵의 오답이 됩니다(예: 64 s 기록 → df=0.0625 Hz
+    → VLF(0.003–0.04 Hz)에 빈 0개 → 과거엔 "0.0 ms²"로 출력).
+    """
     if len(freqs) < 2:
-        return 0.0
+        return float("nan")
     df = freqs[1] - freqs[0]
     total = 0.0
+    n = 0
     for f, p in zip(freqs, psd):
         if lo <= f < hi:
             total += p * df
-    return total
+            n += 1
+    return total if n else float("nan")
 
 
 def _peak(freqs: Sequence[float], psd: Sequence[float], lo: float, hi: float):
-    best_f, best_p = None, -1.0
+    """[lo, hi) 대역의 최대 PSD 주파수. 대역에 **양의 파워가 없으면 None**.
+
+    과거엔 시작값이 -1.0 이라 PSD가 전부 0.0 인 신호(예: RR이 전부 동일)에서도
+    대역의 첫 빈이 '피크'로 뽑혔습니다. 그 결과 평탄 신호가 호흡 피크를 가진 것으로
+    보여 '느린/공명 호흡 레짐'이 오탐되었습니다(hf_nu 도 0 이라 조건이 성립).
+    파워가 0 인 대역에는 피크가 없습니다.
+    """
+    best_f, best_p = None, 0.0
     for f, p in zip(freqs, psd):
         if lo <= f < hi and p > best_p:
             best_p, best_f = p, f
@@ -252,11 +283,33 @@ def frequency_domain(nn: Sequence[float], fs: float = 4.0,
     if len(resampled) < 4:
         raise ValueError("기록이 너무 짧아 주파수영역 분석을 할 수 없습니다.")
 
+    # 최소 길이 방어: HF 대역(0.15–0.40 Hz)조차 해상되지 않으면 어떤 지표도
+    # 의미가 없습니다(예: 4박동 → df=1 Hz → 모든 대역에 빈 0개 → 과거엔 전부 0.0,
+    # lf_hf_ratio=inf 를 조용히 반환). HF 한 주기(≈6.7 s)의 2배는 필요합니다.
+    duration = times[-1]
+    if duration < MIN_DURATION_SEC:
+        raise ValueError(
+            f"기록이 {duration:.1f} s 로 너무 짧습니다 — 주파수영역 분석에는 최소 "
+            f"{MIN_DURATION_SEC:.0f} s 가 필요합니다(HF 대역 해상 한계).")
+
     freqs, psd, meta = welch_psd(resampled, fs, nperseg=nperseg)
+
+    # Welch 구간 길이 = 주파수 해상도의 근본 한계. 구간보다 느린 주기는 구간별
+    # 평균 제거(detrend='constant')로 사라지므로, 구간이 대역의 최저 주파수 한
+    # 주기보다 짧으면 그 대역 파워는 심하게 과소추정됩니다.
+    seg_sec = meta["nperseg"] / fs
+    vlf_bins = _band_bins(freqs, *VLF_BAND)
+    lf_bins = _band_bins(freqs, *LF_BAND)
+    hf_bins = _band_bins(freqs, *HF_BAND)
+    # VLF 최저 주파수(0.003 Hz)의 한 주기 = 333 s. 구간이 그보다 짧으면 VLF는
+    # 참고용(과소추정)임을 플래그로 알립니다. 기본 설정(구간 64 s)에서는 항상 False.
+    vlf_reliable = bool(vlf_bins >= 2 and seg_sec >= 1.0 / VLF_BAND[0])
 
     vlf = _band_power(freqs, psd, *VLF_BAND)
     lf = _band_power(freqs, psd, *LF_BAND)
     hf = _band_power(freqs, psd, *HF_BAND)
+    # total 은 Task Force 정의상 VLF를 포함하므로, VLF가 해상 불가(NaN)면 total 도
+    # 알 수 없습니다 — 0 으로 눙치지 않고 NaN 을 전파합니다.
     total = vlf + lf + hf
     lf_hf = lf / hf if hf > 0 else float("inf")
     lf_plus_hf = lf + hf
@@ -301,9 +354,15 @@ def frequency_domain(nn: Sequence[float], fs: float = 4.0,
         "resp_source": resp_source,
         "slow_breathing_regime": slow_regime,
         "resample_fs": fs,
-        "duration_sec": times[-1],
+        "duration_sec": duration,
         "n_resampled": len(resampled),
         "welch_nperseg": meta["nperseg"],
         "welch_nfft": meta["nfft"],
         "welch_segments": meta["n_segments"],
+        "welch_segment_sec": seg_sec,
+        "freq_resolution_hz": fs / meta["nfft"],
+        "vlf_bins": vlf_bins,
+        "lf_bins": lf_bins,
+        "hf_bins": hf_bins,
+        "vlf_reliable": vlf_reliable,
     }

@@ -52,6 +52,17 @@ def geometric_indices(nn: Sequence[float],
 
     hti = n / peak
 
+    # 삼각형 밑변(N, M)은 데이터 범위 **밖**에 놓일 수 있어야 합니다. centers 는
+    # min(nn)~max(nn) 만 덮으므로, 패딩 없이 탐색하면 밑변이 관측 범위에 갇혀 TINN이
+    # 체계적으로 과소평가됩니다 — 꼬리 없는 완전한 삼각형 히스토그램(참값 156.25 ms)
+    # 에서 140.63 ms(정확히 2빈 부족)가 나왔습니다. 양쪽에 0 카운트 빈을 덧대
+    # 최적점이 내부에 오도록 합니다(실측 NN은 꼬리가 있어 대개 영향 없음).
+    pad = min(len(hist), 256)
+    centers = ([centers[0] - (pad - i) * bin_width for i in range(pad)] +
+               centers +
+               [centers[-1] + (i + 1) * bin_width for i in range(pad)])
+    hist = [0] * pad + hist + [0] * pad
+
     # 여러 최빈 빈이 있으면 첫 번째를 정점으로.
     x_idx = hist.index(peak)
     x = centers[x_idx]

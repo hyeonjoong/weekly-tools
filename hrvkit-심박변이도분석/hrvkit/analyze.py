@@ -162,6 +162,7 @@ def analyze_rr(rr,
                min_rr: float = 300.0,
                max_rr: float = 2000.0,
                rel_thresh: float = 0.2,
+               nperseg: Optional[int] = None,
                do_sampen: bool = True) -> HRVResult:
     """RR(ms) 시계열 하나를 전 지표로 분석해 HRVResult를 반환.
 
@@ -211,7 +212,7 @@ def analyze_rr(rr,
 
     freq: Dict[str, float]
     try:
-        freq = frequency_domain(cleaned, fs=fs)
+        freq = frequency_domain(cleaned, fs=fs, nperseg=nperseg)
     except ValueError as exc:
         warnings.append(f"주파수영역 분석 생략: {exc}")
         freq = {k: float("nan") for k in (
@@ -221,7 +222,9 @@ def analyze_rr(rr,
         freq.update({"resample_fs": fs, "duration_sec": float("nan"),
                      "n_resampled": 0, "welch_nperseg": 0, "welch_nfft": 0,
                      "welch_segments": 0, "resp_source": None,
-                     "slow_breathing_regime": False})
+                     "slow_breathing_regime": False, "welch_segment_sec": 0.0,
+                     "freq_resolution_hz": float("nan"), "vlf_bins": 0,
+                     "lf_bins": 0, "hf_bins": 0, "vlf_reliable": False})
 
     sampen = float("nan")
     if do_sampen:

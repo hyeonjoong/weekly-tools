@@ -13,10 +13,11 @@ import os
 from typing import List, Sequence
 
 from .analyze import FLAT_COLUMNS, HRVResult, flat_metrics
-from .stats import paired_summary
+from .stats import benjamini_hochberg, holm_adjust, paired_summary
 
 __all__ = ["render_text", "render_comparison", "render_batch_table",
-           "metrics_to_csv", "paired_group", "render_paired_group"]
+           "metrics_to_csv", "paired_group", "render_paired_group",
+           "paired_group_to_csv"]
 
 
 def _num(x, d: int = 2) -> str:
@@ -79,8 +80,21 @@ def render_text(res: HRVResult) -> str:
           f"radix-2 FFT, {int(f['welch_segments'])} segments)")
         L(f"    기록 길이 duration : {_num(f['duration_sec'], 1)} s "
           f"({int(f['n_resampled'])} samples)")
+        L(f"    해상도 resolution  : {_num(f.get('freq_resolution_hz'), 4)} Hz "
+          f"(구간 {_num(f.get('welch_segment_sec'), 1)} s → VLF/LF/HF 빈 "
+          f"{int(f.get('vlf_bins') or 0)}/{int(f.get('lf_bins') or 0)}/"
+          f"{int(f.get('hf_bins') or 0)}개)")
+    # VLF는 구간 길이보다 느린 성분이라 기본 설정에선 과소추정/추정불가.
+    # 숫자만 찍으면 오해하므로 신뢰 여부를 같은 줄에 붙입니다.
+    vlf_note = ""
+    if not f.get("vlf_reliable", False) and f.get("n_resampled"):
+        if not _finite(f.get("vlf_power")):
+            vlf_note = "  ※ 구간이 짧아 VLF 대역에 빈 없음 → 추정 불가"
+        else:
+            vlf_note = ("  ※ 구간 < VLF 주기(333 s) → 과소추정, 참고용"
+                        " (--nperseg 로 구간 확대)")
     L(f"    VLF power          : {_num(f['vlf_power'], 1)} ms²  "
-      f"({_num(f['vlf_pct'], 1)}%)")
+      f"({_num(f['vlf_pct'], 1)}%){vlf_note}")
     L(f"    LF  power          : {_num(f['lf_power'], 1)} ms²  "
       f"({_num(f['lf_pct'], 1)}%,  {_num(f['lf_nu'], 1)} n.u.)")
     L(f"    HF  power          : {_num(f['hf_power'], 1)} ms²  "
@@ -267,7 +281,7 @@ def render_comparison(baseline: HRVResult, intervention: HRVResult,
             elif direction != 0 and delta != 0:
                 toward_para = (delta > 0 and direction > 0) or \
                               (delta < 0 and direction < 0)
-                arrow = "↑부교감" if toward_para else "↓교감"
+                arrow = "↑부교감" if toward_para else "↑교감"
                 if counts:
                     para_total += 1
                     if toward_para:
@@ -321,79 +335,192 @@ _PAIRED_METRICS = [
 ]
 
 
-def paired_group(pairs: Sequence) -> "dict":
+def paired_group(pairs: Sequence, alpha: float = 0.05) -> "dict":
     """(기저 HRVResult, 개입 HRVResult) 짝들의 지표별 코호트 요약을 계산.
 
-    반환: {metric_key: paired_summary(...) dict}. 또한 특수 키 '_meta' 에
-    피험자 수와 느린/공명 호흡 레짐 짝 수를 담습니다.
+    각 지표에 대해 paired_summary(평균차·dz·Hodges–Lehmann 이동량·분포무관 CI·
+    Wilcoxon p)를 내고, **_PAIRED_METRICS 전체를 하나의 검정 가족(family)으로 보아**
+    다중비교 보정 p값을 덧붙입니다:
+      p_holm : Holm–Bonferroni (FWER 통제 — 보수적, "적어도 하나 위양성" 방지)
+      p_bh   : Benjamini–Hochberg (FDR 통제 — 탐색적 지표 스크리닝에 적합)
+    검정되지 않은 지표(n=0 이거나 p가 NaN)는 가족 크기 m 에서 제외됩니다.
+
+    주의 — 가족에는 **대수적으로 중복인 지표**가 들어 있습니다: SD1 = SDSD/√2 이고
+    SDSD ≈ RMSSD 이므로 RMSSD와 SD1은 사실상 같은 검정이며 실제로 동일한 p값을 냅니다.
+    HF power 와 HF n.u., LF/HF 도 서로 강하게 얽혀 있습니다. 즉 m 이 '독립 검정 수'를
+    과대평가하므로 Holm/BH 보정은 **필요 이상으로 보수적**입니다(위양성 쪽으로는
+    안전, 검정력 쪽으로는 손해). 사전에 주 지표 하나를 지정해 그 지표의 보정 없는 p를
+    보고하는 것이 통계적으로 가장 강력합니다.
+
+    반환: {metric_key: summary dict}. 특수 키 '_meta' 에 피험자 수, 느린/공명 호흡
+    레짐 짝 수, 가족 크기(n_tests), alpha 를 담습니다.
     """
     bases = [flat_metrics(b) for b, _ in pairs]
     intervs = [flat_metrics(v) for _, v in pairs]
     slow_n = sum(1 for b, v in pairs
                  if b.freq.get("slow_breathing_regime") or
                  v.freq.get("slow_breathing_regime"))
-    out = {"_meta": {"n_subjects": len(pairs), "n_slow_regime": slow_n}}
-    for key, _, _, _, _ in _PAIRED_METRICS:
+    out = {}
+    keys = [k for k, _, _, _, _ in _PAIRED_METRICS]
+    for key in keys:
         b_vals = [bm.get(key) for bm in bases]
         v_vals = [vm.get(key) for vm in intervs]
-        out[key] = paired_summary(b_vals, v_vals)
+        out[key] = paired_summary(b_vals, v_vals, alpha=alpha)
+
+    # 지표 가족 전체에 대한 다중비교 보정. 검정되지 않은 지표는 NaN → m에서 제외.
+    pvals = [out[k].get("wilcoxon_p", float("nan")) for k in keys]
+    holm = holm_adjust(pvals)
+    bh = benjamini_hochberg(pvals)
+    for key, ph, pb in zip(keys, holm, bh):
+        out[key]["p_holm"] = ph
+        out[key]["p_bh"] = pb
+
+    out["_meta"] = {
+        "n_subjects": len(pairs),
+        "n_slow_regime": slow_n,
+        "n_tests": sum(1 for p in pvals if _finite(p)),
+        "alpha": alpha,
+    }
     return out
 
 
-def render_paired_group(pairs: Sequence) -> str:
-    """짝지은 코호트 통계(평균 차이±SD, Cohen's dz, Wilcoxon p, 방향)를 렌더링."""
-    g = paired_group(pairs)
+# 코호트 통계 CSV 열 (key, 자릿수). 논문 표/스프레드시트에 바로 붙일 수 있는 형태.
+_PAIRED_CSV_COLS = [
+    ("n", 0), ("mean_base", 4), ("mean_interv", 4), ("mean_diff", 4),
+    ("sd_diff", 4), ("sem_diff", 4), ("cohens_dz", 4), ("median_diff", 4),
+    ("hl_shift", 4), ("ci_low", 4), ("ci_high", 4), ("ci_alpha", 3),
+    ("ci_method", None), ("w_plus", 1), ("n_pairs", 0), ("wilcoxon_z", 4),
+    ("wilcoxon_p", 6), ("wilcoxon_method", None), ("p_holm", 6), ("p_bh", 6),
+    ("n_increased", 0),
+]
+
+
+def paired_group_to_csv(pairs: Sequence, alpha: float = 0.05) -> str:
+    """짝지은 코호트 통계를 지표당 한 행인 CSV로 직렬화(헤더 포함).
+
+    render_paired_group 의 표를 스프레드시트/논문 표로 옮기기 위한 형식.
+    """
+    g = paired_group(pairs, alpha=alpha)
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["metric"] + [k for k, _ in _PAIRED_CSV_COLS])
+    for key, _label, _d, _direction, _hf in _PAIRED_METRICS:
+        s = g.get(key) or {}
+        writer.writerow([key] +
+                        [_fmt_cell(s.get(k), d) for k, d in _PAIRED_CSV_COLS])
+    return buf.getvalue()
+
+
+def render_paired_group(pairs: Sequence, alpha: float = 0.05) -> str:
+    """짝지은 코호트 통계를 기술 표 + 추론 표 두 블록으로 렌더링.
+
+    [A] 기술: 평균 base→interv, ΔM±SD, 증가한 피험자 수.
+    [B] 추론: Hodges–Lehmann 이동량과 분포무관 CI, Cohen's dz, Wilcoxon p
+        (정확/근사 표기), Holm·BH 보정 p, 부교감 방향.
+    한 표에 다 넣으면 폭이 120자를 넘어 터미널에서 접히므로 나눕니다.
+    """
+    g = paired_group(pairs, alpha=alpha)
     meta = g["_meta"]
     n = meta["n_subjects"]
     slow = meta["n_slow_regime"]
+    m_tests = meta["n_tests"]
+    pct = int(round((1.0 - alpha) * 100))
     lines: List[str] = []
     L = lines.append
-    L("=" * 82)
+    L("=" * 84)
     L("  hrvkit — 짝지은 코호트 통계 / Paired-cohort statistics")
-    L("=" * 82)
+    L("=" * 84)
     L(f"  피험자 짝 수 n = {n}"
       + (f"   (느린/공명 호흡 레짐 {slow}쌍: HF 기반 지표 해석 주의)" if slow else ""))
-    L("  검정: Wilcoxon 부호순위(정규 근사, 연속성·동점 보정), 효과크기 Cohen's dz")
     L("")
-    L(f"  {'metric':<16}{'base→interv':>20}{'ΔM±SD':>16}"
-      f"{'dz':>7}{'Wilcox p':>10}{'↑n/n':>8}  방향")
-    L("  " + "-" * 80)
+
+    # ---------------- [A] 기술통계 ----------------
+    L("[A] 기술 / Descriptive")
+    L(f"  {'metric':<16}{'base→interv':>22}{'ΔM±SD':>18}{'↑n/n':>9}")
+    L("  " + "-" * 63)
+    for key, label, d, _direction, _hf in _PAIRED_METRICS:
+        s = g[key]
+        if not s or s.get("n", 0) == 0:
+            L(f"  {label:<16}{'(no data)':>22}")
+            continue
+        bi = f"{s['mean_base']:.{d}f}→{s['mean_interv']:.{d}f}"
+        md = f"{s['mean_diff']:+.{d}f}±{s['sd_diff']:.{d}f}"
+        inc = f"{int(s.get('n_increased', 0))}/{s['n']}"
+        L(f"  {label:<16}{bi:>22}{md:>18}{inc:>9}")
+
+    # ---------------- [B] 추론통계 ----------------
+    L("")
+    L("[B] 추론 / Inference"
+      f"   — Wilcoxon 부호순위 · Hodges–Lehmann {pct}% CI · 다중비교 보정(m={m_tests})")
+    L(f"  {'metric':<16}{'HL shift':>10}{f'{pct}% CI':>22}{'dz':>9}"
+      f"{'p':>9}{'p_holm':>9}{'p_BH':>9}  방향")
+    L("  " + "-" * 92)
 
     for key, label, d, direction, hf_based in _PAIRED_METRICS:
         s = g[key]
         if not s or s.get("n", 0) == 0:
-            L(f"  {label:<16}{'(no data)':>20}")
+            L(f"  {label:<16}{'(no data)':>10}")
             continue
-        bi = f"{s['mean_base']:.{d}f}→{s['mean_interv']:.{d}f}"
-        md = f"{s['mean_diff']:+.{d}f}±{s['sd_diff']:.{d}f}"
-        dz = s.get("cohens_dz")
-        dz_s = _num(dz, 2)
-        p_s = _num(s.get("wilcoxon_p"), 4)
-        inc = f"{int(s.get('n_increased', 0))}/{s['n']}"
+        hl_s = _num(s.get("hl_shift"), d)
+        lo, hi = s.get("ci_low"), s.get("ci_high")
+        if _finite(lo) and _finite(hi):
+            ci_s = f"[{_num(lo, d)}, {_num(hi, d)}]"
+        elif s.get("ci_method") == "insufficient-n":
+            # n이 작아 어떤 유한 구간도 1-alpha 를 담보 못 함 → (-∞,∞). 숨기지 않는다.
+            ci_s = "(-∞, ∞)†"
+        else:
+            ci_s = "—"
+        dz_s = _num(s.get("cohens_dz"), 2)
+        # 정확 검정이면 p 뒤에 'e' 표시(exact), 근사면 'a'.
+        mark = {"exact": "e", "approx": "a"}.get(s.get("wilcoxon_method"), "")
+        p_s = _num(s.get("wilcoxon_p"), 4) + mark
+        ph_s = _num(s.get("p_holm"), 4)
+        pb_s = _num(s.get("p_bh"), 4)
         arrow = ""
-        if direction != 0 and not (hf_based and slow):
-            md_val = s["mean_diff"]
-            if md_val != 0:
-                toward = (md_val > 0 and direction > 0) or \
-                         (md_val < 0 and direction < 0)
-                arrow = "↑부교감" if toward else "↓교감"
-        elif hf_based and slow:
+        if hf_based and slow:
             arrow = "레짐?"
-        L(f"  {label:<16}{bi:>20}{md:>16}{dz_s:>7}{p_s:>10}{inc:>8}  {arrow}")
+        elif direction != 0:
+            # 방향은 강건한 HL 이동량 기준(평균은 이상값에 끌림). HL이 없으면 평균.
+            shift = s.get("hl_shift")
+            if not _finite(shift):
+                shift = s.get("mean_diff")
+            if _finite(shift) and shift != 0:
+                toward = (shift > 0 and direction > 0) or \
+                         (shift < 0 and direction < 0)
+                arrow = "↑부교감" if toward else "↑교감"
+        L(f"  {label:<16}{hl_s:>10}{ci_s:>22}{dz_s:>9}"
+          f"{p_s:>9}{ph_s:>9}{pb_s:>9}  {arrow}")
 
+    L("")
+    L("  p 뒤 e=정확(exact) 분포, a=정규 근사. HL=Hodges–Lehmann 이동량(강건).")
+    L("  † = 이 n에서는 해당 수준의 유한 신뢰구간이 존재하지 않음(표본 부족).")
+    L(f"  CI는 부호순위 검정과 쌍대인 분포무관 {pct}% 구간 — CI가 0을 포함하지 않는 것과")
+    L("  p<α 는 (동점이 없을 때) 서로 일치합니다.")
+
+    # ---------------- 해석 ----------------
     L("")
     L("[해석 / Interpretation]")
     if slow:
         L("    일부 짝이 느린/공명 호흡 레짐 → HF 기반 지표(HF·HF n.u.·LF/HF)의 방향은 "
           "신뢰할 수 없습니다. 시간영역 vagal 지표(RMSSD·SD1·pNN50·HTI)로 판단하세요.")
-    # 대표 vagal 지표(RMSSD)의 유의성으로 한 줄 결론
+    # 대표 vagal 지표(RMSSD)의 유의성으로 한 줄 결론 — 보정 p 기준으로 판정.
     rm = g.get("rmssd", {})
     if rm.get("n", 0) >= 2 and _finite(rm.get("wilcoxon_p")):
         p = rm["wilcoxon_p"]
-        dzv = rm.get("cohens_dz")
-        sig = "유의미" if p < 0.05 else "유의하지 않음"
-        L(f"    RMSSD: 평균 {rm['mean_diff']:+.1f} ms, Cohen's dz={_num(dzv, 2)}, "
-          f"Wilcoxon p={_num(p, 4)} → 개입 효과 {sig}(α=0.05).")
-    L("    (주의: 여러 지표를 동시에 검정하면 다중비교 보정이 필요할 수 있습니다.)")
+        ph = rm.get("p_holm")
+        lo, hi = rm.get("ci_low"), rm.get("ci_high")
+        ci_s = (f", {pct}% CI [{_num(lo, 1)}, {_num(hi, 1)}] ms"
+                if _finite(lo) and _finite(hi) else "")
+        sig = "유의미" if _finite(ph) and ph < alpha else "유의하지 않음"
+        L(f"    RMSSD: HL 이동량 {_num(rm.get('hl_shift'), 1)} ms{ci_s}, "
+          f"dz={_num(rm.get('cohens_dz'), 2)},")
+        L(f"           p={_num(p, 4)} → Holm 보정 p={_num(ph, 4)} "
+          f"→ 개입 효과 {sig} (α={alpha:g}, {m_tests}개 지표 보정).")
+    if m_tests > 1:
+        L(f"    ({m_tests}개 지표를 동시에 검정했습니다. 사전 지정한 주 지표가 있으면 "
+          "그 지표의 p를,")
+        L("     탐색적 스크리닝이면 p_BH(FDR)를, 확증적이면 p_holm(FWER)을 보고하세요.")
+        L("     RMSSD와 SD1은 대수적으로 거의 같은 지표라 가족에 중복이 있습니다 →")
+        L("     보정은 필요 이상으로 보수적입니다. 주 지표 사전 지정이 가장 강력합니다.)")
     L("")
     return "\n".join(lines)
