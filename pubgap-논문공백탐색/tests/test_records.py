@@ -83,3 +83,35 @@ def test_year_missing_is_none():
     a = parse_efetch_xml(xml)[0]
     assert a.year is None
     assert a.journal == "(unknown journal)"
+
+
+MAJOR_XML = """
+<PubmedArticleSet><PubmedArticle><MedlineCitation>
+  <PMID>555</PMID>
+  <Article><ArticleTitle>t</ArticleTitle></Article>
+  <MeshHeadingList>
+    <MeshHeading>
+      <DescriptorName MajorTopicYN="Y">Sleep</DescriptorName>
+    </MeshHeading>
+    <MeshHeading>
+      <DescriptorName MajorTopicYN="N">Heart Rate</DescriptorName>
+      <QualifierName MajorTopicYN="Y">physiology</QualifierName>
+    </MeshHeading>
+    <MeshHeading>
+      <DescriptorName MajorTopicYN="N">Respiration</DescriptorName>
+    </MeshHeading>
+  </MeshHeadingList>
+  <KeywordList>
+    <Keyword>paced breathing</Keyword>
+    <Keyword>HRV</Keyword>
+  </KeywordList>
+</MedlineCitation></PubmedArticle></PubmedArticleSet>
+"""
+
+
+def test_xml_major_topic_and_keywords():
+    a = parse_efetch_xml(MAJOR_XML)[0]
+    assert a.mesh == ["Sleep", "Heart Rate", "Respiration"]
+    # Sleep(descriptor major), Heart Rate(qualifier major) → 대표. Respiration 은 아님.
+    assert a.mesh_major == ["Sleep", "Heart Rate"]
+    assert a.keywords == ["paced breathing", "HRV"]
