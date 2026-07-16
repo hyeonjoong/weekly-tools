@@ -12,8 +12,15 @@ import math
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence
 
-from . import cat_tests, smd
-from .dataio import Frame, classify, is_missing, is_numeric_token, parse_float
+from . import cat_tests, smd, weights as wstats
+from .dataio import (
+    Frame,
+    classify,
+    is_missing,
+    is_numeric_token,
+    numeric_profile,
+    parse_float,
+)
 from .effects import (
     Effect,
     hodges_lehmann,
@@ -74,6 +81,28 @@ _MSG = {
                                "모두 지정됨 → 연속형으로 처리했습니다."),
         "warn_ref_missing": ("--ref '{var}={level}' 의 수준 '{level}' 이(가) 자료에 "
                              "없어 무시했습니다(관측된 수준: {levels})."),
+        "warn_numeric_like_cat": ("변수 '{var}' 는 값이 수치처럼 보이지만(예: {ex}) "
+                                  "숫자로 해석되지 않는 셀이 있어 범주형으로 처리했습니다 "
+                                  "— 각 값이 별개 수준이 되어 검정이 무의미할 수 있습니다. "
+                                  "측정값이라면 부등호·단위·백분율 기호를 없앤 뒤 "
+                                  "'--continuous {var}' 를 쓰세요."),
+        "warn_mixed_promoted": ("변수 '{var}' 는 값의 {pct:.0f}%가 숫자라 연속형으로 "
+                                "처리했습니다. 숫자가 아닌 셀 {n}개는 요약에서 제외했습니다"
+                                "(주석 참고). 범주형이라면 '--categorical {var}' 를 쓰세요."),
+        "warn_summary_row": ("'{col}' 열에 요약(합계) 행처럼 보이는 값이 있습니다: {ex}. "
+                             "합계·평균 행이 자료에 섞여 있으면 통계가 왜곡되므로 "
+                             "제거한 뒤 실행하세요."),
+        "warn_unknown_cols": ("{flag} 에 지정한 열을 자료에서 찾을 수 없어 "
+                              "무시했습니다: {cols}. 열 이름을 확인하세요."),
+        "warn_weight_dropped": ("가중치가 결측·비수치이거나 0 이하/무한대인 행 {n}개를 "
+                                "제외했습니다(가중 분석에서는 유효한 양(+)의 가중치가 "
+                                "필요합니다)."),
+        "warn_weighted_no_p": ("가중(IPTW/설문) 분석이라 p값·다중비교 보정을 생략했습니다. "
+                               "타당한 가중 p값은 설계기반(robust/Rao-Scott) 분산이 "
+                               "필요하며 이 도구의 범위를 벗어납니다. 균형은 가중 SMD로 "
+                               "보고하세요(Austin과 Stuart 2015 권고)."),
+        "warn_weighted_no_effect": ("가중 분석에서는 군간 차이(95% CI) 열을 생략했습니다"
+                                    "(설계기반 분산 필요). 가중 SMD를 사용하세요."),
     },
     "en": {
         "shapiro_cap": ("sample exceeded {n}; normality was tested on a "
@@ -119,6 +148,40 @@ _MSG = {
         "warn_ref_missing": ("--ref '{var}={level}': level '{level}' is not "
                              "present in the data and was ignored (observed "
                              "levels: {levels})."),
+        "warn_numeric_like_cat": ("variable '{var}' looks numeric (e.g. {ex}) "
+                                  "but has cells that are not parseable as "
+                                  "numbers, so it was treated as categorical — "
+                                  "each value becomes its own level and the "
+                                  "test may be meaningless. If it is a "
+                                  "measurement, strip comparison signs, units "
+                                  "and percent signs and use "
+                                  "'--continuous {var}'."),
+        "warn_mixed_promoted": ("variable '{var}' is {pct:.0f}% numeric and was "
+                                "treated as continuous; {n} non-numeric cell(s) "
+                                "were excluded from the summary (see the note). "
+                                "If it is categorical, use "
+                                "'--categorical {var}'."),
+        "warn_summary_row": ("column '{col}' contains what looks like a summary "
+                             "(total) row: {ex}. A total/mean row mixed into the "
+                             "data distorts every statistic — remove it and "
+                             "re-run."),
+        "warn_unknown_cols": ("{flag} named column(s) that are not in the data "
+                              "and were ignored: {cols}. Check the column "
+                              "names."),
+        "warn_weight_dropped": ("{n} row(s) were excluded for a missing, "
+                                "non-numeric, non-positive or non-finite "
+                                "weight (a weighted analysis needs a valid "
+                                "positive weight)."),
+        "warn_weighted_no_p": ("p-values and multiplicity adjustment are "
+                               "omitted for a weighted (IPTW/survey) analysis: "
+                               "a valid weighted p-value needs design-based "
+                               "(robust/Rao-Scott) variances, which are out of "
+                               "scope here. Report balance with the weighted "
+                               "SMD (Austin and Stuart 2015)."),
+        "warn_weighted_no_effect": ("the between-group difference (95% CI) "
+                                    "column is omitted under weighting "
+                                    "(design-based variances required); use "
+                                    "the weighted SMD."),
     },
 }
 
@@ -161,6 +224,16 @@ class Options:
                                     # none | bonferroni | holm | bh | by
     lang: str = "ko"               # ko | en  (rendered label language)
     labels: Dict[str, str] = field(default_factory=dict)  # column -> display name
+    nonnormal: List[str] = field(default_factory=list)  # per-variable: force
+                                   # median[IQR] + a rank test, regardless of
+                                   # what Shapiro-Wilk says (the tableone
+                                   # convention: the analyst, not a pre-test,
+                                   # decides which variables are skewed)
+    weight_col: Optional[str] = None  # IPTW / survey weights column. Turns the
+                                   # table into a weighted (pseudo-population)
+                                   # Table 1: weighted summaries + weighted SMD,
+                                   # with p-values/effects suppressed (they
+                                   # would need design-based variances).
 
 
 @dataclass
@@ -174,6 +247,12 @@ class GroupStat:
     q3: float = float("nan")
     vmin: float = float("nan")
     vmax: float = float("nan")
+    # Weighted mode only (NaN otherwise): the summed weight behind this cell
+    # and Kish's effective sample size. ``n`` stays the RAW count of
+    # contributing observations in both modes, so "how many patients" is never
+    # silently replaced by "how much weight".
+    wsum: float = float("nan")
+    ess: float = float("nan")
 
 
 @dataclass
@@ -197,6 +276,10 @@ class CatLevel:
     label: str
     counts: List[int]            # per group (aligned to group order)
     overall: int
+    # Weighted mode only (None otherwise): the summed weight per group for this
+    # level, and its total. ``counts`` always stays the raw head-count.
+    wcounts: Optional[List[float]] = None
+    woverall: Optional[float] = None
 
 
 @dataclass
@@ -215,6 +298,10 @@ class CategoricalRow:
     kind: str = "categorical"
     effect: Optional[Effect] = None
     p_adjusted: Optional[float] = None
+    # Weighted mode only (None otherwise): the per-group weight totals that act
+    # as the percentage basis, and their sum.
+    wdenom_per_group: Optional[List[float]] = None
+    woverall_denom: Optional[float] = None
 
 
 @dataclass
@@ -230,6 +317,57 @@ class Table1:
 # --------------------------------------------------------------------------- #
 # helpers
 # --------------------------------------------------------------------------- #
+# A column whose cells all carry a unit/comparator ("72 kg", ">100") parses as
+# zero numbers, so it looks categorical. Warn above this share of number-ish
+# cells.
+_NUM_ISH_WARN_FRAC = 0.8
+
+# Labels that mark a spreadsheet SUMMARY row (a "합계"/Total line pasted under
+# the data). Such a row is not a patient: it inflates N and drags every summary
+# toward a sum. Deliberately narrow — only tokens that cannot plausibly be a
+# real arm/level label ("전체"/"overall" are excluded because they legitimately
+# name a group). We warn rather than drop: silently deleting a row the user
+# believes is data would be worse than telling them about it.
+_SUMMARY_ROW_TOKENS = {
+    "합계", "총계", "소계", "누계", "총합", "총계합", "합",
+    "total", "totals", "subtotal", "sum", "grand total",
+    "평균", "mean", "average",
+}
+
+
+def _summary_row_hits(frame: Frame) -> List[tuple]:
+    """[(column, token)] for cells that look like a spreadsheet summary row."""
+    hits: List[tuple] = []
+    for col in frame.header:
+        if not col:
+            continue
+        for cell in frame.column(col):
+            tok = cell.strip()
+            if tok and tok.casefold() in _SUMMARY_ROW_TOKENS:
+                hits.append((col, tok))
+                break   # one report per column is enough
+    return hits
+
+
+def _examples(col: Sequence[str], k: int = 2) -> str:
+    """A couple of representative non-numeric cells, for a warning.
+
+    Capped in count and length for the same reason ``_continuous_row`` caps its
+    unparseable examples: the value comes from patient data and must not turn a
+    warning into a data dump.
+    """
+    out: List[str] = []
+    for c in col:
+        if is_missing(c) or parse_float(c) is not None:
+            continue
+        tok = c.strip()[:20]
+        if tok and tok not in out:
+            out.append(tok)
+        if len(out) >= k:
+            break
+    return ", ".join(out)
+
+
 def _quantile(sorted_x: Sequence[float], q: float) -> float:
     """Linear-interpolation quantile (type 7 / numpy default)."""
     n = len(sorted_x)
@@ -245,10 +383,30 @@ def _quantile(sorted_x: Sequence[float], q: float) -> float:
     return sorted_x[lo] + (h - lo) * (sorted_x[hi] - sorted_x[lo])
 
 
-def _summ(values: Sequence[float], n_missing: int) -> GroupStat:
+def _summ(values: Sequence[float], n_missing: int,
+          w: Optional[Sequence[float]] = None) -> GroupStat:
+    """Summarize one cell, optionally weighted.
+
+    ``w=None`` is the unweighted path and is left byte-for-byte identical to
+    what it always computed. With weights, every location/spread statistic is
+    the weighted analogue; ``n`` remains the raw count of contributing
+    observations and the weight total / Kish ESS are recorded alongside.
+    """
     n = len(values)
     st = GroupStat(n=n, n_missing=n_missing)
     if n == 0:
+        return st
+    if w is not None:
+        st.wsum = math.fsum(w)
+        st.ess = wstats.kish_ess(w)
+        st.mean = wstats.weighted_mean(values, w)
+        st.sd = wstats.weighted_sd(values, w) if n >= 2 else 0.0
+        st.median = wstats.weighted_quantile(values, w, 0.5)
+        st.q1 = wstats.weighted_quantile(values, w, 0.25)
+        st.q3 = wstats.weighted_quantile(values, w, 0.75)
+        s = sorted(values)
+        st.vmin = s[0]
+        st.vmax = s[-1]
         return st
     s = sorted(values)
     m = sum(values) / n
@@ -313,16 +471,24 @@ def _is_nonnormal(group_vals: Sequence[Sequence[float]], alpha: float,
 # --------------------------------------------------------------------------- #
 # continuous
 # --------------------------------------------------------------------------- #
-def _continuous_row(name: str, group_cells: List[List[str]], opt: Options
+def _continuous_row(name: str, group_cells: List[List[str]], opt: Options,
+                    group_weights: Optional[List[List[float]]] = None
                     ) -> ContinuousRow:
+    weighted = group_weights is not None
     per_vals: List[List[float]] = []
+    per_w: List[List[float]] = []
     per_missing: List[int] = []
     unparseable = 0            # non-blank cells that are NOT numbers (units/censor)
     unparse_examples: List[str] = []
-    for cells in group_cells:
+    for gi, cells in enumerate(group_cells):
         vals = []
+        wts: List[float] = []
         miss = 0
-        for c in cells:
+        # Pair each cell with its weight so a dropped (missing/unparseable)
+        # value drops its weight too — misaligning these would attach one
+        # patient's weight to another patient's value.
+        cell_w = group_weights[gi] if weighted else [1.0] * len(cells)
+        for c, wv in zip(cells, cell_w):
             if is_missing(c):
                 miss += 1
                 continue
@@ -339,23 +505,44 @@ def _continuous_row(name: str, group_cells: List[List[str]], opt: Options
                         unparse_examples.append(tok)
             else:
                 vals.append(f)
+                wts.append(wv)
         per_vals.append(vals)
+        per_w.append(wts)
         per_missing.append(miss)
 
-    per_group = [_summ(v, m) for v, m in zip(per_vals, per_missing)]
-    all_vals = [v for g in per_vals for v in g]
-    overall = _summ(all_vals, sum(per_missing))
+    if weighted:
+        per_group = [_summ(v, m, w)
+                     for v, m, w in zip(per_vals, per_missing, per_w)]
+        all_vals = [v for g in per_vals for v in g]
+        all_w = [x for g in per_w for x in g]
+        overall = _summ(all_vals, sum(per_missing), all_w)
+    else:
+        per_group = [_summ(v, m) for v, m in zip(per_vals, per_missing)]
+        all_vals = [v for g in per_vals for v in g]
+        overall = _summ(all_vals, sum(per_missing))
 
     notes: List[str] = []
     if unparseable:
         notes.append(_msg(opt.lang, "unparseable", n=unparseable,
                           ex=", ".join(unparse_examples)))
-    nonnormal = _is_nonnormal(per_vals, opt.alpha_norm, notes, opt.lang)
+    # --nonnormal names variables the analyst already knows to be skewed, so
+    # the Shapiro-Wilk pre-test is not consulted at all for them (and its
+    # "untestable" note would be noise).
+    forced_nonnormal = name in set(opt.nonnormal)
+    if forced_nonnormal:
+        nonnormal: Optional[bool] = True
+    else:
+        nonnormal = _is_nonnormal(per_vals, opt.alpha_norm, notes, opt.lang)
 
     # The --test-cont override decides parametric vs nonparametric explicitly;
     # otherwise fall back to the normality-gated default. The normality note above
     # is still emitted so the user sees why "auto" would have chosen what it did.
-    if opt.test_cont == "nonparam":
+    if forced_nonnormal:
+        # Per-variable --nonnormal is more specific than the global
+        # --test-cont, so it wins outright: naming a variable as skewed and
+        # then getting a t-test on it would silently ignore the instruction.
+        use_nonparam = True
+    elif opt.test_cont == "nonparam":
         use_nonparam = True
     elif opt.test_cont in ("welch", "student"):
         use_nonparam = False
@@ -372,7 +559,13 @@ def _continuous_row(name: str, group_cells: List[List[str]], opt: Options
     k = len(per_vals)
     sizes = [len(v) for v in per_vals]
     try:
-        if k < 2:
+        if weighted:
+            # An unweighted p-value beside weighted summaries would be
+            # incoherent, and a valid weighted one needs design-based
+            # variances (out of scope). Balance is reported via the weighted
+            # SMD instead; the reason is stated once as a table warning.
+            pass
+        elif k < 2:
             pass  # single-group descriptive table: no between-group test
         elif k == 2:
             if min(sizes) < 2:
@@ -427,7 +620,12 @@ def _continuous_row(name: str, group_cells: List[List[str]], opt: Options
 
     smd_val = None
     effect_val: Optional[Effect] = None
-    if k == 2:
+    if k == 2 and weighted:
+        # Austin & Stuart (2015): the weighted SMD is the balance metric for an
+        # IPTW pseudo-population.
+        smd_val = wstats.weighted_continuous_smd(per_vals[0], per_w[0],
+                                                 per_vals[1], per_w[1])
+    elif k == 2:
         smd_val = smd.continuous_smd(per_vals[0], per_vals[1])
         if opt.effect:
             # Keep the effect coherent with the reported test: a parametric
@@ -459,10 +657,13 @@ def _order_levels(labels: Sequence[str]) -> List[str]:
     return sorted(uniq)
 
 
-def _categorical_row(name: str, group_cells: List[List[str]], opt: Options
+def _categorical_row(name: str, group_cells: List[List[str]], opt: Options,
+                     group_weights: Optional[List[List[float]]] = None
                      ) -> CategoricalRow:
+    weighted = group_weights is not None
     k = len(group_cells)
     missing_per_group = [0] * k
+    wmissing_per_group = [0.0] * k
     # collect observed level labels
     seen: List[str] = []
     for cells in group_cells:
@@ -474,13 +675,17 @@ def _categorical_row(name: str, group_cells: List[List[str]], opt: Options
 
     # counts for the real (observed) levels only
     counts = [[0] * k for _ in real_levels]
+    wcounts = [[0.0] * k for _ in real_levels]
     level_pos = {lab: i for i, lab in enumerate(real_levels)}
     for gi, cells in enumerate(group_cells):
-        for c in cells:
+        cell_w = group_weights[gi] if weighted else [1.0] * len(cells)
+        for c, wv in zip(cells, cell_w):
             if is_missing(c):
                 missing_per_group[gi] += 1
+                wmissing_per_group[gi] += wv
                 continue
             counts[level_pos[c.strip()]][gi] += 1
+            wcounts[level_pos[c.strip()]][gi] += wv
 
     # Optional synthetic "missing" level, tracked SEPARATELY so a real category
     # literally named "(결측)" cannot merge with the sentinel (the old code keyed
@@ -493,15 +698,27 @@ def _categorical_row(name: str, group_cells: List[List[str]], opt: Options
             lbl += " "
         missing_label = lbl
         counts.append(list(missing_per_group))
+        wcounts.append(list(wmissing_per_group))
     levels = list(real_levels) + ([missing_label] if missing_label else [])
 
     denom_per_group = [sum(counts[li][gi] for li in range(len(levels)))
                        for gi in range(k)]
     overall_denom = sum(denom_per_group)
+    wdenom_per_group = None
+    woverall_denom = None
+    if weighted:
+        wdenom_per_group = [math.fsum(wcounts[li][gi]
+                                      for li in range(len(levels)))
+                            for gi in range(k)]
+        woverall_denom = math.fsum(wdenom_per_group)
     cat_levels = [
         CatLevel(label=levels[li],
                  counts=[counts[li][gi] for gi in range(k)],
-                 overall=sum(counts[li][gi] for gi in range(k)))
+                 overall=sum(counts[li][gi] for gi in range(k)),
+                 wcounts=([wcounts[li][gi] for gi in range(k)]
+                          if weighted else None),
+                 woverall=(math.fsum(wcounts[li][gi] for gi in range(k))
+                           if weighted else None))
         for li in range(len(levels))
     ]
 
@@ -514,7 +731,10 @@ def _categorical_row(name: str, group_cells: List[List[str]], opt: Options
     # categories.
     test_levels = list(range(n_real))
     table = [[counts[li][gi] for gi in range(k)] for li in test_levels]
-    if k >= 2:  # a single-group descriptive table carries no association test
+    if weighted:
+        # See _continuous_row: no unweighted p-value beside weighted summaries.
+        pass
+    elif k >= 2:  # a single-group descriptive table carries no association test
         try:
             is_2x2 = len(table) == 2 and k == 2
             if is_2x2 and (opt.force_fisher or cat_tests.min_expected(table) < 5):
@@ -534,7 +754,11 @@ def _categorical_row(name: str, group_cells: List[List[str]], opt: Options
 
     smd_val = None
     effect_val: Optional[Effect] = None
-    if k == 2:
+    if k == 2 and weighted:
+        smd_val = wstats.weighted_categorical_smd(
+            [wcounts[li][0] for li in test_levels],
+            [wcounts[li][1] for li in test_levels])
+    elif k == 2:
         c1 = [counts[li][0] for li in test_levels]
         c2 = [counts[li][1] for li in test_levels]
         smd_val = smd.categorical_smd(c1, c2)
@@ -562,7 +786,8 @@ def _categorical_row(name: str, group_cells: List[List[str]], opt: Options
         overall_denom=overall_denom, missing_per_group=missing_per_group,
         test_name=test_name, pvalue=pvalue, smd=smd_val,
         n_missing_total=sum(missing_per_group), pct=opt.pct, notes=notes,
-        effect=effect_val)
+        effect=effect_val, wdenom_per_group=wdenom_per_group,
+        woverall_denom=woverall_denom)
 
 
 # --------------------------------------------------------------------------- #
@@ -579,6 +804,44 @@ def build_table1(frame: Frame, opt: Options) -> Table1:
 
     warnings: List[str] = []
 
+    # A "합계"/Total line pasted under the data is a spreadsheet artifact, not a
+    # patient. With a group column it usually drops out anyway (its group cell
+    # is blank), but a whole-cohort table would silently count it — inflating N
+    # and dragging every summary toward a sum.
+    for _col, _tok in _summary_row_hits(frame):
+        warnings.append(_msg(opt.lang, "warn_summary_row", col=_col, ex=_tok))
+
+    # ---------------------------------------------------------------- weights
+    # A weighted (IPTW / survey) table. Parse the weights up front so rows with
+    # an unusable weight are excluded from EVERY variable consistently, rather
+    # than per-variable (which would silently vary the denominator by row).
+    weighted = opt.weight_col is not None
+    weight_by_row: Dict[int, float] = {}
+    if weighted:
+        if not frame.has(opt.weight_col):
+            raise ValueError(
+                f"가중치 열 '{opt.weight_col}' 을(를) 찾을 수 없습니다. "
+                f"헤더: {frame.header}")
+        if opt.weight_col == opt.group_col:
+            raise ValueError(
+                "'--weights' 와 '--group' 에 같은 열을 지정할 수 없습니다.")
+        wraw = frame.column(opt.weight_col)
+        dropped_w = 0
+        for i, cell in enumerate(wraw):
+            v = None if is_missing(cell) else parse_float(cell)
+            # parse_float already maps inf/nan to None; a zero or negative
+            # weight carries no information and is not a valid IPTW weight.
+            if v is None or v <= 0.0:
+                dropped_w += 1
+                continue
+            weight_by_row[i] = v
+        if not weight_by_row:
+            raise ValueError(
+                f"가중치 열 '{opt.weight_col}' 에 유효한 양(+)의 가중치가 "
+                "하나도 없습니다.")
+        if dropped_w:
+            warnings.append(_msg(opt.lang, "warn_weight_dropped", n=dropped_w))
+
     # Determine variable columns.
     if opt.var_cols is not None:
         var_cols = list(opt.var_cols)
@@ -587,14 +850,19 @@ def build_table1(frame: Frame, opt: Options) -> Table1:
                 raise ValueError(f"변수 열 '{v}' 을(를) 찾을 수 없습니다. "
                                  f"헤더: {frame.header}")
     else:
-        var_cols = [h for h in frame.header if h != opt.group_col]
+        # The weight column is a design variable, not a baseline characteristic:
+        # keep it out of the auto-detected variable list (an explicit --vars
+        # naming it is still honoured).
+        var_cols = [h for h in frame.header
+                    if h != opt.group_col and h != opt.weight_col]
     if not var_cols:
         raise ValueError("분석할 변수 열이 없습니다.")
 
     if single_group:
         # Every row belongs to one synthetic "Overall" group.
         overall_label = "Overall" if (opt.lang or "ko") == "en" else "전체"
-        keep_idx = list(range(frame.nrows))
+        keep_idx = [i for i in range(frame.nrows)
+                    if not weighted or i in weight_by_row]
         group_order = [overall_label]
         row_index_by_group = {overall_label: list(keep_idx)}
     else:
@@ -604,6 +872,8 @@ def build_table1(frame: Frame, opt: Options) -> Table1:
         dropped_group = 0
         group_order = []
         for i, g in enumerate(group_raw):
+            if weighted and i not in weight_by_row:
+                continue  # already counted in warn_weight_dropped
             if is_missing(g):
                 dropped_group += 1
                 continue
@@ -639,12 +909,33 @@ def build_table1(frame: Frame, opt: Options) -> Table1:
     forced_cont = set(opt.continuous)
     forced_cat = set(opt.categorical)
 
+    # A typo in a column-name flag would otherwise be silently ignored, quietly
+    # changing which statistic gets reported (e.g. '--nonnormal ahii' leaves ahi
+    # summarized as mean(SD) with a t-test). --vars/--group/--weights already
+    # hard-error on an unknown name; these flags are advisory, so warn instead
+    # of failing a table that is otherwise fine.
+    for flag, names in (("--continuous", opt.continuous),
+                        ("--categorical", opt.categorical),
+                        ("--nonnormal", opt.nonnormal),
+                        ("--labels", list(opt.labels)),
+                        ("--ref", list(opt.ref))):
+        unknown = [n for n in names if not frame.has(n)]
+        if unknown:
+            warnings.append(_msg(opt.lang, "warn_unknown_cols", flag=flag,
+                                 cols=", ".join(sorted(unknown))))
+
     def _warn_high_missing(row_obj) -> None:
         # Flag a variable that is mostly missing so a summary resting on a
         # handful of observations isn't read as if it were complete.
         if overall_size and row_obj.n_missing_total / overall_size > 0.5:
             warnings.append(_msg(opt.lang, "warn_high_missing", var=row_obj.name,
                                  pct=100.0 * row_obj.n_missing_total / overall_size))
+
+    # Per-group weight vectors, aligned cell-for-cell with group_cells below.
+    group_weights: Optional[List[List[float]]] = None
+    if weighted:
+        group_weights = [[weight_by_row[i] for i in row_index_by_group[g]]
+                         for g in group_order]
 
     rows: List[object] = []
     for var in var_cols:
@@ -662,6 +953,32 @@ def build_table1(frame: Frame, opt: Options) -> Table1:
         if kind == "empty":
             warnings.append(_msg(opt.lang, "warn_var_all_missing", var=var))
             continue
+
+        # A column that is mostly numbers but carries a few censored / unit-
+        # bearing cells (">100", "12 kg") is the classic silent-corruption
+        # shape: treated as a category it renders one level per patient and
+        # attaches a meaningless chi-square to a continuous endpoint. classify()
+        # promotes the clear-cut cases; say so either way so the researcher is
+        # never left guessing which reading they got.
+        if var not in forced_cont and var not in forced_cat:
+            prof = numeric_profile(col)
+            if prof.n_nonnumeric and prof.n_numeric:
+                if kind == "continuous":
+                    warnings.append(_msg(opt.lang, "warn_mixed_promoted",
+                                         var=var,
+                                         pct=100.0 * prof.numeric_fraction,
+                                         n=prof.n_nonnumeric))
+                elif prof.num_ish_fraction >= 0.5:
+                    warnings.append(_msg(opt.lang, "warn_numeric_like_cat",
+                                         var=var, ex=_examples(col)))
+            elif (kind == "categorical" and not prof.n_numeric
+                    and prof.num_ish_fraction >= _NUM_ISH_WARN_FRAC
+                    and prof.n_nonmissing >= 3):
+                # Every cell carries a unit ("72 kg", "45%"): nothing parses, so
+                # the column looks categorical, but it is plainly a measurement.
+                warnings.append(_msg(opt.lang, "warn_numeric_like_cat",
+                                     var=var, ex=_examples(col)))
+
         if kind == "continuous":
             # Foot-gun guard: a numeric code column (e.g. NYHA 1-4, a Likert /
             # ISI severity band) that slipped past --cat-max-levels is summarized
@@ -675,7 +992,7 @@ def build_table1(frame: Frame, opt: Options) -> Table1:
                         float(x).is_integer() for x in distinct):
                     warnings.append(_msg(opt.lang, "warn_int_code",
                                          var=var, n=len(distinct)))
-            crow = _continuous_row(var, group_cells, opt)
+            crow = _continuous_row(var, group_cells, opt, group_weights)
             _warn_high_missing(crow)
             rows.append(crow)
         else:
@@ -688,7 +1005,7 @@ def build_table1(frame: Frame, opt: Options) -> Table1:
                 warnings.append(_msg(opt.lang, "warn_too_many_levels",
                                      var=var, n=n_levels))
                 continue
-            crow = _categorical_row(var, group_cells, opt)
+            crow = _categorical_row(var, group_cells, opt, group_weights)
             # If a --ref level was given for this column but never appears in the
             # data, warn instead of silently falling back to the default
             # reference (a typo would otherwise pick the unintended level).
@@ -709,10 +1026,26 @@ def build_table1(frame: Frame, opt: Options) -> Table1:
     # (one per row, never per level). Untestable variables (pvalue None) pass
     # through and do not count toward the family size.
     padjust = normalize_method(opt.padjust)
+    if weighted:
+        # No p-values exist under weighting, so there is nothing to adjust and
+        # no p-column to render. Say so once, at table level, rather than
+        # leaving the user to wonder why the column vanished.
+        padjust = "none"
+        if opt.show_pvalue:
+            warnings.append(_msg(opt.lang, "warn_weighted_no_p"))
+        if opt.effect:
+            warnings.append(_msg(opt.lang, "warn_weighted_no_effect"))
     if padjust != "none":
         adj = adjust_pvalues([getattr(r, "pvalue", None) for r in rows], padjust)
         for r, a in zip(rows, adj):
             r.p_adjusted = a
+
+    # Per-group weight totals and Kish effective sample sizes for the header.
+    wsums: Optional[List[float]] = None
+    esss: Optional[List[float]] = None
+    if weighted:
+        wsums = [math.fsum(w) for w in (group_weights or [])]
+        esss = [wstats.kish_ess(w) for w in (group_weights or [])]
 
     meta = {
         "group_col": opt.group_col,
@@ -722,8 +1055,23 @@ def build_table1(frame: Frame, opt: Options) -> Table1:
         "two_group": len(group_order) == 2,
         "padjust": padjust,
         # An effect/CI column is only actually present for a two-group table
-        # (between-group difference) or, in descriptive mode, a one-sample CI.
-        "effect": bool(opt.effect) and (len(group_order) == 2 or single_group),
+        # (between-group difference) or, in descriptive mode, a one-sample CI —
+        # and never under weighting, which has no design-based variance here.
+        "effect": (bool(opt.effect) and not weighted
+                   and (len(group_order) == 2 or single_group)),
+        "weighted": weighted,
+        "weight_col": opt.weight_col,
+        "weight_sums": wsums,
+        "ess": esss,
+        # Pooled ESS for the Overall column, computed here rather than exposing
+        # every row's weight in meta: meta is serialized into the JSON output,
+        # and a per-row weight vector is row-level data that has no business in
+        # a table-level summary (and would bloat the file).
+        "ess_overall": (wstats.kish_ess([x for g in (group_weights or [])
+                                         for x in g]) if weighted else None),
+        # Under weighting the p-value column is suppressed regardless of
+        # --no-pvalue; render reads this rather than re-deriving the rule.
+        "show_pvalue": bool(opt.show_pvalue) and not weighted,
     }
     return Table1(groups=group_order, group_sizes=group_sizes,
                   overall_size=overall_size, rows=rows,

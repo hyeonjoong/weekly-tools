@@ -60,6 +60,7 @@ class MannWhitneyResult:
     u2: float
     zscore: float
     pvalue: float
+    method: str = "asymptotic"  # "exact" or "asymptotic"
 
 
 @dataclass

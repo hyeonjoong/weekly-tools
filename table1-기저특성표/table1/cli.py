@@ -33,12 +33,13 @@ def _split(arg: Optional[str]) -> List[str]:
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="table1",
-        description="임상 CSV → 출판용 '표 1'(기저 특성표). 변수별로 연속형/범주형을 "
-                    "자동 판별해 알맞은 요약과 검정을 고르고, 표준화 평균차(SMD)와 "
-                    "결측까지 정리해 Markdown/CSV/TSV/JSON으로 출력합니다.",
+        description="임상 CSV·엑셀(.xlsx) → 출판용 '표 1'(기저 특성표). 변수별로 "
+                    "연속형/범주형을 자동 판별해 알맞은 요약과 검정을 고르고, "
+                    "표준화 평균차(SMD)·결측을 정리해 Markdown/CSV/TSV/JSON/HTML로 "
+                    "출력합니다. IPTW/성향점수 가중표(--weights)도 지원합니다.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    p.add_argument("csv", help="입력 CSV 파일 경로")
+    p.add_argument("csv", help="입력 CSV 또는 엑셀(.xlsx) 파일 경로 ('-' = 표준입력)")
     p.add_argument("--group", "-g", default=None,
                    help="그룹(군) 라벨이 담긴 열 이름 (예: arm, treatment). "
                         "생략하면 전체 코호트를 한 열로 요약하는 기술통계표"
@@ -55,6 +56,18 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-levels", type=int, default=20,
                    help="자동 판별된 범주형의 고유값이 이보다 많으면 ID/자유텍스트로 "
                         "보고 건너뜀 (기본 20)")
+    p.add_argument("--weights", "-w", metavar="열", default=None,
+                   help="가중치(IPTW/성향점수/설문) 열 이름. 지정하면 가중 유사모집단 "
+                        "기준 표를 만듭니다: 가중 평균(SD)·가중 중앙값[IQR]·가중 n(%%)·"
+                        "**가중 SMD**(Austin & Stuart 2015)와 군별 Kish 유효표본수(ESS). "
+                        "p값·다중비교·차이(95%% CI)는 설계기반 분산이 필요해 생략됩니다")
+    p.add_argument("--nonnormal",
+                   help="비정규(왜곡)로 취급할 열들(쉼표 구분). Shapiro-Wilk 사전검정 "
+                        "대신 분석자가 직접 지정 → 해당 변수는 항상 중앙값[IQR] + "
+                        "Mann-Whitney/Kruskal. --test-cont 보다 우선")
+    p.add_argument("--sheet", default=None, metavar="이름|번호",
+                   help="엑셀(.xlsx) 입력에서 읽을 시트 이름 또는 1부터 시작하는 번호 "
+                        "(기본: 첫 번째 시트)")
     p.add_argument("--display", choices=["auto", "mean", "median", "both"],
                    default="auto",
                    help="연속형 표기: auto(정규성 따라)·mean·median·both (기본 auto)")
@@ -153,7 +166,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         delimiter = {"\\t": "\t", "tab": "\t", "TAB": "\t",
                      "\\|": "|"}.get(delimiter, delimiter)
     try:
-        frame = load_frame(args.csv, delimiter=delimiter)
+        frame = load_frame(args.csv, delimiter=delimiter, sheet=args.sheet)
     except FileNotFoundError:
         print(f"입력 오류: 파일을 찾을 수 없습니다: {args.csv}", file=sys.stderr)
         return 2
@@ -198,6 +211,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         padjust=args.padjust,
         lang=args.lang,
         labels=labels,
+        nonnormal=_split(args.nonnormal),
+        weight_col=args.weights,
     )
     try:
         table = build_table1(frame, opt)
