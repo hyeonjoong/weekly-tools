@@ -1,4 +1,6 @@
 """적대적 리뷰에서 발견된 결함에 대한 회귀 테스트."""
+import json
+
 import pytest
 
 from surveyscan.analyze import analyze
@@ -10,6 +12,10 @@ def write(tmp_path, name, text):
     p = tmp_path / name
     p.write_text(text, encoding="utf-8")
     return str(p)
+
+
+def _raise_on_nonfinite(x):
+    raise ValueError(f"non-finite in JSON: {x}")
 
 
 def test_all_zero_column_not_dropped(tmp_path):
@@ -83,3 +89,43 @@ def test_fully_missing_item_flagged(tmp_path):
     sub = res["subscales"][0]
     assert sub["items_no_data"] == ["B"]
     assert "전부 결측인 문항" in render(res)
+
+
+def test_nonfinite_cells_treated_as_missing(tmp_path):
+    # R1(round?): 'inf'/'1e400'/'+nan' 은 통계를 오염시키므로 결측 처리
+    path = write(tmp_path, "d.csv", "Q1,Q2\ninf,2\n1e400,3\n1,4\n2,5\n")
+    data = load_csv(path)
+    # inf, 1e400 -> 결측, 실제 값은 1,2 만 남음
+    assert data.present_values("Q1") == [1.0, 2.0]
+
+
+def test_json_output_is_strict_valid(tmp_path):
+    # R1: 비유한값이 있어도 JSON은 항상 엄격 유효(NaN/Infinity 금지)
+    from surveyscan.cli import run
+    path = write(tmp_path, "d.csv", "Q1,Q2\ninf,2\n1,3\n5,4\n")
+    import io
+    import contextlib
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = run([path, "--json"])
+    assert rc == 0
+    out = buf.getvalue()
+    assert "Infinity" not in out and "NaN" not in out
+    # parse_constant 로 비유한 토큰이 있으면 예외
+    json.loads(out, parse_constant=_raise_on_nonfinite)
+
+
+def test_config_directory_friendly_error(tmp_path, capsys):
+    from surveyscan.cli import run
+    csv_path = write(tmp_path, "d.csv", "Q1,Q2\n1,2\n3,4\n")
+    d = tmp_path / "cfgdir"
+    d.mkdir()
+    rc = run([csv_path, "--config", str(d)])
+    assert rc == 2  # raw traceback 대신 친절한 종료코드
+
+
+def test_output_to_directory_friendly_error(tmp_path):
+    from surveyscan.cli import run
+    csv_path = write(tmp_path, "d.csv", "Q1,Q2\n1,2\n3,4\n")
+    rc = run([csv_path, "-o", str(tmp_path)])  # 폴더로 저장 시도
+    assert rc == 2

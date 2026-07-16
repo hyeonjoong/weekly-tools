@@ -10,7 +10,9 @@
 from __future__ import annotations
 
 import math
-from typing import List, Optional, Sequence
+from typing import List, Optional, Sequence, Tuple
+
+from . import special
 
 
 def mean(xs: Sequence[float]) -> Optional[float]:
@@ -45,6 +47,53 @@ def median(xs: Sequence[float]) -> Optional[float]:
     if n % 2 == 1:
         return float(s[mid])
     return (s[mid - 1] + s[mid]) / 2.0
+
+
+def quantile(xs: Sequence[float], q: float) -> Optional[float]:
+    """분위수(선형보간, R type-7 / numpy 기본과 동일). q∈[0,1]. 빈 리스트면 None."""
+    if not xs:
+        return None
+    if not (0.0 <= q <= 1.0):
+        raise ValueError("quantile: q는 0과 1 사이여야 합니다.")
+    s = sorted(xs)
+    n = len(s)
+    if n == 1:
+        return float(s[0])
+    pos = q * (n - 1)
+    lo = int(math.floor(pos))
+    hi = min(lo + 1, n - 1)
+    frac = pos - lo
+    return float(s[lo] + (s[hi] - s[lo]) * frac)
+
+
+def skewness(xs: Sequence[float]) -> Optional[float]:
+    """표본 왜도(bias 보정 G1, SPSS/Excel과 동일). 관측치 3개 미만이거나 분산 0이면 None."""
+    n = len(xs)
+    if n < 3:
+        return None
+    m = sum(xs) / n
+    m2 = sum((x - m) ** 2 for x in xs) / n
+    if m2 == 0:
+        return None
+    m3 = sum((x - m) ** 3 for x in xs) / n
+    g1 = m3 / (m2 ** 1.5)
+    # 편향보정: G1 = g1 * sqrt(n(n-1))/(n-2)
+    return g1 * math.sqrt(n * (n - 1)) / (n - 2)
+
+
+def kurtosis(xs: Sequence[float]) -> Optional[float]:
+    """표본 초과첨도(bias 보정 G2, SPSS/Excel과 동일). 관측치 4개 미만이거나 분산 0이면 None."""
+    n = len(xs)
+    if n < 4:
+        return None
+    m = sum(xs) / n
+    m2 = sum((x - m) ** 2 for x in xs) / n
+    if m2 == 0:
+        return None
+    m4 = sum((x - m) ** 4 for x in xs) / n
+    g2 = m4 / (m2 ** 2) - 3.0
+    # 편향보정: G2 = ((n+1)*g2 + 6) * (n-1)/((n-2)(n-3))
+    return ((n + 1) * g2 + 6) * (n - 1) / ((n - 2) * (n - 3))
 
 
 def pearson(xs: Sequence[float], ys: Sequence[float]) -> Optional[float]:
@@ -88,3 +137,54 @@ def cronbach_alpha(item_columns: Sequence[Sequence[float]]) -> Optional[float]:
     if total_var is None or total_var == 0:
         return None
     return (k / (k - 1)) * (1 - item_var_sum / total_var)
+
+
+def cronbach_alpha_ci(
+    alpha: Optional[float], n_subjects: int, k_items: int, conf: float = 0.95
+) -> Optional[Tuple[float, float]]:
+    """Cronbach α의 신뢰구간 (Feldt 1965, F 분포 기반).
+
+    CI = [1 - (1-α)·F_{1-a/2}(df1,df2),  1 - (1-α)·F_{a/2}(df1,df2)]
+      df1 = n-1,  df2 = (n-1)(k-1),  a = 1-conf
+
+    α가 None이거나 응답자<2·문항<2면 None. 상한은 1.0으로 클램프한다
+    (F 분위수 반올림으로 1을 미세하게 넘는 것을 방지).
+    """
+    if alpha is None or n_subjects < 2 or k_items < 2:
+        return None
+    if not (0.0 < conf < 1.0):
+        raise ValueError("conf는 0과 1 사이여야 합니다.")
+    a = 1.0 - conf
+    df1 = n_subjects - 1
+    df2 = (n_subjects - 1) * (k_items - 1)
+    lower = 1.0 - (1.0 - alpha) * special.f_ppf(1.0 - a / 2.0, df1, df2)
+    upper = 1.0 - (1.0 - alpha) * special.f_ppf(a / 2.0, df1, df2)
+    return (lower, min(upper, 1.0))
+
+
+def sem_from_alpha(sd_total: Optional[float], alpha: Optional[float]) -> Optional[float]:
+    """측정의 표준오차 SEM = SD_총점 · sqrt(1-α).
+
+    α>1(드물게 발생 가능) 이면 1-α<0 이 되어 정의불가 → None.
+    """
+    if sd_total is None or alpha is None:
+        return None
+    if alpha > 1.0:
+        return None
+    return sd_total * math.sqrt(max(0.0, 1.0 - alpha))
+
+
+def t_ci_mean(
+    xs: Sequence[float], conf: float = 0.95
+) -> Optional[Tuple[float, float]]:
+    """평균의 t 기반 신뢰구간. 관측치 2개 미만이면 None."""
+    n = len(xs)
+    if n < 2:
+        return None
+    m = sum(xs) / n
+    sd = stdev(xs)
+    if sd is None:
+        return None
+    se = sd / math.sqrt(n)
+    tcrit = special.t_ppf(1.0 - (1.0 - conf) / 2.0, n - 1)
+    return (m - tcrit * se, m + tcrit * se)
