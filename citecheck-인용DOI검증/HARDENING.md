@@ -284,3 +284,103 @@ regression tests (punctuation-tolerant match stays clean; unrelated title still
 flagged).
 
 Two rounds (R3 correctness, R4) now pass clean, so hardening stops here.
+
+---
+
+## 2026-07-16 — Deep improvement + 3-round hardening (new capabilities)
+
+A second, larger pass: real new capability plus three fresh adversarial panels
+(5 + 3 + 3 independent reviewers), each recomputing statistics from first
+principles and hammering edge cases, then every material finding fixed with a
+regression test. **Baseline:** 93 tests. **After:** 179 tests passing, fully
+offline.
+
+### New capabilities (genuine, tested)
+
+- **RIS input** (EndNote / Zotero / Mendeley export). `parse_ris` handles the
+  `TY…ER` record model, continuation lines, `TI/T1/BT` titles, `AU/A1`
+  authors, `PY/Y1/DA` dates, `JF/JO/JA/T2` journals, `DO`/whole-record DOI
+  recovery, and `AN` → PMID only when the provider tags say PubMed/MEDLINE.
+- **CSL-JSON input** (Zotero / Better BibTeX / pandoc). `parse_csl_json` reads
+  `title`/`author` (family or literal) / `issued` (date-parts, raw, literal) /
+  `container-title` / `DOI` / `PMID`, tolerating str-or-list fields and
+  non-citation JSON.
+- **Journal / container mismatch** check — a second independent swapped-DOI
+  signal. `_journal_matches` folds diacritics and leading articles ("Lancet" =
+  "The Lancet") and understands ISO-4 abbreviations, including *contracted*
+  ones that drop interior letters ("Am J Med", "N Engl J Med", "Proc Natl Acad
+  Sci", "J Natl Cancer Inst"). Deliberately permissive: only a clear mismatch
+  ("Nature" cited, Crossref says "Lancet") warns.
+- **PMID awareness** — parsed from every format (labelled only, so a page
+  number is never mistaken for a PMID); surfaced in the no-DOI message and JSON;
+  duplicate-PMID detection (suppressed when already a duplicate DOI).
+- **`--pubmed` cross-check** (opt-in) — a stdlib `PubMedClient` (esummary,
+  injectable transport like `CrossrefClient`) that catches retractions Crossref
+  misses (PubMed "Retracted Publication" pubtype, distinct from the
+  "Retraction of Publication" notice) and reports a **PMID↔DOI mismatch** when
+  the cited PMID and DOI resolve to different papers. Runs before the no-DOI
+  early return; a PubMed lookup failure reads as inconclusive (exit 3), never a
+  false clean pass.
+- **CSV and Markdown reports** (`--report csv|markdown`, alongside `text`/`json`)
+  for sharing with co-authors. CSV cells beginning `= + - @ \t \r` are
+  quote-prefixed to defuse spreadsheet formula injection.
+- **biblatex fields** — `date=` (year) and `journaltitle=` are now read, so
+  Better BibTeX / biblatex exports get full year + journal verification.
+
+### Hardening fixes (each with a regression test)
+
+**Round 1 (5 reviewers):**
+- **ReDoS (HIGH)** in `_PMID_RE`: `\s*:?\s*` had ambiguous adjacent whitespace
+  quantifiers → O(N²) on `pmid<many spaces>` reachable from any untrusted file
+  (≈30 s at 80k spaces). Collapsed to a single `[\s:]*` class → 0.002 s.
+- **`RecursionError` crash** on pathologically deep JSON: `json.loads` raises
+  `RecursionError` (a `RuntimeError`, not `ValueError`); added it to the guards
+  in `looks_like_csl_json`/`parse_csl_json` so a crafted `.json` degrades to
+  "not CSL-JSON" instead of a traceback.
+- **JSON report leaked C1 controls**: `_to_json` didn't sanitize; a poisoned
+  title/journal/DOI could smuggle a raw `0x9b` (CSI) into JSON stdout. Now
+  `_sanitize`s label, doi, journal, and every message — consistent with the
+  text/csv/markdown paths.
+- **Journal false-positive** on short-token abbreviations: `_is_abbrev_of` used
+  `_alpha_tokens` (drops <3-char words) so "Am J Med" reduced to `["med"]` and
+  falsely mismatched "American Journal of Medicine". Switched to `_journal_words`
+  (keeps short words).
+- **RIS false-trigger**: a lone `TY  - …` line in plain prose routed a whole
+  file into a single RIS record (silent data loss). Detection now requires a
+  `TY` header AND (an `ER` terminator OR ≥3 tag lines).
+- **Invalid PMID `0`** accepted; `_clean_pmid` now rejects zero/empty and strips
+  leading zeros everywhere (BibTeX, RIS `AN`, CSL, free text).
+
+**Round 2 (3 reviewers):**
+- **`_pubmed_crosscheck` crash** on a non-dict record (contract violation from a
+  transport): added the symmetric `isinstance(record, dict)` guard the Crossref
+  path already had.
+- **JSON `doi` field** still unsanitized (a DOI can carry `0x9b`); sanitized it.
+- Doc honesty: exit-3 wording corrected (a lookup failure means verification is
+  *incomplete*, not that *nothing* was verified — `--pubmed` makes the mixed
+  case common); PMID↔DOI wording tightened; added CLI-level exit-code tests
+  (exit 3 on PubMed failure; notice-not-flagged → exit 0) and a status assertion.
+
+**Round 3 (3 reviewers):**
+- **Contracted ISO-4 abbreviations** ("Proc **Natl** Acad Sci", "J **Natl**
+  Cancer Inst", "Dtsch Arztebl Int") produced false journal-mismatch warnings
+  when Crossref lacked `short-container-title`, because `_is_abbrev_of` required
+  a *prefix*. Introduced `_is_word_contraction` (first-letter-anchored
+  subsequence), which subsumes the prefix rule → no regressions, fixes PNAS/JNCI.
+- **Latent quadratic** in `_guess_text_author` (two `\s*` groups straddling a
+  leading whitespace run) — unreachable today (`parse_text` strips first), but
+  removed the redundant leading `\s*` (via `.lstrip()`) as defense in depth and
+  added a linearity regression test.
+
+### Verified holdings
+
+Across the panels: RIS/CSL/BibTeX/text parsing, DOI normalization (parens, URL,
+query strings), retraction narrowing (Crossref `update-by`/`is-retracted-by`;
+PubMed "Retracted Publication" vs the notice), the journal matcher on ~15 real
+medical abbreviations (match) and genuinely-different journals (no match), all
+four report formats' sanitization + CSV formula-injection guard, the offline
+socket guard now covering `PubMedClient`, no `--mailto`/PII leak into any report,
+and every regex linear at N≥200k. Docs (README / 사용법.md / 실행.command) were
+re-verified command-by-command against the code with the example files
+(`sample.bib`/`.ris`/`.json`) parsing correctly.
+

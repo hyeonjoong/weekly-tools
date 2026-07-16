@@ -86,7 +86,7 @@ def test_json_output_shape(tmp_path, capsys):
     payload = json.loads(out)
     assert isinstance(payload, list) and len(payload) == 1
     item = payload[0]
-    assert set(item) == {"label", "doi", "status", "findings"}
+    assert set(item) == {"label", "doi", "pmid", "journal", "status", "findings"}
     assert item["status"] == "error"
     assert item["findings"][0].keys() >= {"severity", "message"}
 
@@ -270,3 +270,188 @@ def test_resolve_transient_failure_not_hard_error(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "does not resolve" not in out  # no false hard error
     assert code == 3  # inconclusive
+
+
+# --- new input formats end-to-end -------------------------------------------
+
+RIS_DOC = """TY  - JOUR
+AU  - Ioannidis, John P. A.
+TI  - Why Most Published Research Findings Are False
+JO  - PLoS Medicine
+PY  - 2005
+DO  - 10.1371/journal.pmed.0020124
+ER  - 
+"""
+
+
+def test_ris_input_auto_detected(tmp_path, capsys):
+    rec = dict(GOOD, title=["Why Most Published Research Findings Are False"],
+               author=[{"family": "Ioannidis"}], issued={"date-parts": [[2005]]})
+    path = write(tmp_path, "refs.ris", RIS_DOC)
+    code = run([path, "--delay", "0", "--json"],
+               client=fake_client({"10.1371/journal.pmed.0020124": rec}))
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert payload[0]["doi"] == "10.1371/journal.pmed.0020124"
+
+
+def test_csl_json_input_auto_detected(tmp_path, capsys):
+    doc = ('[{"id":"k","type":"article-journal","DOI":"10.9999/nope",'
+           '"title":"Broken","author":[{"family":"Smith"}],'
+           '"issued":{"date-parts":[[2020]]}}]')
+    path = write(tmp_path, "refs.json", doc)
+    code = run([path, "--delay", "0", "--json"], client=fake_client({}, resolves=False))
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 1  # broken DOI -> error
+    assert payload[0]["status"] == "error"
+
+
+# --- report formats ---------------------------------------------------------
+
+def test_csv_report(tmp_path, capsys):
+    path = write(tmp_path, "r.bib", "@article{k, doi={10.9999/nope}, journal={Nature}}")
+    run([path, "--report", "csv", "--delay", "0"], client=fake_client({}, resolves=False))
+    out = capsys.readouterr().out
+    lines = out.strip().splitlines()
+    assert lines[0] == "label,doi,pmid,journal,status,findings"
+    assert "10.9999/nope" in lines[1]
+    assert "error" in lines[1]
+
+
+def test_csv_injection_neutralised(tmp_path, capsys):
+    # A journal field starting with '=' must be quote-prefixed, not left as a
+    # live spreadsheet formula.
+    path = write(tmp_path, "r.bib", '@article{k, doi={10.1/x}, journal={=HYPERLINK("evil")}}')
+    run([path, "--report", "csv", "--delay", "0"], client=fake_client({"10.1/x": GOOD}))
+    out = capsys.readouterr().out
+    assert "'=HYPERLINK" in out  # neutralised
+    assert ",=HYPERLINK" not in out  # never a bare leading '='
+
+
+def test_markdown_report(tmp_path, capsys):
+    path = write(tmp_path, "r.bib", "@article{k, doi={10.9999/nope}}")
+    run([path, "--report", "markdown", "--delay", "0"], client=fake_client({}, resolves=False))
+    out = capsys.readouterr().out
+    assert "# citecheck report" in out
+    assert "| Status | Reference | DOI | Findings |" in out
+    assert "✗" in out
+
+
+def test_json_flag_still_works(tmp_path, capsys):
+    path = write(tmp_path, "r.bib", "@article{k, doi={10.9999/nope}}")
+    run([path, "--json", "--delay", "0"], client=fake_client({}, resolves=False))
+    json.loads(capsys.readouterr().out)  # valid JSON
+
+
+def test_report_json_equivalent_to_json_flag(tmp_path, capsys):
+    path = write(tmp_path, "r.bib", "@article{k, doi={10.9999/nope}}")
+    run([path, "--report", "json", "--delay", "0"], client=fake_client({}, resolves=False))
+    json.loads(capsys.readouterr().out)
+
+
+# --- duplicate PMID ---------------------------------------------------------
+
+def test_duplicate_pmid_flagged(tmp_path, capsys):
+    bib = ("@article{a, title={T}, note={PMID: 16060722}}\n"
+           "@article{b, title={T}, note={PMID: 16060722}}")
+    path = write(tmp_path, "d.bib", bib)
+    run([path, "--json", "--delay", "0"], client=fake_client({}))
+    payload = json.loads(capsys.readouterr().out)
+    assert all(any("Duplicate PMID" in f["message"] for f in item["findings"])
+               for item in payload)
+
+
+def test_duplicate_pmid_not_double_reported_with_doi(tmp_path, capsys):
+    # Same DOI twice already flags Duplicate DOI; don't also add Duplicate PMID.
+    bib = ("@article{a, doi={10.1/x}, note={PMID: 111}}\n"
+           "@article{b, doi={10.1/x}, note={PMID: 111}}")
+    path = write(tmp_path, "d.bib", bib)
+    run([path, "--json", "--delay", "0"], client=fake_client({"10.1/x": GOOD}))
+    payload = json.loads(capsys.readouterr().out)
+    for item in payload:
+        msgs = [f["message"] for f in item["findings"]]
+        assert any("Duplicate DOI" in m for m in msgs)
+        assert not any("Duplicate PMID" in m for m in msgs)
+
+
+# --- --pubmed cross-check (injected client) ---------------------------------
+
+def test_cli_pubmed_retraction_exit_one(tmp_path, capsys):
+    from citecheck.core import PubMedClient
+    rec = {"pubtype": ["Retracted Publication"],
+           "articleids": [{"idtype": "doi", "value": "10.1371/journal.pone.0312345"}]}
+    pm = PubMedClient(_fetch=lambda p: {"999": rec}.get(p))
+    path = write(tmp_path, "r.bib",
+                 "@article{k, doi={10.1371/journal.pone.0312345}, pmid={999}}")
+    code = run([path, "--pubmed", "--delay", "0"],
+               client=fake_client({"10.1371/journal.pone.0312345": GOOD}), pubmed=pm)
+    out = capsys.readouterr().out
+    assert code == 1
+    assert "RETRACTED according to PubMed" in out
+
+
+def test_cli_pubmed_flag_gates_the_crosscheck(tmp_path, capsys):
+    # A PMID-bearing ref whose PubMed record is RETRACTED. Without --pubmed and
+    # with no injected PubMed client, the cross-check must NOT run (exit 0);
+    # nothing may reach the network (the conftest guard would fail the test if it
+    # tried). This proves PubMed is genuinely opt-in.
+    path = write(tmp_path, "r.bib",
+                 "@article{k, doi={10.1371/journal.pone.0312345}, pmid={999}}")
+    code = run([path, "--delay", "0"],
+               client=fake_client({"10.1371/journal.pone.0312345": GOOD}))
+    assert code == 0  # no PubMed => no retraction error
+
+
+def test_cli_injected_pubmed_used_even_without_flag(tmp_path, capsys):
+    # When a PubMed client is injected (as tests do), it is honoured directly —
+    # the --pubmed flag only controls creation of a *real* network client.
+    from citecheck.core import PubMedClient
+    rec = {"pubtype": ["Retracted Publication"],
+           "articleids": [{"idtype": "doi", "value": "10.1371/journal.pone.0312345"}]}
+    pm = PubMedClient(_fetch=lambda p: {"999": rec}.get(p))
+    path = write(tmp_path, "r.bib",
+                 "@article{k, doi={10.1371/journal.pone.0312345}, pmid={999}}")
+    code = run([path, "--delay", "0"],
+               client=fake_client({"10.1371/journal.pone.0312345": GOOD}), pubmed=pm)
+    assert code == 1  # injected PubMed client runs, retraction => error
+
+
+def test_cli_pubmed_lookup_failure_exit_three(tmp_path, capsys):
+    # A PubMed lookup failure must make the run exit 3 (inconclusive), never a
+    # false clean pass — the exit-3 contract the docs advertise for --pubmed.
+    from citecheck.core import PubMedClient
+
+    def boom(p):
+        raise TimeoutError("pubmed offline")
+
+    pm = PubMedClient(_fetch=boom)
+    path = write(tmp_path, "r.bib",
+                 "@article{k, doi={10.1371/journal.pone.0312345}, pmid={999}}")
+    code = run([path, "--delay", "0"],
+               client=fake_client({"10.1371/journal.pone.0312345": GOOD}), pubmed=pm)
+    assert code == 3
+
+
+def test_cli_retraction_notice_not_flagged_exit_zero(tmp_path, capsys):
+    # "Retraction of Publication" is the notice, not a retracted source — the
+    # PMID cross-check must NOT error on it.
+    from citecheck.core import PubMedClient
+    notice = {"pubtype": ["Retraction of Publication"],
+              "articleids": [{"idtype": "doi", "value": "10.1371/journal.pone.0312345"}]}
+    pm = PubMedClient(_fetch=lambda p: {"999": notice}.get(p))
+    path = write(tmp_path, "r.bib",
+                 "@article{k, doi={10.1371/journal.pone.0312345}, pmid={999}}")
+    code = run([path, "--delay", "0"],
+               client=fake_client({"10.1371/journal.pone.0312345": GOOD}), pubmed=pm)
+    assert code == 0
+
+
+def test_json_doi_field_sanitized(tmp_path, capsys):
+    # A DOI carrying a C1 control char (0x9b = CSI) must be stripped in the JSON
+    # report too, consistent with text/csv/markdown.
+    path = write(tmp_path, "r.bib", "@article{k, title={T}, doi={10.1234/abc\x9b31mPWNED}}")
+    run([path, "--json", "--delay", "0"], client=fake_client({}, resolves=False))
+    out = capsys.readouterr().out
+    assert "\x9b" not in out
+    payload = json.loads(out)
+    assert "\x9b" not in (payload[0]["doi"] or "")

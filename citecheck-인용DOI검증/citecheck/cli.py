@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import csv
+import io
 import json
 import math
 import re
@@ -12,8 +14,8 @@ from collections import Counter
 from typing import Optional
 
 from . import __version__
-from .core import CheckResult, CrossrefClient, ERROR, OK, WARNING, check_reference
-from .parsers import count_malformed_entries, parse_references
+from .core import CheckResult, CrossrefClient, ERROR, OK, PubMedClient, WARNING, check_reference
+from .parsers import count_malformed_entries, detect_format, parse_references
 
 # Exit codes.
 EXIT_OK = 0
@@ -85,13 +87,78 @@ def _to_json(results: list[CheckResult]) -> str:
     for r in results:
         payload.append(
             {
-                "label": r.reference.label(),
-                "doi": r.reference.doi,
+                # Sanitize the same C0/C1 control chars the text/csv/markdown
+                # paths strip, so a poisoned title can't smuggle terminal escapes
+                # through the JSON report either (ensure_ascii=False emits them raw).
+                "label": _sanitize(r.reference.label()),
+                "doi": _sanitize(r.reference.doi) if r.reference.doi else None,
+                "pmid": r.reference.pmid,
+                "journal": _sanitize(r.reference.journal) if r.reference.journal else None,
                 "status": r.status,
-                "findings": [{"severity": f.severity, "message": f.message} for f in r.findings],
+                "findings": [
+                    {"severity": f.severity, "message": _sanitize(f.message)}
+                    for f in r.findings
+                ],
             }
         )
     return json.dumps(payload, indent=2, ensure_ascii=False)
+
+
+def _csv_safe(value: str) -> str:
+    """Neutralise CSV-injection: a leading =/+/-/@ makes a spreadsheet treat the
+    cell as a formula, so prefix such a cell with a single quote."""
+    value = _sanitize(value)
+    if value and value[0] in "=+-@\t\r":
+        return "'" + value
+    return value
+
+
+def _to_csv(results: list[CheckResult]) -> str:
+    """One row per reference — openable in Excel by a co-author."""
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["label", "doi", "pmid", "journal", "status", "findings"])
+    for r in results:
+        messages = " | ".join(f.message.replace("\n", " ").strip() for f in r.findings)
+        writer.writerow(
+            [
+                _csv_safe(r.reference.label()),
+                _csv_safe(r.reference.doi or ""),
+                _csv_safe(r.reference.pmid or ""),
+                _csv_safe(r.reference.journal or ""),
+                r.status,
+                _csv_safe(messages),
+            ]
+        )
+    return buf.getvalue().rstrip("\r\n")
+
+
+def _md_cell(text: str) -> str:
+    return _sanitize(text).replace("|", "\\|").replace("\n", " ").strip()
+
+
+def _to_markdown(results: list[CheckResult]) -> str:
+    """A Markdown report for pasting into a PR / issue / lab notebook."""
+    n_err = sum(r.status == ERROR for r in results)
+    n_warn = sum(r.status == WARNING for r in results)
+    n_ok = sum(r.status == OK for r in results)
+    lines = [
+        "# citecheck report",
+        "",
+        f"Checked **{len(results)}** references: "
+        f"**{n_ok}** ok, **{n_warn}** warnings, **{n_err}** errors.",
+        "",
+        "| Status | Reference | DOI | Findings |",
+        "| :----: | --------- | --- | -------- |",
+    ]
+    symbol = {OK: "✓", WARNING: "!", ERROR: "✗"}
+    for r in results:
+        findings = "<br>".join(_md_cell(f.message) for f in r.findings) or "—"
+        lines.append(
+            f"| {symbol[r.status]} | {_md_cell(r.reference.label())} "
+            f"| {_md_cell(r.reference.doi or '—')} | {findings} |"
+        )
+    return "\n".join(lines)
 
 
 def _flag_duplicate_dois(results: list[CheckResult]) -> None:
@@ -101,6 +168,17 @@ def _flag_duplicate_dois(results: list[CheckResult]) -> None:
     for r in results:
         if r.reference.doi in dups:
             r.add(WARNING, f"Duplicate DOI — cited by {counts[r.reference.doi]} references: {r.reference.doi}")
+
+
+def _flag_duplicate_pmids(results: list[CheckResult]) -> None:
+    """Warn on PMIDs cited more than once — but only where it isn't already
+    caught as a duplicate DOI (same paper, two entries), to avoid double noise."""
+    counts = Counter(r.reference.pmid for r in results if r.reference.pmid)
+    dups = {pmid for pmid, n in counts.items() if n > 1}
+    for r in results:
+        pmid = r.reference.pmid
+        if pmid in dups and not any("Duplicate DOI" in f.message for f in r.findings):
+            r.add(WARNING, f"Duplicate PMID — cited by {counts[pmid]} references: {pmid}")
 
 
 def _nonneg_float(value: str) -> float:
@@ -116,21 +194,45 @@ def build_parser() -> argparse.ArgumentParser:
         description="Verify manuscript citations against Crossref: catch broken DOIs, "
         "metadata mismatches, and retractions. Requires internet access to Crossref.",
     )
-    p.add_argument("input", nargs="?", default="-", help="Input file (.bib or text). '-' for stdin.")
+    p.add_argument(
+        "input",
+        nargs="?",
+        default="-",
+        help="Input file (.bib / .ris / .json / text). '-' for stdin.",
+    )
     p.add_argument(
         "--format",
-        choices=["auto", "bibtex", "text"],
+        choices=["auto", "bibtex", "ris", "csljson", "text"],
         default="auto",
-        help="Input format (default: auto-detect).",
+        help="Input format: bibtex, ris (EndNote/Zotero), csljson (Zotero/pandoc), "
+        "text, or auto-detect (default).",
     )
-    p.add_argument("--json", action="store_true", help="Emit a JSON report instead of text.")
+    p.add_argument(
+        "--report",
+        choices=["text", "json", "csv", "markdown"],
+        default="text",
+        help="Output report format (default: text). csv/markdown are shareable "
+        "with co-authors.",
+    )
+    p.add_argument(
+        "--json",
+        action="store_true",
+        help="Shorthand for --report json.",
+    )
     p.add_argument(
         "--encoding",
         help="Force the input file encoding (e.g. latin-1, cp949). "
         "Default: auto-detect (UTF-8/BOM, then cp949, then latin-1).",
     )
-    p.add_argument("--mailto", help="Your email — sent to Crossref in the request header to join "
-                   "the faster 'polite' API pool.")
+    p.add_argument("--mailto", help="Your email — sent to Crossref/PubMed in the request header to "
+                   "join the faster 'polite' API pool.")
+    p.add_argument(
+        "--pubmed",
+        action="store_true",
+        help="Also cross-check references that carry a PMID against PubMed: "
+        "catch retractions Crossref misses and PMID↔DOI mismatches. "
+        "Requires internet access to eutils.ncbi.nlm.nih.gov.",
+    )
     p.add_argument(
         "--delay",
         type=_nonneg_float,
@@ -148,7 +250,11 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def run(argv: Optional[list[str]] = None, client: Optional[CrossrefClient] = None) -> int:
+def run(
+    argv: Optional[list[str]] = None,
+    client: Optional[CrossrefClient] = None,
+    pubmed: Optional[PubMedClient] = None,
+) -> int:
     args = build_parser().parse_args(argv)
 
     if args.input == "-":
@@ -181,7 +287,7 @@ def run(argv: Optional[list[str]] = None, client: Optional[CrossrefClient] = Non
     # Report BibTeX entries that were present but could not be parsed.
     resolved_fmt = args.format
     if resolved_fmt == "auto":
-        resolved_fmt = "bibtex" if any(r.key for r in refs) else "text"
+        resolved_fmt = detect_format(text)
     if resolved_fmt == "bibtex":
         malformed = count_malformed_entries(text)
         if malformed:
@@ -194,18 +300,28 @@ def run(argv: Optional[list[str]] = None, client: Optional[CrossrefClient] = Non
 
     if client is None:
         client = CrossrefClient(mailto=args.mailto)
+    # A PubMed client is created only when --pubmed is set (or one is injected
+    # for tests); otherwise the PMID cross-check is skipped entirely.
+    if pubmed is None and args.pubmed:
+        pubmed = PubMedClient(mailto=args.mailto)
     use_color = sys.stdout.isatty() and not args.no_color
 
     results: list[CheckResult] = []
     for i, ref in enumerate(refs):
-        results.append(check_reference(ref, client))
+        results.append(check_reference(ref, client, pubmed=pubmed))
         if args.delay and i < len(refs) - 1:
             time.sleep(args.delay)
 
     _flag_duplicate_dois(results)
+    _flag_duplicate_pmids(results)
 
-    if args.json:
+    report = "json" if args.json else args.report
+    if report == "json":
         print(_to_json(results))
+    elif report == "csv":
+        print(_to_csv(results))
+    elif report == "markdown":
+        print(_to_markdown(results))
     else:
         for r in results:
             _print_result(r, use_color, args.verbose)

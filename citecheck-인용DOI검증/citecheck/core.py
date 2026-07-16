@@ -17,6 +17,7 @@ from .parsers import Reference
 
 CROSSREF_API = "https://api.crossref.org/works/"
 DOI_RESOLVER = "https://doi.org/"
+PUBMED_ESUMMARY = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
 DEFAULT_UA = "citecheck/0.1 (https://github.com/hyeonjoong/citecheck; mailto:citecheck@example.com)"
 
 # Severity levels for findings.
@@ -140,6 +141,121 @@ class CrossrefClient:
         # reported as "does not resolve" (that would be a false hard error).
 
 
+class PubMedClient:
+    """Tiny NCBI E-utilities client for PubMed esummary (standard library only).
+
+    Used, when the caller opts in, to (a) catch retractions PubMed marks but
+    Crossref misses, and (b) confirm a cited PMID and DOI point to the *same*
+    paper. Mirrors :class:`CrossrefClient`: an injectable ``_fetch`` transport
+    (pmid -> esummary record dict | None) keeps it fully offline-testable.
+    """
+
+    def __init__(
+        self,
+        mailto: Optional[str] = None,
+        timeout: float = 15.0,
+        retries: int = 2,
+        sleep: float = 1.0,
+        api_key: Optional[str] = None,
+        _fetch=None,
+    ):
+        self.timeout = timeout
+        self.retries = retries
+        self.sleep = sleep
+        self.api_key = api_key
+        self.mailto = mailto
+        self.user_agent = (
+            f"citecheck/0.1 (https://github.com/hyeonjoong/citecheck; mailto:{mailto})"
+            if mailto
+            else DEFAULT_UA
+        )
+        self._fetch = _fetch
+        self._cache: dict[str, Optional[dict]] = {}
+
+    def fetch(self, pmid: str) -> Optional[dict]:
+        """Return the PubMed esummary record for *pmid*, or None if absent."""
+        if pmid in self._cache:
+            return self._cache[pmid]
+        result = self._fetch(pmid) if self._fetch is not None else self._fetch_network(pmid)
+        self._cache[pmid] = result
+        return result
+
+    def _fetch_network(self, pmid: str) -> Optional[dict]:
+        params = {"db": "pubmed", "id": pmid, "retmode": "json"}
+        if self.api_key:
+            params["api_key"] = self.api_key
+        if self.mailto:
+            params["email"] = self.mailto
+            params["tool"] = "citecheck"
+        url = PUBMED_ESUMMARY + "?" + urllib.parse.urlencode(params)
+        req = urllib.request.Request(url, headers={"User-Agent": self.user_agent})
+        last_err: Optional[Exception] = None
+        for attempt in range(self.retries + 1):
+            try:
+                with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                    return _pubmed_record(data, pmid)
+            except urllib.error.HTTPError as e:
+                if e.code == 404:
+                    return None
+                last_err = e
+            except (
+                urllib.error.URLError,
+                TimeoutError,
+                json.JSONDecodeError,
+                UnicodeDecodeError,
+            ) as e:
+                last_err = e
+            if attempt < self.retries:
+                time.sleep(self.sleep * (attempt + 1))
+        if last_err:
+            raise last_err
+        return None
+
+
+def _pubmed_record(data, pmid: str) -> Optional[dict]:
+    """Extract the per-PMID record from an esummary JSON envelope.
+
+    esummary returns ``{"result": {"uids": [...], "<pmid>": {...}}}``. An error
+    for a bad id surfaces as a record carrying an ``error`` key, which we treat
+    as "not found".
+    """
+    if not isinstance(data, dict):
+        return None
+    result = data.get("result")
+    if not isinstance(result, dict):
+        return None
+    rec = result.get(str(pmid))
+    if not isinstance(rec, dict) or rec.get("error"):
+        return None
+    return rec
+
+
+def _pubmed_doi(record: dict) -> Optional[str]:
+    """The DOI PubMed lists for a record (from its ``articleids``), normalised."""
+    from .parsers import normalize_doi_field
+
+    for aid in _as_list(record.get("articleids")):
+        if isinstance(aid, dict) and str(aid.get("idtype", "")).lower() == "doi":
+            doi = normalize_doi_field(str(aid.get("value", "")))
+            if doi:
+                return doi
+    return None
+
+
+def _pubmed_is_retracted(record: dict) -> bool:
+    """True if PubMed marks this record as a retracted publication.
+
+    PubMed tags the retracted *article* with the publication type "Retracted
+    Publication"; the retraction *notice* is "Retraction of Publication" (which
+    we deliberately do NOT treat as a retracted source).
+    """
+    for pt in _as_list(record.get("pubtype")):
+        if isinstance(pt, str) and pt.strip().lower() == "retracted publication":
+            return True
+    return False
+
+
 def _fold(s: str) -> str:
     """Strip diacritics so "Müller" and "Muller" compare equal."""
     return "".join(c for c in unicodedata.normalize("NFKD", s) if not unicodedata.combining(c))
@@ -210,6 +326,105 @@ def _crossref_years(message: dict) -> set[int]:
     return years
 
 
+def _crossref_container_candidates(message: dict) -> list[str]:
+    """Journal / container names Crossref holds (full and abbreviated)."""
+    out: list[str] = []
+    for key in ("container-title", "short-container-title"):
+        for v in _as_list(message.get(key)):
+            if isinstance(v, str) and v.strip():
+                out.append(v.strip())
+    return out
+
+
+def _journal_words(s: str) -> list[str]:
+    """All diacritic-folded alphabetic words of *s* (any length).
+
+    Unlike ``_alpha_tokens`` (which drops sub-3-char words for content overlap),
+    this keeps short words because they ARE the abbreviations — "Am", "J", "Br"
+    in "Am J Med" carry the signal, and dropping them broke matching for common
+    medical-journal abbreviations.
+    """
+    return re.findall(r"[a-z]+", _norm(s).replace("-", " "))
+
+
+def _is_word_contraction(token: str, word: str) -> bool:
+    """True if *token* is an ISO-4-style abbreviation of *word*.
+
+    Same first letter, and *token*'s letters appear in *word* in order (a
+    subsequence). This subsumes a plain prefix ("engl" of "england") and also
+    accepts *contracted* abbreviations that drop interior letters — "natl" of
+    "national", "dtsch" of "deutsche" — which a prefix test wrongly rejects,
+    producing false "Journal mismatch" warnings on PNAS / JNCI and the like.
+    """
+    if not token or not word or token[0] != word[0]:
+        return False
+    it = iter(word)
+    return all(ch in it for ch in token)
+
+
+def _is_abbrev_of(cited: str, full: str) -> bool:
+    """True if *cited* reads as an ISO-4-style abbreviation of *full*.
+
+    Each word of the abbreviation must be an ISO-4 contraction of a word of the
+    full name (see :func:`_is_word_contraction`), matched greedily in order (so
+    stop-words the abbreviation drops — "of", "the" — are simply skipped in the
+    full name). Handles both directions at the call site. e.g. "Am J Med" ↔
+    "American Journal of Medicine", "Proc Natl Acad Sci" ↔ "Proceedings of the
+    National Academy of Sciences". Requires at least two abbreviation words so a
+    single short token can't match everything.
+    """
+    ct = _journal_words(cited)
+    ft = _journal_words(full)
+    if len(ct) < 2 or not ft:
+        return False
+    j = 0
+    for token in ct:
+        while j < len(ft) and not _is_word_contraction(token, ft[j]):
+            j += 1
+        if j == len(ft):
+            return False
+        j += 1
+    return True
+
+
+_LEADING_ARTICLE_RE = re.compile(r"^(?:the|a|an)\s+", re.IGNORECASE)
+
+
+def _journal_key(s: str) -> str:
+    """Normalise a journal name for comparison: fold diacritics, lowercase, and
+    drop a leading article so "Lancet" and "The Lancet" compare equal."""
+    return _LEADING_ARTICLE_RE.sub("", _norm(s)).strip()
+
+
+def _journal_matches(cited: str, candidates: list[str], threshold: float) -> bool:
+    """Does the *cited* journal reasonably match any Crossref candidate?
+
+    Deliberately permissive: journal names vary wildly in abbreviation, leading
+    articles, and punctuation across reference styles, so we accept a match when
+    the article-stripped names are equal, on high fuzzy similarity, or on an
+    abbreviation relationship in either direction. Only a clear mismatch (e.g.
+    "Nature" cited, Crossref says "Lancet") fails.
+
+    Multi-word ISO-4 abbreviations ("Am J Med", "N Engl J Med") are handled; a
+    *single-token* pure abbreviation ("Circ" → "Circulation") is only matched via
+    Crossref's ``short-container-title`` (which real records carry), because
+    expanding one token can't be distinguished from a genuinely different journal
+    ("Cancer" vs "Cancer Research").
+    """
+    cited_key = _journal_key(cited)
+    if not cited_key:
+        return True  # nothing comparable — don't guess
+    for cand in candidates:
+        cand_key = _journal_key(cand)
+        if cited_key == cand_key:
+            return True
+        if cand_key and SequenceMatcher(None, cited_key, cand_key).ratio() >= threshold:
+            return True
+        if _is_abbrev_of(cited, cand) or _is_abbrev_of(cand, cited):
+            return True
+    return False
+
+
 def _crossref_first_author(message: dict) -> Optional[str]:
     for a in _as_list(message.get("author")):
         if isinstance(a, dict) and a.get("family"):
@@ -269,17 +484,32 @@ def check_reference(
     client: CrossrefClient,
     title_threshold: float = 0.80,
     author_threshold: float = 0.85,
+    journal_threshold: float = 0.82,
     resolve_unknown: bool = True,
+    pubmed: Optional["PubMedClient"] = None,
 ) -> CheckResult:
     """Verify a single reference against Crossref and return findings.
 
     Never raises on a malformed Crossref record or lookup failure — such
     problems become WARNINGs so one bad record cannot abort a whole batch.
+
+    When a *pubmed* client is supplied and the reference carries a PMID, also
+    cross-checks PubMed for a retraction PubMed marks but Crossref may miss, and
+    for PMID↔DOI consistency (a classic copy-paste-from-two-records error).
     """
     result = CheckResult(reference=ref)
 
+    if pubmed is not None and ref.pmid:
+        _pubmed_crosscheck(ref, result, pubmed)
+
     if not ref.doi:
-        result.add(WARNING, "No DOI found — cannot verify against Crossref.")
+        pmid_note = (
+            f" (PMID {ref.pmid} present — look it up at "
+            f"https://pubmed.ncbi.nlm.nih.gov/{ref.pmid}/)"
+            if ref.pmid
+            else ""
+        )
+        result.add(WARNING, f"No DOI found — cannot verify against Crossref.{pmid_note}")
         return result
 
     try:
@@ -326,7 +556,7 @@ def check_reference(
     result.crossref = message
 
     try:
-        _compare(ref, message, result, title_threshold, author_threshold)
+        _compare(ref, message, result, title_threshold, author_threshold, journal_threshold)
     except Exception as e:  # never let one weird record abort the batch
         result.add(WARNING, f"Could not fully compare metadata ({type(e).__name__}).")
 
@@ -339,12 +569,53 @@ def check_reference(
     return result
 
 
+def _pubmed_crosscheck(ref: Reference, result: CheckResult, pubmed: "PubMedClient") -> None:
+    """Cross-check a reference's PMID against PubMed (retraction + DOI match).
+
+    Best-effort: a lookup failure becomes a "Lookup failed" warning (so the run
+    reads as inconclusive, never a false clean pass) and never raises.
+    """
+    try:
+        record = pubmed.fetch(ref.pmid)
+    except Exception as e:
+        result.add(
+            WARNING,
+            f"Lookup failed (PubMed, {type(e).__name__}) — PMID {ref.pmid} "
+            f"could not be cross-checked.",
+        )
+        return
+    if not isinstance(record, dict):
+        # None (not found) or, defensively, any non-dict a transport might return
+        # — mirror the Crossref path's shape guard rather than trusting the record.
+        result.add(WARNING, f"PMID {ref.pmid} not found in PubMed — could not cross-check.")
+        return
+    if _pubmed_is_retracted(record):
+        result.add(
+            ERROR,
+            f"Reference appears to be RETRACTED according to PubMed (PMID {ref.pmid}).",
+        )
+    pdoi = _pubmed_doi(record)
+    if pdoi and ref.doi and pdoi.lower() != ref.doi.lower():
+        result.add(
+            WARNING,
+            f"PMID/DOI mismatch: PMID {ref.pmid} is registered to DOI {pdoi}, "
+            f"but the citation gives {ref.doi} — one of the two is wrong.",
+        )
+    elif pdoi and not ref.doi:
+        result.add(
+            WARNING,
+            f"No DOI cited, but PMID {ref.pmid} maps to DOI {pdoi} in PubMed — "
+            f"consider adding it.",
+        )
+
+
 def _compare(
     ref: Reference,
     message: dict,
     result: CheckResult,
     title_threshold: float,
     author_threshold: float,
+    journal_threshold: float = 0.82,
 ) -> None:
     if _is_retracted(message):
         notice = _retraction_notice(message)
@@ -392,6 +663,18 @@ def _compare(
                     f"First-author mismatch: cited '{ref.author}', "
                     f"Crossref says '{families[0]}'.",
                 )
+
+    # Journal / container comparison — a second, independent signal for a
+    # swapped DOI. Permissive on purpose (journal names are heavily abbreviated
+    # across styles): only a clear mismatch, not an abbreviation, warns.
+    if ref.journal:
+        containers = _crossref_container_candidates(message)
+        if containers and not _journal_matches(ref.journal, containers, journal_threshold):
+            result.add(
+                WARNING,
+                f"Journal mismatch: cited '{ref.journal}', "
+                f"Crossref says '{containers[0]}'.",
+            )
 
 
 def _alpha_tokens(text: str) -> list[str]:
