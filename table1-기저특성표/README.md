@@ -72,7 +72,11 @@ table1 examples/serene_baseline.csv --group arm --lang en --no-pvalue \
 | `--cat-max-levels N` | 수치형이라도 서로 다른 값이 N개 이하이면 범주형(기본 2) |
 | `--max-levels N` | 자동 범주형의 고유값이 N개 초과면 ID로 보고 제외(기본 20) |
 | `--display auto\|mean\|median\|both` | 연속형 표기(기본 auto = 정규성 따라) |
+| `--test-cont auto\|welch\|student\|nonparam` | 연속형 **검정** 선택: auto(사전검정, 기본)·welch(항상 Welch t)·student(항상 Student t)·nonparam(항상 Mann-Whitney/Kruskal). 분산 사전검정을 피하려면 `welch` 권장(Delacre 2017). **welch·student 는 2군 비교에만 적용**되며 ≥3군은 일원배치 ANOVA(비모수는 Kruskal) |
 | `--pct col\|row` | 범주형 % 기준(기본 col = 그룹 내) |
+| `--pct-decimals N` | 범주형 % 소수 자릿수(기본 1, 0~10) |
+| `--binary-single` | 2수준(이진) 범주형을 한 줄로 축약(예: `sex = M — n(%)`) — 저널 관례. **md·csv·tsv 에만 적용**(JSON은 구조화 데이터라 모든 수준 유지) |
+| `--ref COL=수준` | 이진 축약 시 기준(참조) 수준 지정 → 표엔 반대 수준 표시(예: `--ref sex=F` → M 행) |
 | `--alpha-norm A` | 정규성·등분산 판정 유의수준(기본 0.05). 검정 자동선택에 영향 |
 | `--fisher` | 2×2 범주형에 항상 Fisher exact |
 | `--missing-as-level` | 범주형 결측을 '(결측)' 수준으로 표시(검정 제외) |
@@ -83,6 +87,7 @@ table1 examples/serene_baseline.csv --group arm --lang en --no-pvalue \
 | `--labels COL=이름 …` | 변수 표시 이름/단위 지정(예: `--labels rmssd_ms="RMSSD (ms)"`) |
 | `--decimals N` | 연속형 소수 자릿수(기본 1, 음수 불가) |
 | `--delimiter D` | 입력 구분자 강제(한 글자, 미지정 시 자동 감지). 탭은 `--delimiter tab`(또는 `\t`), 세로줄은 `--delimiter '\|'` |
+| 입력 `-` | CSV 경로 대신 `-` 를 주면 **표준입력(stdin)** 에서 읽음(파이프라인용: `cut -d, -f2- data.csv \| table1 - -g arm`) |
 | `--format md\|csv\|tsv\|json`, `-o` | 출력 형식/파일 |
 | `--version` | 버전 출력 후 종료 |
 
@@ -91,16 +96,16 @@ table1 examples/serene_baseline.csv --group arm --lang en --no-pvalue \
 - **연속형 요약·검정 선택**: 각 군(n≥3)에 Shapiro–Wilk 정규성 검정. 어느 군이라도 정규성 기각 → 중앙값[IQR] + 비모수 검정(2군 Mann–Whitney U, ≥3군 Kruskal–Wallis). 모두 정규 → 평균±SD + 모수 검정(2군은 Levene 등분산 점검 후 Student t / Welch t, ≥3군은 일원배치 ANOVA). ANOVA에서 Levene이 기각되면 해석 주의를 주석으로 표시합니다.
 - **범주형 검정**: r×c 표에 Pearson χ²(연속성 보정 없음, `chi2_contingency(correction=False)` 기준). 2×2에서 기대빈도<5이거나 `--fisher` 지정 시 양측 Fisher exact.
 - **SMD(두 군 전용)**: 연속형은 `|m₁−m₂| / √((s₁²+s₂²)/2)`, 이진형은 비율 기반, 다범주형은 **Yang & Dalton(2012)** 다변량 SMD. 관례상 |SMD|>0.1 을 불균형 신호로 봅니다.
-- **결측**: 연속형은 결측·비수치 셀(및 inf/-inf 등 비유한 수치)을 제외해 요약하고 결측 수를 표기하며, 두 군 이상일 때는 **군별 결측 분포**를 함께 표시합니다(`· 결측 4 (device 2, sham 2)`) — 무작위배정 시험에서 차등 결측(differential missingness)을 한눈에 볼 수 있습니다. 범주형 %는 **비결측(non-missing) 기준**이며, 결측은 기본적으로 수준에서 제외합니다(`--missing-as-level`로 표시 가능). 군 값이 결측인 행은 전체에서 제외하고 경고합니다.
-- 분포 함수(정규/ t / F / χ²)와 Shapiro–Wilk, Fisher exact 열거는 모두 표준 라이브러리로 자체 구현했고, SciPy/numpy와 대조 검증했습니다: 분포함수·Student/Welch t·ANOVA·Fisher·χ²는 대체로 ≤1e-9(꼬리 확률까지) 일치하고, Shapiro–Wilk는 ~1e-8 수준(W 통계량은 ~1e-9)으로 일치합니다. **단, Mann–Whitney U·Kruskal–Wallis는 정규/χ² 점근(asymptotic) 근사를 쓰므로 SciPy의 `method='asymptotic'` 결과와 일치하며, 소표본에서 SciPy 기본값의 정확검정(exact)과는 다를 수 있습니다.** 이 대조값들은 오프라인 테스트로 고정해 두었습니다(`tests/test_tests_stat.py`, `tests/test_normality.py`, `tests/test_special.py`, `tests/test_smd.py`, 골든 스냅샷 등, 총 121개).
+- **결측**: 연속형은 결측·비수치 셀(및 inf/-inf 등 비유한 수치)을 제외해 요약하고 결측 수를 표기하며, 두 군 이상일 때는 **군별 결측 분포**를 함께 표시합니다(`· 결측 4 (device 2, sham 2)`) — 무작위배정 시험에서 차등 결측(differential missingness)을 한눈에 볼 수 있습니다. 범주형 %는 **비결측(non-missing) 기준**이며, 결측은 기본적으로 수준에서 제외합니다(`--missing-as-level`로 표시 가능). 군 값이 결측인 행은 전체에서 제외하고 경고합니다. 숫자로 해석되지 않는 셀(예: `>100`·`12 kg`·`45%`·유럽식 `1,5`)은 **단순 결측이 아니라 "해석 불가"로 별도 주석**해, 검열(censored)·단위 포함 값이 평균에 조용히 반영되지 않도록 알립니다. 변수의 결측이 50%를 넘거나, 대소문자만 다른 그룹 라벨(예: `Device`/`device`)이 별개 군으로 잡히면 경고합니다.
+- 분포 함수(정규/ t / F / χ²)와 Shapiro–Wilk, Fisher exact 열거는 모두 표준 라이브러리로 자체 구현했고, SciPy/numpy와 대조 검증했습니다: 분포함수·Student/Welch t·ANOVA·Fisher·χ²는 대체로 ≤1e-9(꼬리 확률까지) 일치하고, Shapiro–Wilk는 ~1e-8 수준(W 통계량은 ~1e-9)으로 일치합니다. **단, Mann–Whitney U·Kruskal–Wallis는 정규/χ² 점근(asymptotic) 근사를 쓰므로 SciPy의 `method='asymptotic'` 결과와 일치하며, 소표본에서 SciPy 기본값의 정확검정(exact)과는 다를 수 있습니다.** 이 대조값들은 오프라인 테스트로 고정해 두었습니다(`tests/test_tests_stat.py`, `tests/test_normality.py`, `tests/test_special.py`, `tests/test_smd.py`, 골든 스냅샷, 하드닝 회귀·속성 테스트 `tests/test_hardening_r1.py`~`r3.py` 등, 총 207개).
 
 ## 한계 / Limitations
 
 - 검정 자동 선택은 합리적 기본값이며, 만능이 아닙니다. 짝지은(대응) 설계, 층화/가중, 시간-사건(생존), 다중비교 보정 등은 대상이 아닙니다(각각 전용 도구 필요).
 - 정규성 판정은 표본이 매우 작으면(각 군 n<3) 불가하며, 이때 평균±SD로 표시하고 주석을 답니다. 대표본에서는 Shapiro가 사소한 이탈도 기각할 수 있어 `--display`로 수동 지정할 수 있습니다. 표본이 5000개를 넘으면 Shapiro–Wilk의 유효 범위를 벗어나므로 5000개 부분표본으로 근사하고 주석으로 알립니다.
-- 검정 자동 선택(정규성→모수/비모수, Levene→Student/Welch)은 편의적 기본값입니다. 사전검정 기반 선택을 지양하려면 `--display`로 표기를 고정하거나, 무작위배정 시험은 `--no-pvalue`로 p값을 빼고 SMD만 보고할 수 있습니다.
+- 검정 자동 선택(정규성→모수/비모수, Levene→Student/Welch)은 편의적 기본값입니다. 사전검정 기반 선택을 지양하려면 `--test-cont welch`(항상 Welch t, 분산 사전검정 없음 — Delacre 2017 권고)나 `--test-cont student`/`nonparam`으로 검정을 고정하고, `--display`로 표기를 고정할 수 있습니다. 무작위배정 시험은 `--no-pvalue`로 p값을 빼고 SMD만 보고할 수 있습니다.
 - 정수 코드로 저장된 순서형(예: NYHA 1–4, Likert)은 `--cat-max-levels` 기본값(2) 때문에 연속형으로 처리될 수 있어, 그럴 경우 경고를 표시합니다. 범주형으로 보려면 `--categorical` 을 쓰세요.
-- 유럽식 소수 쉼표("1,5")는 자릿수 구분과 구분되지 않아 결측으로 처리합니다("1,234"처럼 명확한 천단위 구분만 인식). 필요하면 점(".") 소수로 변환해 입력하세요.
+- 유럽식 소수 쉼표("1,5")는 천단위 구분과 구분되지 않아 숫자로 해석하지 않습니다("1,234"처럼 명확한 천단위 구분만 인식). 연속형에서는 이런 값을 "해석 불가"로 주석해 알려주니, 점(".") 소수로 변환해 입력하세요.
 - ≥3군에서는 SMD를 계산하지 않습니다(SMD는 두 군 균형 지표). 또한 다범주형 SMD는 수준이 50개를 넘으면(고카디널리티) 해석 의미가 없고 계산이 무거워 생략합니다.
 - 모든 계산은 로컬에서만 이루어지며 네트워크를 사용하지 않습니다. 입력 데이터는 어디로도 전송되지 않습니다.
 
@@ -108,5 +113,5 @@ table1 examples/serene_baseline.csv --group arm --lang en --no-pvalue \
 
 ```bash
 cd ~/Downloads/02_프로젝트/깃헙/table1-기저특성표
-python3 -m pytest -q      # 121개 테스트, 전부 오프라인
+python3 -m pytest -q      # 207개 테스트, 전부 오프라인
 ```

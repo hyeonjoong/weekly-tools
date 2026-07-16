@@ -31,12 +31,22 @@ _LANG = {
         "notes_hdr": "**주석**",
         "warn_hdr": "**경고**",
         "pct_col": "열 기준(그룹 내 비결측 %)",
+        "pct_col_incl_missing": "열 기준(그룹 내 전체 % — '(결측)' 수준 포함)",
         "pct_row": "행 기준(수준 내 %)",
         "leg_notation": ("**표기**: 연속형 = 평균(표준편차) 또는 중앙값[IQR] "
                          "(정규성에 따라 자동), 범주형 = n(%). % 는 "),
         "leg_p": ("**p값**: 연속형은 정규성·등분산 점검 후 t/Welch/Mann-Whitney "
                   "(≥3군: ANOVA/Kruskal-Wallis), 범주형은 Pearson χ² 또는 "
                   "Fisher exact."),
+        "leg_p_welch": ("**p값**: 연속형은 (사전검정 없이) 항상 Welch t "
+                        "(≥3군: 일원배치 ANOVA), 범주형은 Pearson χ² 또는 "
+                        "Fisher exact."),
+        "leg_p_student": ("**p값**: 연속형은 (사전검정 없이) 항상 Student t "
+                          "(≥3군: 일원배치 ANOVA), 범주형은 Pearson χ² 또는 "
+                          "Fisher exact."),
+        "leg_p_nonparam": ("**p값**: 연속형은 (정규성과 무관하게) Mann-Whitney U "
+                           "(≥3군: Kruskal-Wallis), 범주형은 Pearson χ² 또는 "
+                           "Fisher exact."),
         "leg_smd": ("**SMD**: 표준화 평균차(절대값). |SMD|>0.1 이면 두 군 간 "
                     "불균형을 시사(범주형은 Yang–Dalton 다변량 SMD)."),
     },
@@ -54,12 +64,24 @@ _LANG = {
         "notes_hdr": "**Notes**",
         "warn_hdr": "**Warnings**",
         "pct_col": "column-wise (% of non-missing within group)",
+        "pct_col_incl_missing": ("column-wise (% of all cells within group, "
+                                 "including the '(missing)' level)"),
         "pct_row": "row-wise (% within level)",
         "leg_notation": ("**Notation**: continuous = mean (SD) or median [IQR] "
                          "(auto by normality), categorical = n (%). % is "),
         "leg_p": ("**p**: continuous uses t/Welch/Mann-Whitney after "
                   "normality/variance checks (>=3 groups: ANOVA/Kruskal-Wallis); "
                   "categorical uses Pearson chi-square or Fisher exact."),
+        "leg_p_welch": ("**p**: continuous always uses Welch t (no pre-test; "
+                        ">=3 groups: one-way ANOVA); categorical uses Pearson "
+                        "chi-square or Fisher exact."),
+        "leg_p_student": ("**p**: continuous always uses Student t (no pre-test; "
+                          ">=3 groups: one-way ANOVA); categorical uses Pearson "
+                          "chi-square or Fisher exact."),
+        "leg_p_nonparam": ("**p**: continuous always uses Mann-Whitney U "
+                           "(regardless of normality; >=3 groups: "
+                           "Kruskal-Wallis); categorical uses Pearson "
+                           "chi-square or Fisher exact."),
         "leg_smd": ("**SMD**: absolute standardized mean difference. |SMD|>0.1 "
                     "suggests between-group imbalance (categorical: Yang-Dalton "
                     "multivariate SMD)."),
@@ -69,6 +91,13 @@ _LANG = {
 
 def _lang(opt: Options) -> dict:
     return _LANG.get(getattr(opt, "lang", "ko") or "ko", _LANG["ko"])
+
+
+def _leg_p_for(L: dict, opt: Options) -> str:
+    """p-value legend, adapted to an explicit --test-cont so the footnote does
+    not claim a normality/variance pre-test that did not happen."""
+    tc = getattr(opt, "test_cont", "auto")
+    return L.get(f"leg_p_{tc}", L["leg_p"])
 
 
 def _disp_name(opt: Options, name: str) -> str:
@@ -129,9 +158,31 @@ def _pct(count: int, denom: int) -> float:
     return 100.0 * count / denom if denom else float("nan")
 
 
-def _cat_cell(count: int, denom: int, level_total: int, pct_mode: str) -> str:
+def _cat_cell(count: int, denom: int, level_total: int, pct_mode: str,
+              pct_decimals: int = 1) -> str:
     p = _pct(count, level_total) if pct_mode == "row" else _pct(count, denom)
-    return f"{count} ({_fmt_num(p, 1)})"
+    return f"{count} ({_fmt_num(p, pct_decimals)})"
+
+
+def _binary_collapse(row: CategoricalRow, opt: Options):
+    """For --binary-single: the single CatLevel to display for a 2-level
+    categorical, or None if the row should render normally.
+
+    Collapses only when exactly two levels are present (so a synthetic
+    '(결측)' missing level, which makes three, disables the collapse). The
+    displayed level is the non-reference one: reference defaults to the first
+    level, overridable per column via --ref COL=level.
+    """
+    if not getattr(opt, "binary_single", False):
+        return None
+    if len(row.levels) != 2:
+        return None
+    labels = [lvl.label for lvl in row.levels]
+    ref = getattr(opt, "ref", {}).get(row.name)
+    show = 1  # default: reference = first level, show the second
+    if ref is not None and ref == labels[1]:
+        show = 0
+    return row.levels[show]
 
 
 def _cont_suffix(row: ContinuousRow, L: dict) -> str:
@@ -223,6 +274,29 @@ def _render_markdown(t: Table1, opt: Options) -> str:
             cells.append(row.test_name)
             out.append("| " + " | ".join(cells) + " |")
         else:  # CategoricalRow
+            pd = opt.pct_decimals
+            single = _binary_collapse(row, opt)
+            if single is not None:
+                # Collapsed 2-level row: one line, value/percent of the shown
+                # level, with p/SMD/test on the same row.
+                label = (_md_escape(_disp_name(opt, row.name)) + " = "
+                         + _md_escape(single.label) + f" — {L['n_pct']}"
+                         + miss_suffix(row.n_missing_total, row.missing_per_group)
+                         + note_suffix(row.notes))
+                cells = [label]
+                if show_overall:
+                    cells.append(_cat_cell(single.overall, row.overall_denom,
+                                           single.overall, row.pct, pd))
+                for gi, c in enumerate(single.counts):
+                    cells.append(_cat_cell(c, row.denom_per_group[gi],
+                                           single.overall, row.pct, pd))
+                if show_p:
+                    cells.append(_fmt_p(row.pvalue))
+                if two_group:
+                    cells.append(_fmt_smd(row.smd))
+                cells.append(row.test_name)
+                out.append("| " + " | ".join(cells) + " |")
+                continue
             header_label = (_md_escape(_disp_name(opt, row.name)) + f" — {L['n_pct']}"
                             + miss_suffix(row.n_missing_total,
                                           row.missing_per_group)
@@ -241,10 +315,10 @@ def _render_markdown(t: Table1, opt: Options) -> str:
                 lcells = [" " + _md_escape(lvl.label)]
                 if show_overall:
                     lcells.append(_cat_cell(lvl.overall, row.overall_denom,
-                                            lvl.overall, row.pct))
+                                            lvl.overall, row.pct, pd))
                 for gi, c in enumerate(lvl.counts):
                     lcells.append(_cat_cell(c, row.denom_per_group[gi],
-                                            lvl.overall, row.pct))
+                                            lvl.overall, row.pct, pd))
                 if show_p:
                     lcells.append("")
                 if two_group:
@@ -254,10 +328,20 @@ def _render_markdown(t: Table1, opt: Options) -> str:
 
     out.append("")
     # Legend + notes
-    pct_desc = L["pct_col"] if opt.pct == "col" else L["pct_row"]
+    if opt.pct == "col":
+        # Under --missing-as-level the synthetic '(결측)' level is counted, so the
+        # column denominator is the full group, not the non-missing subset — but
+        # only when a categorical variable actually HAS missing (otherwise no
+        # synthetic level was added and the denominator is unchanged).
+        incl_missing = (getattr(opt, "missing_as_level", False) and
+                        any(isinstance(r, CategoricalRow) and r.n_missing_total > 0
+                            for r in t.rows))
+        pct_desc = L["pct_col_incl_missing"] if incl_missing else L["pct_col"]
+    else:
+        pct_desc = L["pct_row"]
     legend = [L["leg_notation"] + pct_desc + "."]
     if show_p:
-        legend.append(L["leg_p"])
+        legend.append(_leg_p_for(L, opt))
     if two_group:
         legend.append(L["leg_smd"])
     out.extend(legend)
@@ -333,6 +417,23 @@ def _render_delimited(t: Table1, opt: Options, delim: str) -> str:
                 line.append(_fmt_smd(row.smd))
             writer.writerow([str(x) for x in line])
         else:
+            pd = opt.pct_decimals
+            single = _binary_collapse(row, opt)
+            if single is not None:
+                line = [sname, _csv_safe(single.label)]
+                if show_overall:
+                    line.append(_cat_cell(single.overall, row.overall_denom,
+                                          single.overall, row.pct, pd))
+                for gi, c in enumerate(single.counts):
+                    line.append(_cat_cell(c, row.denom_per_group[gi],
+                                          single.overall, row.pct, pd))
+                if show_p:
+                    line.append(_fmt_p(row.pvalue))
+                line += [row.test_name, str(row.n_missing_total)]
+                if two_group:
+                    line.append(_fmt_smd(row.smd))
+                writer.writerow([str(x) for x in line])
+                continue
             line = [sname, "n(%)"]
             if show_overall:
                 line.append("")
@@ -347,10 +448,10 @@ def _render_delimited(t: Table1, opt: Options, delim: str) -> str:
                 lline = [sname, _csv_safe(lvl.label)]
                 if show_overall:
                     lline.append(_cat_cell(lvl.overall, row.overall_denom,
-                                           lvl.overall, row.pct))
+                                           lvl.overall, row.pct, pd))
                 for gi, c in enumerate(lvl.counts):
                     lline.append(_cat_cell(c, row.denom_per_group[gi],
-                                           lvl.overall, row.pct))
+                                           lvl.overall, row.pct, pd))
                 if show_p:
                     lline.append("")
                 lline += ["", ""]
