@@ -185,8 +185,11 @@ def spectral_edge_frequency(freqs: Sequence[float], psd: Sequence[float],
                             lo: float, hi: float, frac: float = 0.95,
                             ) -> Optional[float]:
     """Spectral edge frequency: the frequency below which ``frac`` of the power in
-    [lo, hi] accumulates (SEF95 for frac=0.95). Linearly interpolated. None if the
-    band carries no power.
+    [lo, hi] accumulates (SEF95 for frac=0.95). None if the band carries no power.
+
+    The crossing is solved *exactly* within the trapezoid segment that contains it:
+    the PSD is piecewise-linear, so cumulative power is piecewise-quadratic and the
+    edge is the root of that quadratic (not a linear-in-cumulative approximation).
     """
     lo = max(lo, freqs[0])
     hi = min(hi, freqs[-1])
@@ -210,12 +213,26 @@ def spectral_edge_frequency(freqs: Sequence[float], psd: Sequence[float],
     target = frac * total
     for i in range(1, len(cum)):
         if cum[i] >= target:
-            # interpolate within segment [i-1, i]
-            seg = cum[i] - cum[i - 1]
-            if seg <= 0:
+            # Solve for u in [0, w] with cumulative-power(u) = remaining, where the
+            # PSD over this segment is y0 + (m)·u:  0.5·m·u² + y0·u = remaining.
+            w = xs[i] - xs[i - 1]
+            if w <= 0:
                 return xs[i]
-            t = (target - cum[i - 1]) / seg
-            return xs[i - 1] + t * (xs[i] - xs[i - 1])
+            y0, y1 = ys[i - 1], ys[i]
+            remaining = target - cum[i - 1]
+            if remaining <= 0:
+                return xs[i - 1]
+            m = (y1 - y0) / w
+            if abs(m) < 1e-15:                     # flat segment -> linear
+                u = remaining / y0 if y0 > 0 else w
+            else:
+                disc = y0 * y0 + 2.0 * m * remaining
+                u = (-y0 + math.sqrt(disc if disc > 0 else 0.0)) / m
+            if u < 0.0:
+                u = 0.0
+            elif u > w:
+                u = w
+            return xs[i - 1] + u
     return xs[-1]
 
 

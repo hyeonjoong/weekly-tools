@@ -48,6 +48,8 @@ class Spectrum:
     swa_rel: float           # delta relative power (0..1)
     band_lo: float
     band_hi: float
+    rel_sum: float = 1.0     # Σ band relatives; <1 gap / >1 overlap in custom bands
+    dominant_tie: bool = False  # top-two bands within 1% -> dominance is ambiguous
 
     def power_by_name(self) -> Dict[str, float]:
         return {bp.name: bp.absolute for bp in self.band_powers}
@@ -76,6 +78,10 @@ class AnalysisResult:
     epochs: List[EpochResult] = field(default_factory=list)
     swa_density: Optional[float] = None   # fraction of epochs that are delta-dominant
     warnings: List[str] = field(default_factory=list)
+    source_file: Optional[str] = None     # input path, echoed for provenance
+    sef_frac: float = 0.95                # SEF percentile used (for provenance)
+    n_filled: int = 0                     # interpolated samples in the value column
+    input_encoding: Optional[str] = None  # codec the CSV was decoded with
 
 
 def _default_nperseg(fs: float, n: int) -> int:
@@ -104,20 +110,29 @@ def _spectrum(values: Sequence[float], fs: float,
 
     power_by_name = {bp.name: bp.absolute for bp in bps}
     dominant = None
+    dominant_tie = False
     if bps and total > 0:
-        dominant = max(bps, key=lambda bp: bp.absolute).name
+        ranked = sorted(bps, key=lambda bp: bp.absolute, reverse=True)
+        dominant = ranked[0].name
+        if len(ranked) > 1:
+            top, second = ranked[0].absolute, ranked[1].absolute
+            # ambiguous when the runner-up is within 1% of the leader
+            dominant_tie = top > 0 and (top - second) <= 0.01 * top
 
-    peak = spectral.peak_frequency(freqs, psd, band_lo, band_hi)
+    # peak/SEF are meaningless when the band carries no power (constant signal).
+    peak = (spectral.peak_frequency(freqs, psd, band_lo, band_hi)
+            if total > 0 else None)
     sef = spectral.spectral_edge_frequency(freqs, psd, band_lo, band_hi, sef_frac)
     ratios = spectral.band_ratios(power_by_name)
 
     swa_abs = power_by_name.get("delta", 0.0)
     swa_rel = (swa_abs / total) if total > 0 else 0.0
+    rel_sum = math.fsum(bp.relative for bp in bps)
 
     spec = Spectrum(band_powers=bps, total_power=total, peak_freq=peak, sef=sef,
                     sef_frac=sef_frac, ratios=ratios, dominant=dominant,
                     swa_abs=swa_abs, swa_rel=swa_rel, band_lo=band_lo,
-                    band_hi=band_hi)
+                    band_hi=band_hi, rel_sum=rel_sum, dominant_tie=dominant_tie)
     return spec, meta
 
 
@@ -160,10 +175,24 @@ def analyze(values: Sequence[float], fs: float = 128.0,
     overall, meta = _spectrum(vals, fs, band_list, resolved_nperseg, noverlap,
                               sef_frac)
 
+    # Relative powers only sum to 100% when the bands tile the analysis span with
+    # no gaps or overlaps (true for the defaults). Flag custom bands that don't.
+    if overall.total_power > 0 and abs(overall.rel_sum - 1.0) > 0.01:
+        if overall.rel_sum < 1.0:
+            warns.append(
+                f"bands leave gaps: they cover {overall.rel_sum * 100:.1f}% of the "
+                f"{overall.band_lo:g}–{overall.band_hi:g} Hz analysis span, so band "
+                "relatives do not sum to 100%.")
+        else:
+            warns.append(
+                f"bands overlap: they sum to {overall.rel_sum * 100:.1f}% of the "
+                f"{overall.band_lo:g}–{overall.band_hi:g} Hz analysis span "
+                "(relatives exceed 100%).")
+
     result = AnalysisResult(
         fs=fs, fs_source=fs_source, n_samples=n, duration_sec=n / fs,
         nperseg=meta["nperseg"], noverlap=meta["noverlap"], nfft=meta["nfft"],
-        bands=band_list, overall=overall, warnings=warns)
+        bands=band_list, overall=overall, warnings=warns, sef_frac=sef_frac)
 
     if epoch_sec is not None:
         result.epoch_sec = epoch_sec

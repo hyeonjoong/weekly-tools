@@ -87,7 +87,7 @@ eeg_uv
     dominant band = delta   ← slow-wave/delta dominant
 
 [3] 스펙트럼 요약 / Spectral summary
-    peak frequency = 1.50 Hz   SEF95 = 1.95 Hz   total power (0.5–45) = 1086.536 µV²
+    peak frequency = 1.50 Hz   SEF95 = 1.89 Hz   total power (0.5–45) = 1086.536 µV²
 ```
 
 ### 2) 값 열 + 시간 열 (fs 자동 추정·교차검증)
@@ -108,10 +108,22 @@ eegband examples/delta_deep_sleep.csv --fs 128 --epoch 20
 ```
 [5] 에폭별 / Per-epoch  (epoch = 20 s, n_epochs = 2)
      ep   t0(s)   t1(s)   delta   theta   alpha    beta   gamma    peak     SEF  dominant
-      0     0.0    20.0   98.6%    0.5%    0.6%    0.2%    0.1%    1.50    1.96  delta
-      1    20.0    40.0   98.8%    0.4%    0.6%    0.1%    0.1%    1.50    1.95  delta
+      0     0.0    20.0   98.6%    0.5%    0.6%    0.2%    0.1%    1.50    1.90  delta
+      1    20.0    40.0   98.8%    0.4%    0.6%    0.1%    0.1%    1.50    1.90  delta
     SWA density (delta-dominant epochs) = 2/2  (100 %)
+    relative delta across epochs = 98.7 ± 0.2 % (SD, n-1),  SEM 0.1 %  (n=2)
+    SWA absolute across epochs   = 1068.946 ± 132.626 µV² (SD, n-1),  SEM 93.781 µV²
 ```
+
+### 4) 통계 SW로 넘기기 (CSV 내보내기)
+
+```bash
+eegband examples/delta_deep_sleep.csv --fs 128 --epoch 20 --csv > epochs.csv
+```
+
+에폭이 있으면 에폭당 한 행, 없으면 전체 한 행으로 대역별 `abs/rel`, 총파워, 피크, SEF,
+우세대역을 CSV로 냅니다(맨 앞 `#` 주석 행에 버전·fs·입력파일). R/SAS/Prism에서 바로 읽어
+1차 종말점 통계를 돌리기 좋습니다.
 
 ### 옵션
 
@@ -126,6 +138,7 @@ eegband examples/delta_deep_sleep.csv --fs 128 --epoch 20
 | `--bands ...` | 대역 재정의, 예: `delta:0.5-4,theta:4-8,alpha:8-13,beta:13-30,gamma:30-45` |
 | `--sef 95` | 스펙트럼 에지 주파수 백분위 (기본 95 → SEF95) |
 | `--json` | 사람용 리포트 대신 JSON 출력 |
+| `--csv` | 에폭별(없으면 전체) 대역파워 표를 CSV로 출력 (R/SAS/Prism 용) |
 
 ---
 
@@ -138,9 +151,10 @@ eegband examples/delta_deep_sleep.csv --fs 128 --epoch 20
 - **대역파워**: PSD를 각 대역 `[lo, hi]`에서 사다리꼴 적분(경계는 선형 보간). 상대파워 =
   대역/총파워(0.5–45 Hz).
 - **SWA**: delta(0.5–4 Hz) 절대 파워를 별도 강조 — BELL-001의 슬로우파 종말점.
-- **SEF95 / 피크 / 총파워 / 대역비**: 누적 파워가 95%가 되는 주파수(선형 보간),
-  분석대역 내 최대 PSD 주파수, 대역 총적분, `theta/alpha`·`delta/beta`·
-  느림지수 `(delta+theta)/(alpha+beta)`.
+- **SEF95 / 피크 / 총파워 / 대역비**: 누적 파워가 95%가 되는 주파수(구간 내 PSD가
+  선형이므로 누적은 2차식 → 근을 **정확히** 풀어 sub-bin 오차 없음), 분석대역 내
+  최대 PSD 주파수, 대역 총적분, `theta/alpha`·`delta/beta`·느림지수
+  `(delta+theta)/(alpha+beta)`.
 - **에폭 + SWA density**: `--epoch`로 비겹침 에폭 분할, 에폭별 지표 + delta 우세 에폭
   비율(SWA density)을 요약합니다.
 
@@ -149,21 +163,34 @@ eegband examples/delta_deep_sleep.csv --fs 128 --epoch 20
 - PSD는 `scipy.signal.welch(scaling='density')`와 동일한 관례(주기형 Hann,
   detrend='constant', 단측 ×2)를 따릅니다. 대역파워는 정현파에서 Parseval(분산=A²/2)과
   일치하도록 정규화되어 손 검산이 가능합니다.
-- **주파수 분해능**은 `df = fs/nfft`로 정해집니다. 기본 4초 세그먼트(fs=128 → nfft=512,
-  df=0.25 Hz)에서는 모든 표준 대역 경계가 정확히 빈에 떨어집니다. 경계가 빈 사이에 오면
-  선형 보간으로 정확히 적분합니다.
+- **주파수 분해능**은 `df = fs/nfft`로 정해집니다. 사용자가 `--fs 128`을 직접 주면 기본
+  4초 세그먼트에서 nfft=512, df=0.25 Hz가 되어 모든 표준 대역 경계(0.5/4/8/13/30/45)가
+  정확히 빈에 떨어집니다. 시간 열에서 fs를 추정한 경우(예: alpha 예제의 ≈127.9999 Hz)에는
+  df가 미세하게 달라 경계가 빈에서 ~1e-8 만큼 벗어날 수 있으나, 경계는 선형 보간으로
+  적분하므로 결과에 영향이 없습니다. (참고: 경계가 빈에 정렬된다는 것이 0.5 Hz 성분을
+  분리 해상한다는 뜻은 아닙니다 — 주기형 Hann 주엽 폭은 ≈4·df ≈ 1 Hz 입니다.)
 - 비유한(NaN/inf)·빈 셀은 **선형 보간**으로 메우고 그 개수를 리포트합니다. 상수(분산 0)
-  신호는 총파워 0, 상대파워 0으로 안전하게 처리합니다.
+  신호는 총파워 0, 상대파워 0, 피크·SEF·우세대역은 `n/a`로 안전하게 처리합니다.
 - 시간 열이 **불규칙**하면 경고합니다(Welch는 균등 표본을 가정). fs가 `--fs`와 다르면
-  경고 후 추정값을 사용합니다.
+  경고 후 추정값을 사용합니다. 시간 열은 **초(second)** 단위로 가정하며, 열 이름이
+  `time_ms`/`ms` 이면 밀리초로 보고 자동 변환합니다. `sample`/`index` 같은 **표본 카운터**는
+  시간 열로 자동 인식하지 않습니다(초가 아니므로 fs를 오염시킴). 필요하면 `--time`으로 명시하세요.
+- **인코딩**: UTF-8이 아니면 cp949(한국 Excel)·latin-1 순으로 자동 시도하고 어떤 인코딩으로
+  읽었는지 경고합니다.
+- **커스텀 `--bands`** 가 서로 겹치거나 빈 구간을 남기면 상대파워 합이 100%가 아니게 되며,
+  총(total) 행에 실제 합계를 표시하고 경고합니다(기본 대역은 항상 100%).
+- **우세 대역**이 근소차(상위 두 대역이 1% 이내)면 `⚠ near-tie`로 표시합니다.
+- **디트렌드는 세그먼트별 평균 제거(`detrend='constant'`)** 로 scipy 기본과 동일합니다.
+  선형 추세(느린 드리프트, 땀·전극 이동)는 제거되지 않아 **delta로 새어들 수 있으므로**,
+  강한 드리프트가 있으면 사전에 고역통과(예: 0.5 Hz) 필터를 권장합니다.
 - 느린진동 이벤트 카운트는 신뢰할 만한 시간영역 필터가 필요해 **의도적으로 생략**하고,
   대신 에폭 단위 **SWA density**(delta 우세 에폭 비율)로 제공합니다.
 
 ## Tests
 
 ```bash
-python3 -m pytest -q          # 50 tests, 전부 오프라인
-python3 -m unittest -q        # 같은 스위트를 unittest로도 실행 가능
+python3 -m pytest -q                      # 82 tests, 전부 오프라인
+python3 -m unittest discover -s tests -q  # 같은 스위트를 unittest로도 실행
 ```
 
 FFT는 O(n²) DFT와 ~1e-9, Welch PSD는 scipy와 ~1e-9로 대조합니다(numpy/scipy가 없으면

@@ -22,18 +22,34 @@ count reported), so a few dropouts don't break the uniform-sampling assumption.
 from __future__ import annotations
 
 import csv
+import io
 import math
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
 __all__ = ["SignalData", "parse_float", "load_signal", "infer_fs"]
 
+# Tried in order. utf-8-sig transparently strips a BOM; cp949 covers Korean Excel
+# exports; latin-1 never fails to decode, so it is the guaranteed last resort.
+_ENCODINGS = ("utf-8-sig", "cp949", "latin-1")
+
 _NA_LABELS = {"NA", "N/A", "NAN", "NULL", "NONE", ".", "-", "?"}
+# Time column names whose values are in SECONDS. A sample/index counter is
+# deliberately NOT here: treating an integer sample index as a seconds axis makes
+# infer_fs report a bogus fs (e.g. 1 Hz) that then silently overrides --fs and
+# corrupts every downstream frequency. If a counter really is your time axis,
+# pass it explicitly with --time.
 _TIME_NAMES = {"time", "t", "sec", "secs", "second", "seconds", "timestamp",
-               "time_s", "t_s", "time_sec", "time_ms", "ms", "sample", "samples",
-               "index", "idx"}
+               "time_s", "t_s", "time_sec"}
+# Time column names whose values are in MILLISECONDS (converted to seconds on load).
+_TIME_MS_NAMES = {"time_ms", "ms", "msec", "msecs", "millis", "milliseconds"}
 _VALUE_NAMES = {"eeg", "eeg_uv", "uv", "value", "signal", "amplitude", "amp",
                 "ch1", "channel", "voltage", "microvolt", "microvolts", "mv"}
+
+
+def _time_unit_scale(name: str) -> float:
+    """Seconds-per-unit for a time column, inferred from its name (1.0 s, 0.001 ms)."""
+    return 0.001 if name.strip().lower() in _TIME_MS_NAMES else 1.0
 
 
 def parse_float(token: str) -> Optional[float]:
@@ -58,20 +74,40 @@ class SignalData:
     time_col: Optional[str]
     n_filled: int = 0          # gaps (NaN/blank) that were interpolated
     warnings: List[str] = field(default_factory=list)
+    encoding: str = "utf-8-sig"  # codec the CSV was decoded with
 
     @property
     def n(self) -> int:
         return len(self.values)
 
 
-def _read_rows(path: str) -> Tuple[List[str], List[List[str]]]:
-    with open(path, newline="", encoding="utf-8-sig") as fh:
-        reader = csv.reader(fh)
-        rows = [row for row in reader if any(cell.strip() for cell in row)]
+def _read_rows(path: str) -> Tuple[List[str], List[List[str]], str]:
+    """Read a CSV, decoding with the first of _ENCODINGS that succeeds.
+
+    Returns (header, data_rows, encoding_used). Reads the raw bytes once and tries
+    each codec so a non-UTF8 file (e.g. cp949 from Korean Excel) loads instead of
+    crashing. ``open()`` errors (missing file, a directory, permission) propagate as
+    the usual OSError subclasses for the caller to translate.
+    """
+    with open(path, "rb") as fh:
+        data = fh.read()
+    text: Optional[str] = None
+    encoding = _ENCODINGS[-1]
+    for enc in _ENCODINGS:
+        try:
+            text = data.decode(enc)
+            encoding = enc
+            break
+        except UnicodeDecodeError:
+            continue
+    if text is None:  # pragma: no cover - latin-1 decodes any byte string
+        raise ValueError(f"'{path}' could not be decoded as text")
+    reader = csv.reader(io.StringIO(text))
+    rows = [row for row in reader if any(cell.strip() for cell in row)]
     if not rows:
         raise ValueError(f"'{path}' is empty")
     header = [h.strip() for h in rows[0]]
-    return header, rows[1:]
+    return header, rows[1:], encoding
 
 
 def _looks_numeric_header(header: List[str]) -> bool:
@@ -127,8 +163,12 @@ def load_signal(path: str, value_col: Optional[str] = None,
       * a single remaining column is treated as the value column, or a value-like
         name (eeg, uv, value, ...) is matched.
     """
-    header, data = _read_rows(path)
+    header, data, encoding = _read_rows(path)
     warnings: List[str] = []
+    if encoding != "utf-8-sig":
+        warnings.append(
+            f"file was not valid UTF-8; decoded as '{encoding}'. If the numbers "
+            "look wrong, re-save the CSV as UTF-8.")
 
     if _looks_numeric_header(header):
         raise ValueError(
@@ -145,7 +185,7 @@ def load_signal(path: str, value_col: Optional[str] = None,
         ti = header.index(time_col)
     elif value_col is None:
         for i, name in enumerate(lower):
-            if name in _TIME_NAMES:
+            if name in _TIME_NAMES or name in _TIME_MS_NAMES:
                 ti = i
                 break
 
@@ -186,7 +226,16 @@ def load_signal(path: str, value_col: Optional[str] = None,
     if not raw_vals:
         raise ValueError("no data rows found")
 
-    values, n_filled = _fill_gaps(raw_vals)
+    try:
+        values, n_filled = _fill_gaps(raw_vals)
+    except ValueError:
+        hint = f"value column '{header[vi]}' has no numeric values"
+        if encoding != "utf-8-sig":
+            hint += (f" (decoded as '{encoding}'; if the file is UTF-16 or binary, "
+                     "re-save it as UTF-8)")
+        else:
+            hint += " (check that the delimiter is a comma and cells are numbers)"
+        raise ValueError(hint)
     if n_filled:
         warnings.append(
             f"{n_filled} non-finite/blank sample(s) in '{header[vi]}' were "
@@ -201,6 +250,12 @@ def load_signal(path: str, value_col: Optional[str] = None,
                 warnings.append(
                     f"{t_filled} gap(s) in time column '{header[ti]}' were "
                     "interpolated.")
+            scale = _time_unit_scale(header[ti])
+            if scale != 1.0:
+                times = [t * scale for t in times]
+                warnings.append(
+                    f"time column '{header[ti]}' interpreted as milliseconds "
+                    "and converted to seconds.")
         except ValueError:
             warnings.append(f"time column '{header[ti]}' had no numeric values; "
                             "ignoring it.")
@@ -208,7 +263,7 @@ def load_signal(path: str, value_col: Optional[str] = None,
 
     return SignalData(values=values, times=times, value_col=header[vi],
                       time_col=(header[ti] if ti is not None else None),
-                      n_filled=n_filled, warnings=warnings)
+                      n_filled=n_filled, warnings=warnings, encoding=encoding)
 
 
 def infer_fs(times: List[float]) -> Tuple[float, bool, List[float]]:

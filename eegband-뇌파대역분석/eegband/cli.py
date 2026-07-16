@@ -22,7 +22,7 @@ from typing import List, Optional, Sequence, Tuple
 from . import __version__
 from .analyze import analyze, resolve_fs
 from .dataio import load_signal
-from .report import render_text, to_dict
+from .report import render_csv, render_text, to_dict
 from .spectral import DEFAULT_BANDS
 
 
@@ -38,13 +38,13 @@ def _parse_bands(text: str) -> List[Tuple[str, float, float]]:
             lo, hi = rng.split("-")
             lo_f, hi_f = float(lo), float(hi)
         except ValueError:
-            raise SystemExit(
+            raise ValueError(
                 f"잘못된 --bands 항목: '{chunk}'. 형식: name:lo-hi (예: delta:0.5-4)")
         if hi_f <= lo_f:
-            raise SystemExit(f"--bands '{name}': 상한({hi_f})이 하한({lo_f})보다 커야 합니다.")
+            raise ValueError(f"--bands '{name}': 상한({hi_f})이 하한({lo_f})보다 커야 합니다.")
         bands.append((name.strip(), lo_f, hi_f))
     if not bands:
-        raise SystemExit("--bands 에서 유효한 대역을 찾지 못했습니다.")
+        raise ValueError("--bands 에서 유효한 대역을 찾지 못했습니다.")
     return bands
 
 
@@ -73,6 +73,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--sef", type=float, default=95.0,
                    help="스펙트럼 에지 주파수 백분위 (기본 95 → SEF95)")
     p.add_argument("--json", action="store_true", help="사람용 리포트 대신 JSON 출력")
+    p.add_argument("--csv", dest="csv_out", action="store_true",
+                   help="에폭별(없으면 전체) 대역파워 표를 CSV로 출력 (통계 SW용)")
     p.add_argument("--version", action="version", version=f"eegband {__version__}")
     return p
 
@@ -80,18 +82,28 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = _build_parser().parse_args(argv)
 
-    try:
-        sig = load_signal(args.csv, value_col=args.value, time_col=args.time)
-    except (ValueError, FileNotFoundError) as exc:
-        print(f"입력 오류: {exc}", file=sys.stderr)
+    if args.json and args.csv_out:  # checked early, before any computation
+        print("입력 오류: --json 과 --csv 는 함께 쓸 수 없습니다.", file=sys.stderr)
         return 2
 
-    fs, fs_source, fs_warns = resolve_fs(args.fs, sig.times)
+    # load + fs resolution: any input/IO problem becomes a clean exit-2 message.
+    # OSError covers FileNotFoundError, IsADirectoryError and PermissionError;
+    # resolve_fs raises ValueError on a non-increasing/degenerate time column.
+    try:
+        sig = load_signal(args.csv, value_col=args.value, time_col=args.time)
+        fs, fs_source, fs_warns = resolve_fs(args.fs, sig.times)
+    except (ValueError, OSError) as exc:
+        print(f"입력 오류: {exc}", file=sys.stderr)
+        return 2
     if fs <= 0:
         print("입력 오류: 표본화율(fs)이 0 이하입니다.", file=sys.stderr)
         return 2
 
-    bands = _parse_bands(args.bands) if args.bands else list(DEFAULT_BANDS)
+    try:
+        bands = _parse_bands(args.bands) if args.bands else list(DEFAULT_BANDS)
+    except ValueError as exc:
+        print(f"입력 오류: {exc}", file=sys.stderr)
+        return 2
     sef_frac = args.sef / 100.0
     if not (0.0 < sef_frac < 1.0):
         print("입력 오류: --sef 는 0~100 사이여야 합니다.", file=sys.stderr)
@@ -108,7 +120,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"분석 오류: {exc}", file=sys.stderr)
         return 2
 
-    if args.json:
+    result.source_file = args.csv
+    result.n_filled = sig.n_filled
+    result.input_encoding = sig.encoding
+    if args.csv_out:
+        sys.stdout.write(render_csv(result))
+    elif args.json:
         print(json.dumps(to_dict(result), ensure_ascii=False, indent=2))
     else:
         print(render_text(result))
