@@ -41,11 +41,16 @@ IDEA_TEMPLATES = [
         "hypothesis": "수면 중 HRV(RMSSD, LF/HF)가 다음 날 주관적 회복감·스트레스 설문 점수를 예측한다.",
         "predictors": ["RMSSD", "SDNN", "LF/HF", "야간 평균 HR"],
         "outcomes": ["주관적 수면의 질(PSQI 등)", "스트레스/회복 설문"],
-        "analysis": "다중회귀(공변량: 연령·성별) + 표준화 계수; 필요시 위계적 회귀로 증분설명력 보고.",
-        "design": "correlational / predictive",
-        "effect": {"type": "regression", "f2": 0.15, "k": 3},
+        "analysis": "위계적 회귀: 연령·성별 보정 후 HRV 지표(RMSSD·SDNN·LF/HF)의 증분설명력(ΔR²) 검정 + 표준화 계수.",
+        "design": "correlational / predictive (hierarchical regression)",
+        # Incremental-R^2 test: HRV predictors (3) added over age+sex covariates (2).
+        "effect": {"type": "regression_change", "f2": 0.15, "k_tested": 3, "k_control": 2},
         "journal": "Sleep Health / Frontiers in Psychology (디지털 헬스 측정)",
         "novelty": "소비자 워치 HRV를 주관적 지표의 객관 대리지표로 검증 — 실용·재현성 측면에서 게재가치.",
+        "caveats": [
+            "권장 N은 공변량(연령·성별) 보정 후 HRV 세트의 ΔR² 검정 기준입니다 — "
+            "가정한 증분효과 f²=0.15가 낙관적이면 표본 민감도 표의 보수적 열을 참고하세요.",
+        ],
     },
     {
         "id": "multimodal_arousal_index",
@@ -55,11 +60,18 @@ IDEA_TEMPLATES = [
         "hypothesis": "EEG(베타/알파비), HRV, 호흡 변동성을 결합한 복합 각성지수가 단일 모달리티보다 주관적 각성/수면잠복기를 더 잘 설명한다.",
         "predictors": ["EEG 베타/알파 비", "HRV 지표", "호흡 변동성"],
         "outcomes": ["주관적 각성/이완", "수면 잠복기"],
-        "analysis": "주성분/요인분석으로 복합지수 도출 → 증분타당도(위계적 회귀); 교차검증(LOOCV).",
-        "design": "index construction + validation",
-        "effect": {"type": "regression", "f2": 0.15, "k": 3},
+        "analysis": "주성분/요인분석으로 복합지수 도출 → 위계적 회귀로 단일모달 대비 증분타당도(ΔR²) 검정; 교차검증(LOOCV).",
+        "design": "index construction + incremental validation",
+        # Incremental-R^2 test: composite adds 2 modality components (k_tested)
+        # over a single-modality baseline index (k_control=1). Sizing the ΔR²
+        # test — the hypothesis is "beats single modality", not "R²>0".
+        "effect": {"type": "regression_change", "f2": 0.15, "k_tested": 2, "k_control": 1},
         "journal": "IEEE J. Biomedical and Health Informatics / Sensors (멀티모달 지표)",
         "novelty": "3모달 통합 지표는 드물고 임상·웨어러블 양쪽에 어필 — 방법론 논문으로 강함.",
+        "caveats": [
+            "권장 N은 단일모달 기준지수 대비 복합지수의 증분설명력(ΔR²) 검정 기준입니다 "
+            "(전체 R²≠0 검정이 아님).",
+        ],
     },
     {
         "id": "watch_vs_eeg_validation",
@@ -85,9 +97,15 @@ IDEA_TEMPLATES = [
         "outcomes": ["MoA 반응 여부(이분)"],
         "analysis": "두 군 비교(t/Mann–Whitney + 효과크기 Hedges g) → 로지스틱 회귀로 분류; ROC.",
         "design": "two-group comparison",
-        "effect": {"type": "two_group", "d": 0.5},
+        # 50/50 responder split assumed; real prevalence inflates N (see caveat).
+        "effect": {"type": "two_group", "d": 0.5, "allocation": 0.5},
         "journal": "Frontiers in Neuroscience / Scientific Reports (기전·바이오마커)",
         "novelty": "제품 MoA를 생리 바이오마커로 설명 — 회사 데이터만의 차별점.",
+        "caveats": [
+            "권장 N은 반응자/비반응자 50:50 가정입니다 — 실제 반응자 비율이 30:70이면 "
+            "약 1.2배, 20:80이면 약 1.6배의 표본이 필요합니다.",
+            "권장 분석은 로지스틱 회귀/ROC지만 표본수는 t검정 근사로 계산했습니다(보수적 근사).",
+        ],
     },
     {
         "id": "behavior_physio_link",

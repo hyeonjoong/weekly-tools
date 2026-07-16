@@ -1,11 +1,25 @@
 """Match idea templates to a manifest, assess feasibility, and rank."""
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 from .knowledge import IDEA_TEMPLATES
 from .manifest import MODALITY_LABEL_KO, Manifest
-from .power import required_total_n
+from .power import (
+    detectable_effect,
+    effect_magnitude,
+    required_total_n,
+    scale_effect,
+)
+
+# How each effect metric renders in the "detectable effect" cell.
+_METRIC_LABEL = {"r": "r", "d": "d", "d_z": "d_z", "f2": "f²"}
+
+# Effect-size sensitivity strip: required N is recomputed at these multiples of
+# the template's planned effect so the reader sees how the target moves if the
+# true effect is smaller (conservative) or larger (optimistic) than assumed.
+SENSITIVITY_FACTORS = [("보수적", 2.0 / 3.0), ("계획", 1.0), ("낙관적", 1.5)]
 
 
 @dataclass
@@ -27,6 +41,9 @@ class IdeaResult:
     score: float
     notes: list = field(default_factory=list)
     exploratory: bool = False  # design with no power target (e.g. clustering)
+    detectable: object = None  # {"metric":..., "value":...} or None
+    recruit_n: object = None  # required_n inflated for attrition, or None
+    n_sensitivity: list = field(default_factory=list)  # required-N vs effect strip
 
     @property
     def feasibility_label(self) -> str:
@@ -37,6 +54,14 @@ class IdeaResult:
         if self.feasible:
             return "충분 가능"
         return "표본 부족 우려"
+
+    @property
+    def detectable_label(self) -> str:
+        """Compact minimum-detectable-effect cell, e.g. ``r≥0.29`` or ``—``."""
+        if not self.detectable:
+            return "—"
+        metric = _METRIC_LABEL.get(self.detectable["metric"], self.detectable["metric"])
+        return f"{metric}≥{self.detectable['value']:.2f}"
 
 
 def _modality_index(manifest: Manifest):
@@ -67,8 +92,25 @@ def evaluate(
     alpha: float = 0.05,
     power: float = 0.80,
     templates=IDEA_TEMPLATES,
+    dropout: float = 0.0,
+    effect_scale: float = 1.0,
 ) -> list:
-    """Return ranked :class:`IdeaResult` list for ideas whose modalities are met."""
+    """Return ranked :class:`IdeaResult` list for ideas whose modalities are met.
+
+    ``dropout`` (0 <= p < 1) inflates each idea's recruitment target to
+    ``ceil(required_n / (1 - p))`` so a prospective study still finishes with
+    the analyzable N; it does not change the feasibility verdict, which compares
+    the *analyzable* required N against the N already in hand.
+
+    ``effect_scale`` (>0) multiplies every template's assumed effect magnitude
+    before sizing — set it below 1 to plan against a smaller (more conservative)
+    true effect. The per-idea sensitivity strip additionally reports required N
+    at a spread of effect magnitudes regardless of this global scale.
+    """
+    if not 0.0 <= dropout < 1.0:
+        raise ValueError("dropout must satisfy 0 <= dropout < 1")
+    if effect_scale <= 0.0:
+        raise ValueError("effect_scale must be > 0")
     index, conflicts = _modality_index(manifest)
     for mod, ns in conflicts.items():
         msg = (
@@ -92,12 +134,39 @@ def evaluate(
         all_known = len(ns) == len(required)
         available_n = min(ns) if all_known and ns else None
 
-        req_n = required_total_n(t["effect"], alpha=alpha, power=power)
+        # Apply the global effect-size scale before sizing / feasibility.
+        base_effect = t["effect"]
+        planned_effect = scale_effect(base_effect, effect_scale)
+
+        req_n = required_total_n(planned_effect, alpha=alpha, power=power)
         exploratory = req_n is None
         if exploratory or available_n is None:
             feasible = None
         else:
             feasible = available_n >= req_n
+
+        # Recruitment target inflated for expected attrition (planning aid only).
+        recruit_n = None
+        if req_n is not None and dropout > 0.0:
+            recruit_n = math.ceil(req_n / (1.0 - dropout))
+
+        # Sensitivity: smallest effect the *available* N could detect.
+        detectable = detectable_effect(
+            planned_effect, available_n, alpha=alpha, power=power
+        )
+
+        # Required-N-vs-effect strip: how the target moves if the true effect is
+        # smaller/larger than the planned prior. Skipped for exploratory designs.
+        n_sensitivity = []
+        if not exploratory:
+            for label, factor in SENSITIVITY_FACTORS:
+                eff = scale_effect(planned_effect, factor)
+                n_sensitivity.append({
+                    "label": label,
+                    "factor": factor,
+                    "effect_value": round(effect_magnitude(eff), 4),
+                    "required_n": required_total_n(eff, alpha=alpha, power=power),
+                })
 
         # Variables available in the modalities this idea draws on. (Template
         # predictors/outcomes are free-text concepts, so this is the pool of
@@ -132,6 +201,8 @@ def evaluate(
             )
         elif available_n is None:
             notes.append("매니페스트에 n이 없어 검정력 판단 불가 — n을 채우면 자동 평가됨.")
+        # Template-authored honesty caveats (assumptions the sizing makes).
+        notes.extend(t.get("caveats", []))
 
         results.append(
             IdeaResult(
@@ -152,6 +223,9 @@ def evaluate(
                 score=round(score, 3),
                 notes=notes,
                 exploratory=exploratory,
+                detectable=detectable,
+                recruit_n=recruit_n,
+                n_sensitivity=n_sensitivity,
             )
         )
 

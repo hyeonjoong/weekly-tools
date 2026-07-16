@@ -1,0 +1,8 @@
+# 데이터 인벤토리 예시 (CSV). 스프레드시트에서 바로 내보내 쓰세요.
+# variables 열은 ';' 또는 '|' 로 여러 변수를 구분합니다.
+study,name,modality,n,variables,sampling_hz,notes
+수면 MoA 코호트 (CSV 예시),MoA EEG,뇌파,92,delta_power;theta_power;alpha_power;beta_power;frontal_alpha_asymmetry,256,이완 전/후 안정상태
+,스마트워치 야간,워치,90,rmssd;sdnn;lf_hf;mean_hr;sleep_minutes,,수면 중 1Hz HR
+,호흡밴드,호흡밴드,92,resp_rate;rsa;resp_variability,50,
+,수면/스트레스 설문,설문,95,psqi_total;stress_score;recovery_score,,
+,MoA 반응 라벨,moa,90,responder_flag;response_magnitude,,

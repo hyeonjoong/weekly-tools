@@ -17,7 +17,10 @@ cross-modal ideas feasible; the report flags when linkage is assumed.
 """
 from __future__ import annotations
 
+import csv
+import io
 import json
+import os
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -111,10 +114,13 @@ def parse_manifest(data: dict) -> Manifest:
                 # bool is an int subclass — reject true/false as a sample size.
                 if isinstance(n, bool):
                     raise ValueError
-                # A non-integer count (e.g. 40.7) is almost certainly a mistake.
-                if isinstance(n, float) and not n.is_integer():
+                # Coerce via float so JSON numbers *and* CSV strings behave the
+                # same: 40, 40.0 and "40.0" all become 40; 40.7/"40.7"/"lots"/
+                # inf/nan are rejected. (float() rejects non-numeric strings.)
+                fn = float(n)
+                if not fn.is_integer():
                     raise ValueError
-                n = int(n)
+                n = int(fn)
                 if n <= 0:
                     raise ValueError
             except (TypeError, ValueError):
@@ -151,10 +157,195 @@ def parse_manifest(data: dict) -> Manifest:
     return Manifest(study=study, datasets=datasets, warnings=warnings)
 
 
-def load_manifest(path: str) -> Manifest:
-    with open(path, "r", encoding="utf-8") as fh:
+# Column-header aliases (case-insensitive) for the CSV/TSV manifest format.
+_CSV_COLUMN_ALIASES = {
+    "name": "name", "이름": "name", "dataset": "name", "데이터셋": "name",
+    "modality": "modality", "모달리티": "modality", "종류": "modality",
+    "type": "modality",
+    "n": "n", "표본수": "n", "samples": "n", "sample_size": "n", "표본": "n",
+    "variables": "variables", "vars": "variables", "변수": "variables",
+    "columns": "variables", "cols": "variables",
+    "sampling_hz": "sampling_hz", "hz": "sampling_hz", "sampling": "sampling_hz",
+    "샘플링": "sampling_hz", "sampling_rate": "sampling_hz",
+    "notes": "notes", "note": "notes", "비고": "notes", "memo": "notes",
+    "study": "study", "연구": "study", "연구명": "study",
+}
+
+# Variables in a single CSV cell are separated by ';' or '|' (never ',', which
+# is the field delimiter). Whitespace around each token is stripped.
+_CSV_VAR_SPLIT = (";", "|")
+
+
+def _decode_bytes(raw: bytes):
+    """Decode manifest bytes, tolerating BOM and common Korean-Excel encodings.
+
+    Returns ``(text, warning_or_None)``. Real-world clinical CSVs exported from
+    Korean Excel are frequently CP949/EUC-KR, not UTF-8; we fall back rather
+    than crashing, and warn so the user can re-save as UTF-8.
+    """
+    for enc in ("utf-8-sig", "utf-8"):
         try:
-            data = json.load(fh)
+            return raw.decode(enc), None
+        except UnicodeDecodeError:
+            pass
+    for enc in ("cp949", "euc-kr"):
+        try:
+            text = raw.decode(enc)
+            return text, (
+                f"파일이 UTF-8이 아니어서 {enc}로 해석했습니다 — 가능하면 "
+                "UTF-8로 다시 저장하세요."
+            )
+        except UnicodeDecodeError:
+            pass
+    # Last resort: latin-1 never fails; flag that bytes may be garbled.
+    return raw.decode("latin-1"), (
+        "파일 인코딩을 인식할 수 없어 latin-1로 강제 해석했습니다 — 한글이 "
+        "깨질 수 있으니 UTF-8로 다시 저장하세요."
+    )
+
+
+def parse_csv_manifest(text: str, study: Optional[str] = None,
+                       delimiter: str = ",") -> Manifest:
+    """Parse a CSV/TSV data inventory into a :class:`Manifest`.
+
+    One row per dataset. Headers are matched case-insensitively against a set of
+    English/Korean aliases; ``modality`` is the only required column. The
+    ``variables`` cell may list several columns separated by ``;`` or ``|``.
+    A ``study`` column (first non-empty value wins) names the study; otherwise
+    the ``study`` argument (typically the filename stem) is used.
+    """
+    stripped = text.lstrip("﻿")
+    try:
+        all_rows = list(csv.reader(io.StringIO(stripped), delimiter=delimiter))
+    except csv.Error as exc:
+        # e.g. a field larger than csv's 128 KB limit, or malformed quoting —
+        # surface as a clean ManifestError (exit 2) instead of a raw traceback.
+        raise ManifestError(f"CSV를 해석할 수 없습니다: {exc}") from exc
+
+    # Drop leading blank / '#'-comment lines ONLY until the header row, so a
+    # hand-kept inventory can start with "# notes" but a legitimate first-column
+    # value like "#3 EEG" in a *data* row is never silently discarded.
+    header = None
+    body: list = []
+    for r in all_rows:
+        if header is None:
+            if not any(cell.strip() for cell in r):
+                continue  # blank line before header
+            if r and r[0].lstrip().startswith("#"):
+                continue  # comment line before header
+            header = [_CSV_COLUMN_ALIASES.get(h.strip().lower(), "") for h in r]
+            continue
+        if any(cell.strip() for cell in r):  # skip fully blank data rows
+            body.append(r)
+
+    if header is None:
+        raise ManifestError("CSV 매니페스트가 비어 있습니다 (헤더 행 필요).")
+    if "modality" not in header:
+        raise ManifestError(
+            "CSV 헤더에 'modality'(또는 '모달리티'/'종류') 열이 필요합니다."
+        )
+    dup = {c for c in header if c and header.count(c) > 1}
+
+    study_from_col = None
+    datasets: list = []
+    for r in body:
+        record: dict = {}
+        for col, cell in zip(header, r):
+            if not col:
+                continue
+            value = cell.strip()
+            record[col] = value
+        # Pull the study name out of the row, if present.
+        if record.get("study") and study_from_col is None:
+            study_from_col = record["study"]
+        record.pop("study", None)
+
+        # A row with no modality at all is blank filler — skip it silently.
+        if not record.get("modality"):
+            continue
+
+        # Empty cells mean "not provided" — drop them so parse_manifest treats
+        # sample size / variables as absent instead of warning on "".
+        if not record.get("n"):
+            record.pop("n", None)
+        if not record.get("sampling_hz"):
+            record.pop("sampling_hz", None)
+        raw_vars = record.pop("variables", "")
+        variables = [raw_vars]
+        for sep in _CSV_VAR_SPLIT:
+            variables = [tok for chunk in variables for tok in chunk.split(sep)]
+        record["variables"] = [v.strip() for v in variables if v.strip()]
+        datasets.append(record)
+
+    if not datasets:
+        raise ManifestError(
+            "CSV에 유효한 데이터셋 행이 없습니다 (modality 값이 있는 행 필요)."
+        )
+
+    resolved_study = study_from_col or study or "Unnamed study"
+    manifest = parse_manifest({"study": resolved_study, "datasets": datasets})
+    if dup:
+        # Duplicate headers collapse to the last column (data loss); warn rather
+        # than fail so a mislabeled export is still usable.
+        cols = ", ".join(sorted(dup))
+        manifest.warnings.insert(
+            0, f"CSV 헤더에 중복된 열({cols})이 있어 마지막 값만 사용합니다."
+        )
+    return manifest
+
+
+def load_manifest(path: str) -> Manifest:
+    """Load a manifest from a ``.json``, ``.csv`` or ``.tsv`` file.
+
+    Format is chosen by extension; for anything else we sniff the first
+    non-whitespace byte (``{``/``[`` → JSON, otherwise CSV). Encoding is decoded
+    tolerantly (BOM / CP949 / EUC-KR fallbacks) rather than assuming UTF-8.
+    """
+    with open(path, "rb") as fh:
+        raw = fh.read()
+    text, enc_warning = _decode_bytes(raw)
+
+    ext = os.path.splitext(path)[1].lower()
+    if ext == ".json":
+        fmt = "json"
+    elif ext in (".csv", ".tsv"):
+        fmt = "csv"
+    else:
+        head = text.lstrip()
+        fmt = "json" if head[:1] in ("{", "[") else "csv"
+
+    stem = os.path.splitext(os.path.basename(path))[0]
+
+    def _as_json():
+        try:
+            return parse_manifest(json.loads(text))
         except json.JSONDecodeError as exc:
             raise ManifestError(f"Could not parse JSON: {exc}") from exc
-    return parse_manifest(data)
+
+    def _as_csv():
+        delimiter = "\t" if ext == ".tsv" else ","
+        return parse_csv_manifest(text, study=stem, delimiter=delimiter)
+
+    looks_json = text.lstrip()[:1] in ("{", "[")
+    if fmt == "json":
+        primary, other, other_is_json = _as_json, _as_csv, False
+    else:
+        primary, other, other_is_json = _as_csv, _as_json, True
+
+    try:
+        manifest = primary()
+    except ManifestError as primary_exc:
+        # Wrong extension for the content? If the bytes clearly look like the
+        # other format, retry it before giving up (so a JSON payload saved as
+        # .csv still loads). Re-raise the original error if the retry fails too.
+        if other_is_json == looks_json:
+            try:
+                manifest = other()
+            except ManifestError:
+                raise primary_exc from None
+        else:
+            raise
+
+    if enc_warning:
+        manifest.warnings.insert(0, enc_warning)
+    return manifest

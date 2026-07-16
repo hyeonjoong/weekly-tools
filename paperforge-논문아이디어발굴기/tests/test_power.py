@@ -103,3 +103,66 @@ def test_paired_via_required_total_n():
 def test_alpha010_power095_combo():
     # Independently checked: r=0.30, alpha=.10, power=.95 -> 116.
     assert power.n_for_correlation(0.30, alpha=0.10, power=0.95) == 116
+
+
+def test_regression_change_uses_added_predictor_df():
+    # Incremental-R^2 test: numerator df = k_tested (not the full model). With
+    # k_tested=2 the numerator df is smaller than an overall k=3 test, so N is
+    # smaller at the same f2.
+    n_change = power.required_total_n(
+        {"type": "regression_change", "f2": 0.15, "k_tested": 2, "k_control": 1}
+    )
+    n_overall = power.required_total_n({"type": "regression", "f2": 0.15, "k": 3})
+    assert n_change == 68
+    assert n_change < n_overall  # 68 < 77
+
+
+def test_regression_change_more_controls_need_more_n():
+    # Adding covariates (k_control) costs residual df -> a bit more N.
+    n0 = power.required_total_n(
+        {"type": "regression_change", "f2": 0.15, "k_tested": 3, "k_control": 0}
+    )
+    n2 = power.required_total_n(
+        {"type": "regression_change", "f2": 0.15, "k_tested": 3, "k_control": 2}
+    )
+    assert n2 >= n0
+
+
+def test_two_group_allocation_balanced_matches_legacy():
+    # allocation=0.5 must reproduce the exact 2*per-group value.
+    assert power.required_total_n({"type": "two_group", "d": 0.5}) == 126
+    assert power.required_total_n(
+        {"type": "two_group", "d": 0.5, "allocation": 0.5}
+    ) == 126
+
+
+def test_two_group_allocation_unbalanced_needs_more():
+    n50 = power.required_total_n({"type": "two_group", "d": 0.5, "allocation": 0.5})
+    n30 = power.required_total_n({"type": "two_group", "d": 0.5, "allocation": 0.3})
+    n20 = power.required_total_n({"type": "two_group", "d": 0.5, "allocation": 0.2})
+    assert n20 > n30 > n50
+
+
+def test_scale_effect_all_types():
+    assert power.scale_effect({"type": "correlation", "r": 0.3}, 2)["r"] == 0.6
+    assert power.scale_effect({"type": "correlation", "r": 0.6}, 3)["r"] == 0.999  # capped
+    assert power.scale_effect({"type": "two_group", "d": 0.5}, 0.5)["d"] == 0.25
+    assert power.scale_effect({"type": "paired", "d": 0.4}, 2)["d"] == 0.8
+    assert power.scale_effect({"type": "regression", "f2": 0.1, "k": 3}, 2)["f2"] == 0.2
+    # Exploratory is returned unchanged; original dict not mutated.
+    src = {"type": "correlation", "r": 0.3}
+    power.scale_effect(src, 2)
+    assert src["r"] == 0.3
+
+
+def test_scale_effect_smaller_effect_needs_more_n():
+    base = {"type": "correlation", "r": 0.3}
+    assert power.required_total_n(power.scale_effect(base, 2.0 / 3.0)) > \
+        power.required_total_n(base)
+
+
+def test_effect_magnitude():
+    assert power.effect_magnitude({"type": "correlation", "r": 0.3}) == 0.3
+    assert power.effect_magnitude({"type": "two_group", "d": 0.5}) == 0.5
+    assert power.effect_magnitude({"type": "regression", "f2": 0.15}) == 0.15
+    assert power.effect_magnitude({"type": "exploratory"}) is None
