@@ -10,6 +10,7 @@
 
 | 툴 (폴더) | 한 줄 설명 | 바로 실행 | 추가일 |
 |----------|-----------|----------|--------|
+| [table1-기저특성표](table1-기저특성표) | 임상 CSV → **출판용 "표 1(기저 특성표)"** 자동 생성: 변수별 연속/범주 자동 판별 → 알맞은 요약(평균±SD / 중앙값[IQR] · n(%))·검정 자동 선택 + **군간 표준화평균차(SMD)**·결측 정리, Markdown/CSV/TSV/JSON 출력 — BELL-001 SERENE 등 임상시험 Table 1용 (외부 의존성 0, 121개 테스트 통과) | `실행.command` 더블클릭 · 또는 `table1 data.csv --group arm` | 2026-07-16 (목) |
 | [agreestat-측정일치도](agreestat-측정일치도) | 두 측정방법 CSV → **일치도 분석**: Bland–Altman(bias·95% LoA+CI·비례편향 검정)+ICC(2,1)/(3,1)+Lin CCC+반복측정 CV — 비접촉 호흡/워치-HRV vs PSG/밴드 검증용, 논문 문장까지 (외부 의존성 0, ICC를 Shrout&Fleiss 정확값과 대조) | `실행.command` 더블클릭 · 또는 `agreestat data.csv -a 방법A -b 방법B [-s 대상id]` | 2026-07-13 (월) |
 | [eegband-뇌파대역분석](eegband-뇌파대역분석) | 단일채널 EEG CSV → **대역파워**(delta/theta/alpha/beta/gamma 절대·상대)+**서파활동(SWA)**+SEF95·peak·slowing ratio, 에폭 단위 요약 — 직접 구현한 Welch PSD (BELL-001 EEG 서파수면 지표용, 외부 의존성 0, scipy welch와 ≤1e-14 일치) | `실행.command` 더블클릭 · 또는 `python3 -m eegband.cli eeg.csv --fs 128 --epoch 30` | 2026-07-13 (월) |
 | [hrvkit-심박변이도분석](hrvkit-심박변이도분석) | RR/IBI(또는 HR) CSV → **HRV 지표 한 번에**: 시간영역(SDNN·RMSSD·pNN50)+주파수영역(LF/HF, 직접 구현한 FFT·Welch PSD)+비선형(Poincaré SD1/SD2·SampEn), 이소성박동 자동 보정 — BELL-001 호흡→부교감→RSA/HRV 기전 정량화 (외부 의존성 0, scipy와 ≤1e-6 일치) | `실행.command` 더블클릭 · 또는 `python3 -m hrvkit.cli rr.csv` (또는 `--json`) | 2026-07-13 (월) |
