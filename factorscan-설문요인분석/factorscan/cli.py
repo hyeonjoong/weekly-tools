@@ -46,6 +46,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="CSV 인코딩(기본 utf-8-sig; 한국어 엑셀 파일은 cp949/euc-kr)")
     p.add_argument("-k", "--n-factors", type=int,
                    help="유지할 요인 수(미지정 시 평행분석 기준, 평행분석 끄면 Kaiser)")
+    p.add_argument("--extraction", choices=["pca", "paf"], default="pca",
+                   help="추출 방식: pca(주성분, SPSS 기본) · paf(주축분해, 공통요인 모형)")
+    p.add_argument("--correlation", choices=["pearson", "polychoric"], default="pearson",
+                   help="상관 방식: pearson(기본) · polychoric(순서형 리커트 잠재상관)")
     p.add_argument("--rotation", choices=["varimax", "promax", "none"], default="varimax",
                    help="회전 방식: varimax(직교, 기본) · promax(사교, 요인상관 허용) · none")
     p.add_argument("--parallel-iter", type=int, default=100,
@@ -54,6 +58,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--min-loading", type=float, default=0.40,
                    help="주요 적재/교차적재 판정 임계값(기본 0.40)")
     p.add_argument("--json", action="store_true", help="사람용 보고서 대신 JSON 출력")
+    p.add_argument("--csv-out", metavar="경로",
+                   help="문항×요인 적재표를 CSV 파일로 저장(논문 부록·엑셀용, utf-8-sig)")
+    p.add_argument("--scores-out", metavar="경로",
+                   help="응답자별 하위척도(요인) 점수를 CSV로 저장(결측제거 표본 기준)")
+    p.add_argument("--score-method", choices=["sum", "mean"], default="sum",
+                   help="하위척도 점수 계산: sum(합산, 기본) 또는 mean(평균)")
     p.add_argument("-V", "--version", action="version", version=f"factorscan {__version__}")
     return p
 
@@ -164,6 +174,8 @@ def run(argv: Optional[List[str]] = None) -> int:
             parallel_iter=args.parallel_iter,
             seed=args.seed,
             min_loading=args.min_loading,
+            extraction=args.extraction,
+            correlation=args.correlation,
         )
     except (DataError, ValueError) as exc:
         print(f"오류: {exc}", file=sys.stderr)
@@ -171,6 +183,39 @@ def run(argv: Optional[List[str]] = None) -> int:
     except FileNotFoundError:
         print(f"파일을 찾을 수 없습니다: {args.csv}", file=sys.stderr)
         return 1
+
+    if args.csv_out:
+        from .report import loadings_table_csv
+        # 내용을 먼저 만든 뒤 파일을 연다(생성 중 예외로 기존 파일이 0바이트로 잘리는 것 방지).
+        text = loadings_table_csv(result)
+        try:
+            with open(args.csv_out, "w", encoding="utf-8-sig", newline="") as fh:
+                fh.write(text)
+        except OSError as exc:
+            print(f"CSV 저장 실패: {exc}", file=sys.stderr)
+            return 1
+        print(f"✓ 적재표를 저장했습니다: {args.csv_out}", file=sys.stderr)
+
+    if args.scores_out:
+        import numpy as _np
+        from .report import scores_table_csv
+        mask = prep.row_mask
+        id_pairs = []
+        for name in id_cols:
+            if name in columns and mask is not None:
+                id_pairs.append((name, [str(v) for v in columns[name][mask]]))
+        # ID가 없을 때 원본 CSV 행번호로 역추적 가능하게(결측삭제로 순번 어긋남 방지).
+        row_numbers = (_np.where(mask)[0] + 1).tolist() if mask is not None else None
+        text = scores_table_csv(result, prep.matrix, id_pairs,
+                                method=args.score_method, row_numbers=row_numbers)
+        try:
+            with open(args.scores_out, "w", encoding="utf-8-sig", newline="") as fh:
+                fh.write(text)
+        except OSError as exc:
+            print(f"점수 CSV 저장 실패: {exc}", file=sys.stderr)
+            return 1
+        print(f"✓ 하위척도 점수를 저장했습니다: {args.scores_out} "
+              f"({result['n_used']}명, {args.score_method})", file=sys.stderr)
 
     if args.json:
         # numpy 배열은 이미 tolist()로 변환됨; 상관행렬만 별도 처리

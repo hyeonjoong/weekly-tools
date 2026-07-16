@@ -23,6 +23,14 @@ def correlation_matrix(x: np.ndarray) -> np.ndarray:
     return np.corrcoef(x, rowvar=False)
 
 
+def _safe_inv(m: np.ndarray) -> np.ndarray:
+    """역행렬. 특이행렬이면 유사역행렬(pinv)로 대체해 예외 없이 진행한다."""
+    try:
+        return np.linalg.inv(m)
+    except np.linalg.LinAlgError:
+        return np.linalg.pinv(m)
+
+
 def is_positive_definite(r: np.ndarray) -> bool:
     """상관행렬이 양의 정부호(역행렬/행렬식 사용 가능)인지."""
     try:
@@ -158,6 +166,112 @@ def component_loadings(r: np.ndarray, k: int) -> np.ndarray:
     return vecs_k * np.sqrt(vals_k)
 
 
+def squared_multiple_correlations(r: np.ndarray) -> np.ndarray:
+    """각 변수의 다중상관제곱(SMC) = 1 − 1/R⁻¹_ii. 공통요인 추출(PAF)의 초기 공통성.
+
+    SMC는 나머지 변수들로 그 변수를 회귀했을 때의 R²이며, 공통성의 하한 추정으로 널리 쓰인다.
+    상관행렬이 특이하면 유사역행렬(pinv)로 대체하고, 결과를 [0,1]로 절단한다.
+    """
+    try:
+        r_inv = np.linalg.inv(r)
+    except np.linalg.LinAlgError:
+        r_inv = np.linalg.pinv(r)
+    diag = np.diag(r_inv).astype(float)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        smc = 1.0 - 1.0 / diag
+    smc = np.where(np.isfinite(smc), smc, 0.0)
+    return np.clip(smc, 0.0, 1.0)
+
+
+@dataclass
+class PAFResult:
+    loadings: np.ndarray        # (p, k) 비회전 공통요인 적재
+    communalities: np.ndarray   # (p,) 최종 공통성(0..1로 절단)
+    n_iter: int                 # 실제 반복 횟수
+    converged: bool             # 공통성 수렴 여부
+    heywood: bool               # Heywood 케이스(공통성>1 발생) 여부
+
+
+def paf_loadings(r: np.ndarray, k: int, max_iter: int = 100,
+                 tol: float = 1e-6) -> PAFResult:
+    """주축분해(반복 Principal Axis Factoring)로 공통요인 적재를 추출한다.
+
+    주성분(PCA)이 관측분산 전체를 쓰는 것과 달리, PAF는 대각을 공통성 추정치로 바꾼
+    '축소상관행렬'을 분해해 **공통분산만** 모형화한다(SPSS/R의 principal-axis와 동일 계열).
+    절차: 대각 ← SMC → 상위 k 고유분해 → 공통성 갱신 → 수렴까지 반복.
+
+    반환 PAFResult. Heywood 케이스(공통성>1)는 1로 절단하고 flag로 알린다.
+    """
+    p = r.shape[0]
+    h2 = squared_multiple_correlations(r)
+    load = np.zeros((p, k))
+    converged = False
+    heywood = False
+    n_iter = 0
+    for it in range(1, max_iter + 1):
+        n_iter = it
+        reduced = r.copy()
+        np.fill_diagonal(reduced, h2)
+        vals, vecs = np.linalg.eigh(reduced)
+        order = np.argsort(vals)[::-1][:k]
+        vals_k = np.clip(vals[order], 0.0, None)
+        load = vecs[:, order] * np.sqrt(vals_k)
+        h2_new = (load ** 2).sum(axis=1)
+        # Heywood: 공통성이 1을 초과하거나(반복 중) 경계(≈1)에 붙으면 플래그.
+        # 특이자료에서 SMC 초기값이 이미 1.0으로 고정돼 반복 중 '초과'가 안 나는 경우도 잡는다.
+        if np.any(h2_new >= 1.0 - 1e-9):
+            heywood = True
+        h2_new = np.clip(h2_new, 0.0, 1.0)
+        delta = float(np.max(np.abs(h2_new - h2)))
+        h2 = h2_new
+        if delta < tol:
+            converged = True
+            break
+    return PAFResult(loadings=load, communalities=h2, n_iter=n_iter,
+                     converged=converged, heywood=heywood)
+
+
+def velicer_map(r: np.ndarray, max_components: Optional[int] = None) -> dict:
+    """Velicer의 MAP(최소평균편상관) 검정: 유지 요인 수를 편상관으로 결정.
+
+    m개 성분을 편출(partial out)한 뒤 남는 편상관행렬의 '평균 제곱 비대각'을 f_m으로 두고,
+    f_m을 최소화하는 m을 유지 성분 수로 본다. 성분을 더 뽑을수록 체계분산이 걷히다가
+    잡음까지 걷히기 시작하면 f_m이 다시 증가하므로 최소점이 '체계적 성분'의 경계가 된다.
+    Kaiser(과대추정)·평행분석과 독립적인 제3의 근거를 제공한다(Velicer 1976, power=2).
+
+    반환: {"k": 유지수, "values": [f_0, f_1, ...], "min_index": argmin}.
+    편상관이 정의 불가한 지점(대각≤0)은 NaN으로 두고 최소값 탐색에서 제외한다.
+    """
+    p = r.shape[0]
+    if max_components is None:
+        max_components = p - 1
+    max_components = int(min(max_components, p - 1))
+    vals, vecs = np.linalg.eigh(r)
+    order = np.argsort(vals)[::-1]
+    loadings = vecs[:, order] * np.sqrt(np.clip(vals[order], 0.0, None))
+    iu = np.triu_indices(p, k=1)
+
+    values: List[float] = []
+    for m in range(0, max_components + 1):
+        if m == 0:
+            partial = r
+        else:
+            a = loadings[:, :m]
+            cstar = r - a @ a.T
+            diag = np.diag(cstar)
+            if np.any(diag <= 1e-12):   # 편분산이 0/음수 → 편상관 정의 불가
+                values.append(float("nan"))
+                continue
+            d = np.sqrt(diag)
+            partial = cstar / np.outer(d, d)
+        off = partial[iu]
+        values.append(float(np.mean(off ** 2)))
+
+    finite = [(i, v) for i, v in enumerate(values) if np.isfinite(v)]
+    min_index = min(finite, key=lambda t: t[1])[0] if finite else 0
+    return {"k": int(min_index), "values": values, "min_index": int(min_index)}
+
+
 def varimax(loadings: np.ndarray, gamma: float = 1.0,
             max_iter: int = 500, tol: float = 1e-6) -> np.ndarray:
     """Kaiser 정규화 Varimax 직교회전. 단순구조를 최대화한다.
@@ -207,10 +321,11 @@ def promax(loadings: np.ndarray, power: int = 4) -> tuple:
     vn = v / h[:, None]
     target = vn * np.abs(vn) ** (power - 1)      # sign(vn)·|vn|^power
     coef = np.linalg.lstsq(vn, target, rcond=None)[0]
-    inv = np.linalg.inv(coef.T @ coef)
-    coef = coef @ np.diag(np.sqrt(np.diag(inv)))
+    # coef가 특이(예: PAF에서 요인 수 과다로 0 적재 열 발생)하면 inv가 죽으므로 pinv로 대체.
+    inv = _safe_inv(coef.T @ coef)
+    coef = coef @ np.diag(np.sqrt(np.clip(np.diag(inv), 0.0, None)))
     pattern = (vn @ coef) * h[:, None]           # 정규화 복원
-    cinv = np.linalg.inv(coef)
+    cinv = _safe_inv(coef)
     phi = cinv @ cinv.T
     return pattern, phi
 
@@ -273,6 +388,57 @@ def corrected_item_total_by_group(x: np.ndarray, groups: Sequence[int]) -> np.nd
         if np.std(rest) == 0 or np.std(x[:, i]) == 0:
             continue
         out[i] = np.corrcoef(x[:, i], rest)[0, 1]
+    return out
+
+
+def cronbach_alpha(x: np.ndarray) -> Optional[float]:
+    """Cronbach's α(내적일관성 신뢰도) — 표본 원점수 기반.
+
+    α = (k/(k−1))·(1 − Σσ²_i / σ²_total),  σ²는 표본분산(ddof=1).
+    문항이 2개 미만이거나 총점 분산이 0이면 정의 불가(None).
+    적재 기반 ω(PCA 낙관적)와 달리 실제 응답분산에서 직접 계산해 함께 보고하기 좋다.
+    """
+    n, k = x.shape
+    if k < 2 or n < 2:
+        return None
+    item_var = x.var(axis=0, ddof=1)
+    total_var = float(x.sum(axis=1).var(ddof=1))
+    if total_var <= 0:
+        return None
+    return float(k / (k - 1.0) * (1.0 - item_var.sum() / total_var))
+
+
+def alpha_by_group(x: np.ndarray, groups: Sequence[int], k: int) -> Dict[int, Optional[float]]:
+    """요인(하위척도)별 Cronbach's α. 각 요인에 argmax 배정된 문항들로 계산.
+
+    요인 내 문항이 2개 미만이면 None. ω와 나란히 표시해 신뢰도를 이중 확인한다.
+    """
+    groups = np.asarray(list(groups))
+    out: Dict[int, Optional[float]] = {}
+    for f in range(k):
+        idx = np.where(groups == f)[0]
+        out[f] = cronbach_alpha(x[:, idx]) if idx.size >= 2 else None
+    return out
+
+
+def subscale_scores(x: np.ndarray, groups: Sequence[int], k: int,
+                    method: str = "sum") -> np.ndarray:
+    """요인(하위척도)별 응답자 점수 (n, k). 각 요인에 배정된 문항의 합 또는 평균.
+
+    groups[i]는 문항 i의 소속 요인(0-based, |적재|최대 배정). 역문항이 이미 재점수화된
+    행렬 x를 받으므로 방향이 올바르다. 어떤 문항도 없는 요인 열은 NaN.
+    method: "sum"(합산점수, 기본) 또는 "mean"(평균점수).
+    """
+    if method not in ("sum", "mean"):
+        raise ValueError("method는 'sum' 또는 'mean'이어야 합니다.")
+    groups = np.asarray(list(groups))
+    out = np.full((x.shape[0], k), np.nan)
+    for f in range(k):
+        idx = np.where(groups == f)[0]
+        if idx.size == 0:
+            continue
+        sub = x[:, idx]
+        out[:, f] = sub.sum(axis=1) if method == "sum" else sub.mean(axis=1)
     return out
 
 

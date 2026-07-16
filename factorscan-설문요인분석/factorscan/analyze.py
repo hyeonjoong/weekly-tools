@@ -5,7 +5,7 @@ from typing import Dict, List, Optional
 
 import numpy as np
 
-from . import efa
+from . import efa, polychoric
 from .dataio import Prepared
 
 # 진단 임계값(관례적 기준)
@@ -31,8 +31,18 @@ def analyze(prep: Prepared,
             rotation: str = "varimax",
             parallel_iter: int = 100,
             seed: int = 42,
-            min_loading: float = 0.40) -> Dict:
-    """전처리된 데이터에 EFA/타당도 진단을 수행하고 결과 딕셔너리를 반환."""
+            min_loading: float = 0.40,
+            extraction: str = "pca",
+            correlation: str = "pearson") -> Dict:
+    """전처리된 데이터에 EFA/타당도 진단을 수행하고 결과 딕셔너리를 반환.
+
+    extraction: "pca"(주성분, SPSS 기본) 또는 "paf"(주축분해, 공통요인 모형).
+    correlation: "pearson"(기본) 또는 "polychoric"(순서형 리커트용 잠재상관).
+    """
+    if extraction not in ("pca", "paf"):
+        raise ValueError("extraction은 'pca' 또는 'paf'여야 합니다.")
+    if correlation not in ("pearson", "polychoric"):
+        raise ValueError("correlation은 'pearson' 또는 'polychoric'이어야 합니다.")
     names = prep.names
     x = prep.matrix
     n, p = x.shape
@@ -43,7 +53,9 @@ def analyze(prep: Prepared,
         "n_total": prep.n_total,
         "n_used": prep.n_used,
         "n_dropped": prep.n_dropped,
-        "extraction": "principal_component",  # 추출 방식(SPSS 기본과 동일)
+        # 추출 방식: pca=주성분(SPSS 기본), paf=주축분해(공통요인)
+        "extraction": "principal_component" if extraction == "pca" else "principal_axis",
+        "correlation": correlation,
         "warnings": [],
         "notes": [],
     }
@@ -76,9 +88,27 @@ def analyze(prep: Prepared,
         result["warnings"].append(
             f"표본이 작습니다(n={n}, 문항당 {n / p:.1f}명). 문항당 5~10명 이상을 권장합니다.")
 
-    r = efa.correlation_matrix(x)
+    if correlation == "polychoric":
+        # 순서형 적정성 진단: 범주가 너무 많으면(연속형에 가까움) 폴리코릭이 부적절·과도.
+        max_cat = polychoric.max_categories(x)
+        non_int = int(np.sum(np.abs(x - np.rint(x)) > 1e-8))
+        if non_int > 0:
+            result["warnings"].append(
+                f"polychoric 상관은 정수 코드 순서형(리커트) 문항을 가정합니다 — 정수가 아닌 값 "
+                f"{non_int}개를 반올림해 범주로 처리했습니다. 연속형이면 --correlation pearson을 쓰세요.")
+        if max_cat > 15:
+            result["warnings"].append(
+                f"문항 범주 수가 많습니다(최대 {max_cat}개). 폴리코릭은 소수 범주(대개 ≤7) 순서형에 적합하며 "
+                f"범주가 많으면 느리고 이득이 적습니다 — 연속형이면 --correlation pearson을 권장합니다.")
+        r = polychoric.polychoric_matrix(x)
+    else:
+        r = efa.correlation_matrix(x)
     result["correlation_matrix"] = r
     pos_def = efa.is_positive_definite(r)
+    if correlation == "polychoric" and not pos_def:
+        result["warnings"].append(
+            "폴리코릭 상관행렬이 양의 정부호가 아닙니다(쌍별 추정의 흔한 특성) — KMO/Bartlett가 생략될 수 "
+            "있습니다. 표본을 키우거나 문항 수를 줄여 보세요.")
 
     # 상관행렬 행렬식(다중공선성 진단): 0에 가까우면 문항 간 과도한 중복/완전상관 신호.
     with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
@@ -117,6 +147,18 @@ def analyze(prep: Prepared,
     result["prop_variance"] = eig.prop_variance.tolist()
     result["cum_variance"] = eig.cum_variance.tolist()
     result["kaiser_k"] = eig.kaiser_k
+
+    # --- Velicer MAP(최소평균편상관): Kaiser·평행분석과 독립적인 제3의 유지 근거 ---
+    # 편상관 기반이라 양의 정부호 상관행렬에서만 신뢰 가능(특이행렬이면 생략).
+    result["map_k"] = None
+    result["map_values"] = None
+    if pos_def and p >= 3:
+        try:
+            mp = efa.velicer_map(r)
+            result["map_k"] = mp["k"]
+            result["map_values"] = mp["values"]
+        except np.linalg.LinAlgError:
+            pass
 
     # 평행분석 관련 키는 생략/불가 시에도 항상 존재(null)하도록 초기화 — JSON 스키마 안정성.
     pa_k = None
@@ -161,7 +203,26 @@ def analyze(prep: Prepared,
             + " 필요하면 --n-factors 로 직접 지정하세요.")
 
     # --- 적재량 / 회전 / 공통성 ---
-    raw = efa.component_loadings(r, k)
+    if extraction == "paf":
+        paf = efa.paf_loadings(r, k)
+        raw = paf.loadings
+        if not paf.converged:
+            result["warnings"].append(
+                f"주축분해(PAF) 공통성이 {paf.n_iter}회 반복에서 수렴하지 않았습니다 — "
+                f"요인 수(--n-factors)를 줄이거나 표본을 확인하세요.")
+        if paf.heywood:
+            result["warnings"].append(
+                "주축분해(PAF) 중 공통성이 1에 도달/초과하는 Heywood 케이스가 발생해 1로 절단했습니다 — "
+                "요인 수 과다·표본 부족·문항 다중공선성의 신호일 수 있습니다.")
+        # 요인 수가 추출 가능한 공통요인 수를 넘으면 0(빈) 요인 열이 생긴다 → 명확히 안내.
+        col_norm = np.sqrt((raw ** 2).sum(axis=0))
+        n_good = int(np.sum(col_norm >= 1e-8))
+        if n_good < k:
+            result["warnings"].append(
+                f"요인 수(k={k})가 주축분해로 추출 가능한 공통요인 수(≈{n_good})를 초과해 "
+                f"빈(0 적재) 요인이 생겼습니다 — --n-factors를 {max(1, n_good)} 이하로 줄이세요.")
+    else:
+        raw = efa.component_loadings(r, k)
     phi = None                      # 요인 상관행렬(사교회전/추정)
     if k >= 2 and rotation == "varimax":
         rotated = efa.varimax(raw)
@@ -243,6 +304,9 @@ def analyze(prep: Prepared,
     # 직교회전이면 structure==loadings 이므로 값이 동일하다.
     omega = efa.omega_by_group(structure, groups)
     result["omega"] = [omega.get(f) for f in range(k)]
+    # 요인별 Cronbach's α — 표본 원점수 기반(적재 낙관적 ω와 나란히 보고).
+    alpha = efa.alpha_by_group(x, groups, k)
+    result["alpha"] = [alpha.get(f) for f in range(k)]
 
     # --- 문항별 진단 플래그 ---
     msa = result["kmo"]["per_item"] if result.get("kmo") else [None] * p
