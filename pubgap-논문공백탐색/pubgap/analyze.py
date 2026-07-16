@@ -9,6 +9,10 @@
   '함께'는 기대보다 훨씬 드물게 나타나면(관측/기대 = lift 가 낮으면),
   아직 덜 엮인 조합 → 논문 각도 후보. (연관규칙의 lift, 문헌기반발견/Swanson
   ABC 모델과 같은 계열의 휴리스틱.)
+- **근거 공백(evidence gap)**: 주제 조합이 아니라 *연구 설계* 축의 공백.
+  PubMed PublicationType 으로 각 논문의 근거 수준(메타분석/RCT/임상시험/관찰/
+  증례/종설)을 판정해, "논문은 많은데 개입연구(RCT·임상시험)는 거의 없는 주제"를
+  찾는다. 임상·제약 연구자에게 이는 곧 '시험을 설계할 자리'다.
 """
 
 from __future__ import annotations
@@ -549,3 +553,199 @@ def _cagr(counts: Dict[int, int]) -> Optional[float]:
     if span <= 0 or first <= 0 or last <= 0:
         return None
     return (last / first) ** (1.0 / span) - 1.0
+
+
+# --------------------------------------------------------------------------- #
+# 근거 수준(연구 설계) — PublicationType 기반
+# --------------------------------------------------------------------------- #
+# PubMed PublicationType → 근거 계층(tier). 한 논문에 여러 타입이 붙으므로
+# (예: RCT 는 보통 'Randomized Controlled Trial' + 'Clinical Trial' + 'Journal Article')
+# **가장 높은 tier 하나**로 대표시킨다. 아래 순서가 곧 우선순위(위가 강함).
+#
+# 근거: PubMed 가 실제로 색인하는 PublicationType 문자열만 사용한다(추측 금지).
+# 목록: https://www.nlm.nih.gov/mesh/pubtypes.html
+EVIDENCE_TIERS: Tuple[Tuple[str, str, frozenset], ...] = (
+    ("systematic_review", "메타분석/체계적 문헌고찰", frozenset({
+        "Meta-Analysis", "Systematic Review",
+    })),
+    ("rct", "무작위배정 임상시험(RCT)", frozenset({
+        "Randomized Controlled Trial",
+    })),
+    ("trial", "기타 임상시험(비무작위·초기상)", frozenset({
+        "Clinical Trial", "Controlled Clinical Trial",
+        "Clinical Trial, Phase I", "Clinical Trial, Phase II",
+        "Clinical Trial, Phase III", "Clinical Trial, Phase IV",
+        "Pragmatic Clinical Trial", "Adaptive Clinical Trial",
+        "Equivalence Trial", "Clinical Trial, Veterinary",
+    })),
+    ("observational", "관찰연구", frozenset({
+        "Observational Study", "Observational Study, Veterinary",
+        "Comparative Study", "Twin Study", "Validation Study",
+    })),
+    ("case_report", "증례보고", frozenset({
+        "Case Reports",
+    })),
+    ("review", "종설/지침(비1차연구)", frozenset({
+        "Review", "Scoping Review", "Guideline", "Practice Guideline",
+        "Consensus Development Conference",
+        "Consensus Development Conference, NIH",
+    })),
+)
+
+# 개입(interventional) 연구 = 연구자가 처치를 배정한 1차 연구. '근거 공백'의 분자.
+INTERVENTIONAL_TIERS = frozenset({"rct", "trial"})
+
+_TIER_RANK: Dict[str, int] = {tier: i for i, (tier, _, _) in enumerate(EVIDENCE_TIERS)}
+_TIER_LABEL: Dict[str, str] = {tier: label for tier, label, _ in EVIDENCE_TIERS}
+_TIER_LABEL["other"] = "기타/미분류"
+_TYPE_TO_TIER: Dict[str, str] = {
+    pt: tier for tier, _, types in EVIDENCE_TIERS for pt in types
+}
+
+
+def evidence_tier(pub_types: Sequence[str]) -> str:
+    """PublicationType 목록 → 대표 근거 tier(가장 높은 하나). 해당 없으면 'other'.
+
+    'Journal Article'·'English Abstract'·'Research Support, ...' 처럼 연구 설계가
+    아닌 태그만 달린 논문은 'other'. 타입이 아예 없으면(다른 서지 포맷에서 흔함)
+    역시 'other' 지만, 호출부는 `pub_types` 가 빈 논문을 **분석에서 제외**해야 한다
+    (설계 미상과 '설계가 other' 는 다른 것 — evidence_profile 참고).
+    """
+    best: Optional[str] = None
+    for pt in pub_types:
+        tier = _TYPE_TO_TIER.get(pt.strip())
+        if tier is None:
+            continue
+        if best is None or _TIER_RANK[tier] < _TIER_RANK[best]:
+            best = tier
+    return best or "other"
+
+
+def tier_label(tier: str) -> str:
+    """tier 코드 → 한국어 표시 이름."""
+    return _TIER_LABEL.get(tier, tier)
+
+
+def evidence_profile(articles: Sequence[Article]) -> Dict:
+    """코퍼스의 연구 설계 구성(근거 지형).
+
+    **설계 미상 논문은 분모에서 뺀다.** PublicationType 이 없는 논문(RIS 등 일부
+    서지 포맷, 혹은 아직 색인 전)을 'other' 로 세면 "이 분야엔 RCT 가 없다"는
+    잘못된 결론이 나온다. 그래서 `n_typed`(설계 정보를 가진 논문 수)를 분모로 쓰고
+    `coverage` 로 그 비율을 함께 보고해, 리포트가 커버리지를 밝히도록 한다.
+
+    반환 dict:
+      n_articles, n_typed, coverage,
+      tiers: [{tier, label, count, share}] — EVIDENCE_TIERS 순서 + 'other',
+      n_interventional, interventional_share
+    """
+    n = len(articles)
+    typed = [a for a in articles if a.pub_types]
+    n_typed = len(typed)
+    counts: Counter = Counter(evidence_tier(a.pub_types) for a in typed)
+    order = [t for t, _, _ in EVIDENCE_TIERS] + ["other"]
+    tiers = [
+        {
+            "tier": t,
+            "label": tier_label(t),
+            "count": counts.get(t, 0),
+            "share": (counts.get(t, 0) / n_typed) if n_typed else 0.0,
+        }
+        for t in order
+    ]
+    n_int = sum(counts.get(t, 0) for t in INTERVENTIONAL_TIERS)
+    return {
+        "n_articles": n,
+        "n_typed": n_typed,
+        "coverage": (n_typed / n) if n else 0.0,
+        "tiers": tiers,
+        "n_interventional": n_int,
+        "interventional_share": (n_int / n_typed) if n_typed else 0.0,
+    }
+
+
+@dataclass
+class TopicEvidence:
+    """한 주제의 '개입연구 밀도'와, 코퍼스 나머지 대비 유의성."""
+
+    term: str
+    n_articles: int          # 설계 정보를 가진 논문 중 이 주제를 단 편수
+    n_interventional: int    # 그 중 RCT/임상시험 편수
+    share: float             # n_interventional / n_articles
+    rest_n: int              # 이 주제를 달지 않은(설계 정보 보유) 논문 수
+    rest_interventional: int
+    rest_share: float
+    p_value: float           # Fisher 정확검정 양측(주제 × 개입여부, 나머지 대비)
+    q_value: float = 1.0     # 검정한 주제 전체에 BH-FDR 보정
+    tier_counts: Dict[str, int] = field(default_factory=dict)
+
+
+def topic_evidence(
+    articles: Sequence[Article],
+    top_k: int = 12,
+    min_articles: int = 3,
+) -> List[TopicEvidence]:
+    """빈출 상위 top_k 주제별 개입연구(RCT·임상시험) 밀도 — 낮은 순 정렬.
+
+    "논문은 충분히 많은데 개입연구는 기대보다 적은 주제" = 시험을 설계할 자리.
+
+    - **설계 정보(PublicationType)가 있는 논문만** 대상으로 한다. 그래야 '색인이
+      안 됐다'와 '시험이 없다'가 섞이지 않는다.
+    - 각 주제에 대해 2×2 [[주제&개입, 주제&비개입], [나머지&개입, 나머지&비개입]]
+      Fisher 정확검정(양측) → 코퍼스 평균 대비 유의하게 적은지/많은지.
+    - 검정한 모든 주제에 BH-FDR 를 적용해 q-value 를 채운다(다중검정 보정).
+    - min_articles: 이 편수 미만인 주제는 통계가 무의미하므로 제외.
+    - 정렬: share 오름차순(개입연구가 가장 비어 있는 주제 우선), 동률이면 편수 많은 순.
+    """
+    typed = [a for a in articles if a.pub_types]
+    if not typed or top_k <= 0:
+        return []
+
+    is_int = [evidence_tier(a.pub_types) in INTERVENTIONAL_TIERS for a in typed]
+    total_int = sum(is_int)
+    n_typed = len(typed)
+
+    freq = _mesh_freq(typed)
+    top_terms = [t for t, _ in _ranked(freq)[:top_k]]
+    term_set = set(top_terms)
+
+    n_by_term: Counter = Counter()
+    int_by_term: Counter = Counter()
+    tiers_by_term: Dict[str, Counter] = {t: Counter() for t in top_terms}
+    for art, interventional in zip(typed, is_int):
+        tier = evidence_tier(art.pub_types)
+        for t in set(art.mesh) & term_set:
+            n_by_term[t] += 1
+            tiers_by_term[t][tier] += 1
+            if interventional:
+                int_by_term[t] += 1
+
+    out: List[TopicEvidence] = []
+    for term in top_terms:
+        n_t = n_by_term.get(term, 0)
+        if n_t < min_articles:
+            continue
+        i_t = int_by_term.get(term, 0)
+        rest_n = n_typed - n_t
+        rest_i = total_int - i_t
+        p = fisher_exact_two_sided(i_t, n_t - i_t, rest_i, rest_n - rest_i)
+        out.append(
+            TopicEvidence(
+                term=term,
+                n_articles=n_t,
+                n_interventional=i_t,
+                share=i_t / n_t,
+                rest_n=rest_n,
+                rest_interventional=rest_i,
+                rest_share=(rest_i / rest_n) if rest_n else 0.0,
+                p_value=p,
+                tier_counts=dict(tiers_by_term[term]),
+            )
+        )
+
+    qs = benjamini_hochberg([t.p_value for t in out])
+    for t, q in zip(out, qs):
+        t.q_value = q
+
+    out.sort(key=lambda t: (t.share, -t.n_articles, t.term))
+    return out
