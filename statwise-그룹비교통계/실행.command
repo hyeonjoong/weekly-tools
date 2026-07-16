@@ -35,4 +35,10 @@ echo ""
 run examples/isi_change_by_dose.csv --wide
 
 echo ""
+echo "### 예제 3) 불면증(ISI) 치료 전/후 — 대응 표본 (같은 대상 pre vs post)"
+echo "\$ statwise examples/isi_pre_post_paired.csv --paired --value isi --group time --id subject"
+echo ""
+run examples/isi_pre_post_paired.csv --paired --value isi --group time --id subject
+
+echo ""
 read -p "엔터를 누르면 창이 닫힙니다..."
