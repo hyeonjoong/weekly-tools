@@ -6,11 +6,12 @@ references before they reach a reviewer.
 
 __version__ = "0.1.0"
 
-from .core import CrossrefClient, check_reference, CheckResult
+from .core import CrossrefClient, PubMedClient, check_reference, CheckResult
 from .parsers import parse_references, Reference
 
 __all__ = [
     "CrossrefClient",
+    "PubMedClient",
     "check_reference",
     "CheckResult",
     "parse_references",

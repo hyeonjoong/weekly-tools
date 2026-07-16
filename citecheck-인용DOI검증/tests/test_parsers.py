@@ -189,3 +189,266 @@ def test_unterminated_midfile_swallows_following_and_is_counted():
     keys = [r.key for r in refs]
     assert "a" in keys            # entry before the break survives
     assert count_malformed_entries(bib) >= 1  # the break is reported
+
+
+# --- RIS parsing (EndNote / Zotero / Mendeley) ------------------------------
+
+RIS = """TY  - JOUR
+AU  - Ioannidis, John P. A.
+AU  - Smith, Jane
+TI  - Why Most Published Research Findings Are False
+JO  - PLoS Medicine
+PY  - 2005
+DO  - 10.1371/journal.pmed.0020124
+AN  - 16060722
+DB  - PubMed
+ER  - 
+
+TY  - JOUR
+AU  - Kim, Hyeon
+T1  - A second paper
+T2  - The Lancet
+Y1  - 2021/03/15/
+DO  - https://doi.org/10.1016/S0140-6736(97)11096-0
+ER  - 
+"""
+
+
+def test_parse_ris_basic():
+    from citecheck.parsers import parse_ris, detect_format
+    assert detect_format(RIS) == "ris"
+    refs = parse_ris(RIS)
+    assert len(refs) == 2
+    a, b = refs
+    assert a.doi == "10.1371/journal.pmed.0020124"
+    assert a.author == "Ioannidis"
+    assert a.year == 2005
+    assert a.journal == "PLoS Medicine"
+    assert a.pmid == "16060722"  # AN trusted because DB is PubMed
+    assert "Why Most" in a.title
+    # Second: T1/T2 tags, DOI given as URL, year with slashes.
+    assert b.doi == "10.1016/s0140-6736(97)11096-0"
+    assert b.author == "Kim"
+    assert b.year == 2021
+    assert b.journal == "The Lancet"
+
+
+def test_ris_an_not_trusted_without_pubmed_provider():
+    from citecheck.parsers import parse_ris
+    ris = "TY  - JOUR\nTI  - X\nAN  - 999\nDB  - Embase\nER  - \n"
+    assert parse_ris(ris)[0].pmid is None
+
+
+def test_ris_continuation_line():
+    from citecheck.parsers import parse_ris
+    ris = "TY  - JOUR\nTI  - A very long title that\n      wraps onto two lines\nER  - \n"
+    assert parse_ris(ris)[0].title == "A very long title that wraps onto two lines"
+
+
+def test_ris_missing_er_still_parsed():
+    from citecheck.parsers import parse_ris
+    ris = "TY  - JOUR\nTI  - No end tag\nDO  - 10.1/x\n"
+    refs = parse_ris(ris)
+    assert len(refs) == 1 and refs[0].doi == "10.1/x"
+
+
+def test_ris_ignores_preamble():
+    from citecheck.parsers import parse_ris
+    ris = "Some junk\nProvider: Foo\nTY  - JOUR\nDO  - 10.1/y\nER  - \n"
+    refs = parse_ris(ris)
+    assert len(refs) == 1 and refs[0].doi == "10.1/y"
+
+
+# --- CSL-JSON parsing (Zotero / Better BibTeX / pandoc) ---------------------
+
+CSL = """[
+  {"id": "ioannidis2005", "type": "article-journal",
+   "DOI": "10.1371/journal.pmed.0020124",
+   "title": "Why Most Published Research Findings Are False",
+   "container-title": "PLoS Medicine",
+   "author": [{"family": "Ioannidis", "given": "John P. A."}],
+   "issued": {"date-parts": [[2005, 8, 30]]},
+   "PMID": "16060722"},
+  {"id": "book1", "type": "book", "title": "No DOI Here",
+   "author": [{"literal": "William Strunk"}],
+   "issued": {"date-parts": [[1999]]}}
+]"""
+
+
+def test_parse_csl_json_basic():
+    from citecheck.parsers import parse_csl_json, detect_format
+    assert detect_format(CSL) == "csljson"
+    refs = parse_csl_json(CSL)
+    assert len(refs) == 2
+    a, b = refs
+    assert a.doi == "10.1371/journal.pmed.0020124"
+    assert a.author == "Ioannidis"
+    assert a.year == 2005
+    assert a.journal == "PLoS Medicine"
+    assert a.pmid == "16060722"
+    assert a.key == "ioannidis2005"
+    assert b.doi is None
+    assert b.author == "Strunk"  # from literal name
+    assert b.year == 1999
+
+
+def test_csl_single_object_accepted():
+    from citecheck.parsers import parse_csl_json, detect_format
+    one = '{"DOI": "10.1/z", "title": "T", "type": "article-journal"}'
+    assert detect_format(one) == "csljson"
+    refs = parse_csl_json(one)
+    assert len(refs) == 1 and refs[0].doi == "10.1/z"
+
+
+def test_csl_container_title_as_list():
+    from citecheck.parsers import parse_csl_json
+    one = '[{"DOI":"10.1/z","title":["T"],"container-title":["Nature"]}]'
+    r = parse_csl_json(one)[0]
+    assert r.title == "T" and r.journal == "Nature"
+
+
+def test_non_citation_json_not_detected_as_csl():
+    from citecheck.parsers import detect_format
+    # A JSON config that is not a reference list must fall through, not crash.
+    assert detect_format('{"host": "localhost", "port": 8080}') != "csljson"
+
+
+def test_malformed_json_falls_back_to_text():
+    from citecheck.parsers import detect_format, parse_references
+    bad = '[{"DOI": "10.1/x", title: broken}]'  # invalid JSON
+    assert detect_format(bad) != "csljson"
+    # Must not raise.
+    parse_references(bad)
+
+
+# --- PMID extraction --------------------------------------------------------
+
+def test_find_pmid_labelled_only():
+    from citecheck.parsers import find_pmid
+    assert find_pmid("PMID: 16060722") == "16060722"
+    assert find_pmid("pmid16060722") == "16060722"
+    assert find_pmid("https://pubmed.ncbi.nlm.nih.gov/16060722/") == "16060722"
+    assert find_pmid("PMID: 016060722") == "16060722"  # leading zeros stripped
+    assert find_pmid("enrolled 2000 patients, page 1234") is None  # not labelled
+    assert find_pmid("no id here") is None
+
+
+def test_bibtex_pmid_field():
+    from citecheck.parsers import parse_bibtex
+    refs = parse_bibtex("@article{k, title={T}, doi={10.1/x}, pmid={16060722}}")
+    assert refs[0].pmid == "16060722"
+
+
+def test_bibtex_pmid_from_note():
+    from citecheck.parsers import parse_bibtex
+    refs = parse_bibtex("@article{k, title={T}, doi={10.1/x}, note={PMID: 16060722}}")
+    assert refs[0].pmid == "16060722"
+
+
+def test_bibtex_journal_extracted():
+    from citecheck.parsers import parse_bibtex
+    refs = parse_bibtex("@article{k, title={T}, journal={The Lancet}, doi={10.1/x}}")
+    assert refs[0].journal == "The Lancet"
+
+
+# --- hardening round 1 regressions ------------------------------------------
+
+def test_biblatex_date_and_journaltitle_read():
+    # Better BibTeX / biblatex exports use `date` and `journaltitle`.
+    from citecheck.parsers import parse_bibtex
+    r = parse_bibtex("@article{k, title={T}, journaltitle={The Lancet}, "
+                     "date={2020-03-14}, doi={10.1/x}}")[0]
+    assert r.year == 2020
+    assert r.journal == "The Lancet"
+
+
+def test_year_field_preferred_over_date():
+    from citecheck.parsers import parse_bibtex
+    r = parse_bibtex("@article{k, year={1999}, date={2020-03-14}, doi={10.1/x}}")[0]
+    assert r.year == 1999
+
+
+def test_find_pmid_rejects_zero():
+    from citecheck.parsers import find_pmid
+    assert find_pmid("PMID: 0") is None
+    assert find_pmid("PMID: 0000") is None
+
+
+def test_ris_false_trigger_on_prose_is_text():
+    # A lone "TY  - ..." line in plain prose must NOT route the file to RIS.
+    from citecheck.parsers import detect_format
+    prose = "TY  - see the figure caption\nSmith J. A study. Lancet. 2020. 10.1/x"
+    assert detect_format(prose) == "text"
+
+
+def test_ris_still_detected_without_er_when_enough_tags():
+    from citecheck.parsers import detect_format
+    ris = "TY  - JOUR\nTI  - No end tag here\nDO  - 10.1/x\n"
+    assert detect_format(ris) == "ris"
+
+
+def test_deeply_nested_json_does_not_crash():
+    from citecheck.parsers import detect_format, parse_references
+    s = "[" * 60000 + "]" * 60000
+    # Must degrade gracefully, never raise RecursionError.
+    assert detect_format(s) == "text"
+    parse_references(s)
+
+
+def test_csl_pmid_zero_and_bool_rejected():
+    from citecheck.parsers import parse_csl_json
+    assert parse_csl_json('[{"DOI":"10.1/x","PMID":0}]')[0].pmid is None
+    assert parse_csl_json('[{"DOI":"10.1/x","PMID":true}]')[0].pmid is None
+
+
+# --- previously-untested branches (from security/test review) ---------------
+
+def test_csl_year_from_raw_and_alternate_keys():
+    from citecheck.parsers import parse_csl_json
+    assert parse_csl_json('[{"DOI":"10.1/x","issued":{"raw":"published 2005"}}]')[0].year == 2005
+    assert parse_csl_json('[{"DOI":"10.1/x","published-print":{"date-parts":[[2011,2]]}}]')[0].year == 2011
+    assert parse_csl_json('[{"DOI":"10.1/x","issued":{"literal":"2018"}}]')[0].year == 2018
+
+
+def test_csl_pmid_from_note_and_integer():
+    from citecheck.parsers import parse_csl_json
+    assert parse_csl_json('[{"DOI":"10.1/x","note":"PMID: 555"}]')[0].pmid == "555"
+    assert parse_csl_json('[{"DOI":"10.1/x","PMID":16060722}]')[0].pmid == "16060722"
+
+
+def test_csl_non_list_top_level_is_empty():
+    from citecheck.parsers import parse_csl_json
+    assert parse_csl_json("123") == []
+    assert parse_csl_json('"just a string"') == []
+
+
+def test_csl_skips_non_dict_items():
+    from citecheck.parsers import parse_csl_json
+    refs = parse_csl_json('[{"DOI":"10.1/x"}, 42, null, "str"]')
+    assert len(refs) == 1 and refs[0].doi == "10.1/x"
+
+
+def test_ris_pmid_from_free_text_note_without_trusted_an():
+    from citecheck.parsers import parse_ris
+    ris = "TY  - JOUR\nTI  - X\nN1  - See PMID: 16060722 for details\nER  - \n"
+    assert parse_ris(ris)[0].pmid == "16060722"
+
+
+def test_pmid_regex_no_redos():
+    import time
+    from citecheck.parsers import find_pmid
+    start = time.time()
+    find_pmid("pmid" + " " * 100000)  # no trailing digit
+    assert time.time() - start < 1.0  # linear, not O(N^2)
+
+
+def test_guess_text_author_is_linear():
+    import time
+    from citecheck.parsers import _guess_text_author
+    start = time.time()
+    _guess_text_author(" " * 300000 + "X")  # pathological leading whitespace
+    assert time.time() - start < 1.0
+    # Behaviour preserved across the usual forms.
+    assert _guess_text_author("Kim H, Lee S.") == "Kim"
+    assert _guess_text_author("[12] Smith J") == "Smith"
+    assert _guess_text_author("1. Jones K") == "Jones"

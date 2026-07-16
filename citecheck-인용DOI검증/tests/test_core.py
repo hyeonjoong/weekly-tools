@@ -373,3 +373,139 @@ def test_text_title_check_flags_unrelated_title():
     )
     res = check_reference(ref, make_client({"10.1/x": msg}))
     assert any("wrong DOI" in f.message for f in res.findings)
+
+
+# --- journal / container mismatch -------------------------------------------
+
+def test_journal_mismatch_warns():
+    msg = dict(GOOD, **{"container-title": ["The Lancet"]})
+    ref = Reference(raw="", doi="10.1371/journal.pone.0312345",
+                    title=GOOD["title"][0], author="Kim", year=2024, journal="Nature")
+    res = check_reference(ref, make_client({ref.doi: msg}))
+    assert any("Journal mismatch" in f.message for f in res.findings)
+
+
+def test_journal_abbreviation_not_flagged():
+    msg = dict(GOOD, **{"container-title": ["The New England Journal of Medicine"]})
+    ref = Reference(raw="", doi="10.1371/journal.pone.0312345",
+                    title=GOOD["title"][0], author="Kim", year=2024, journal="N Engl J Med")
+    res = check_reference(ref, make_client({ref.doi: msg}))
+    assert not any("Journal mismatch" in f.message for f in res.findings)
+
+
+def test_journal_leading_article_not_flagged():
+    msg = dict(GOOD, **{"container-title": ["The Lancet"]})
+    ref = Reference(raw="", doi="10.1371/journal.pone.0312345",
+                    title=GOOD["title"][0], author="Kim", year=2024, journal="Lancet")
+    res = check_reference(ref, make_client({ref.doi: msg}))
+    assert not any("Journal mismatch" in f.message for f in res.findings)
+
+
+def test_journal_matches_short_container_title():
+    msg = dict(GOOD, **{"container-title": ["Journal of Clinical Oncology"],
+                        "short-container-title": ["J Clin Oncol"]})
+    ref = Reference(raw="", doi="10.1371/journal.pone.0312345",
+                    title=GOOD["title"][0], author="Kim", year=2024, journal="J Clin Oncol")
+    res = check_reference(ref, make_client({ref.doi: msg}))
+    assert not any("Journal mismatch" in f.message for f in res.findings)
+
+
+def test_journal_check_skipped_for_heuristic_refs():
+    # Free-text refs never carry a parsed journal, and heuristic refs skip the
+    # structured comparisons entirely — no journal false alarm.
+    msg = dict(GOOD, **{"container-title": ["The Lancet"]})
+    ref = Reference(raw="Nature paper", doi="10.1371/journal.pone.0312345",
+                    journal="Nature", heuristic_fields=True)
+    res = check_reference(ref, make_client({ref.doi: msg}))
+    assert not any("Journal mismatch" in f.message for f in res.findings)
+
+
+def test_no_doi_message_mentions_pmid():
+    ref = Reference(raw="", pmid="16060722")
+    res = check_reference(ref, make_client({}))
+    assert res.status == WARNING
+    assert "16060722" in res.findings[0].message
+
+
+# --- journal matcher unit cases ---------------------------------------------
+
+import pytest as _pytest_j
+
+
+@_pytest_j.mark.parametrize("cited,cand,should_match", [
+    ("Lancet", "The Lancet", True),
+    ("The Lancet", "Lancet", True),
+    ("PLoS ONE", "PLOS ONE", True),
+    ("J Clin Oncol", "Journal of Clinical Oncology", True),
+    ("N Engl J Med", "The New England Journal of Medicine", True),
+    ("Nature", "The Lancet", False),
+    ("Cancer", "Cancer Research", False),
+    ("Circulation", "Circulation Research", False),
+])
+def test_journal_matcher_cases(cited, cand, should_match):
+    from citecheck.core import _journal_matches
+    assert _journal_matches(cited, [cand], 0.82) is should_match
+
+
+@_pytest_j.mark.parametrize("cited,full", [
+    ("Am J Med", "American Journal of Medicine"),
+    ("Am J Cardiol", "American Journal of Cardiology"),
+    ("Br J Cancer", "British Journal of Cancer"),
+    ("Ann Intern Med", "Annals of Internal Medicine"),
+    ("Eur Heart J", "European Heart Journal"),
+    ("J Am Coll Cardiol", "Journal of the American College of Cardiology"),
+])
+def test_common_medical_abbreviations_not_flagged(cited, full):
+    # These short-token ISO-4 abbreviations must NOT read as journal mismatches.
+    from citecheck.core import _journal_matches
+    assert _journal_matches(cited, [full], 0.82) is True
+
+
+def test_single_token_abbrev_matches_short_container_title():
+    from citecheck.core import _journal_matches
+    # "Circ" only matches via short-container-title, which real records carry.
+    assert _journal_matches("Circ", ["Circulation", "Circ"], 0.82) is True
+    # But a distinct one-word journal is still a mismatch.
+    assert _journal_matches("Cancer", ["Cancer Research"], 0.82) is False
+
+
+def test_journal_matcher_empty_cited_returns_true():
+    from citecheck.core import _journal_matches
+    # Nothing comparable — must not emit a spurious mismatch.
+    assert _journal_matches("", ["Nature"], 0.82) is True
+    assert _journal_matches("   ", ["Nature"], 0.82) is True
+
+
+def test_is_abbrev_single_word_guard():
+    from citecheck.core import _is_abbrev_of
+    # A single abbreviation word must not match everything.
+    assert _is_abbrev_of("Med", "Medicine") is False
+
+
+@_pytest_j.mark.parametrize("cited,full", [
+    ("J Natl Cancer Inst", "Journal of the National Cancer Institute"),  # Natl (contraction)
+    ("Dtsch Arztebl Int", "Deutsches Arzteblatt International"),          # Dtsch (contraction)
+    ("Proc Natl Acad Sci", "Proceedings of the National Academy of Sciences"),
+])
+def test_contracted_iso4_abbreviations_not_flagged(cited, full):
+    # Abbreviations that DROP interior letters ("Natl"->"National") must match,
+    # not just prefix abbreviations.
+    from citecheck.core import _journal_matches
+    assert _journal_matches(cited, [full], 0.82) is True
+
+
+def test_word_contraction_helper():
+    from citecheck.core import _is_word_contraction
+    assert _is_word_contraction("natl", "national") is True   # drops interior
+    assert _is_word_contraction("engl", "england") is True    # prefix
+    assert _is_word_contraction("dtsch", "deutsche") is True
+    assert _is_word_contraction("xyz", "national") is False    # wrong first letter
+    assert _is_word_contraction("cat", "dog") is False
+
+
+def test_pnas_with_country_suffix_matches_via_short_container_title():
+    # A citation carrying the country suffix ("U S A") matches PNAS's real
+    # short-container-title even when the full container title omits it.
+    from citecheck.core import _journal_matches
+    cands = ["Proceedings of the National Academy of Sciences", "Proc Natl Acad Sci U S A"]
+    assert _journal_matches("Proc Natl Acad Sci U S A", cands, 0.82) is True

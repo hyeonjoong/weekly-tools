@@ -10,10 +10,12 @@ echo
 echo "  ※ 인터넷 연결이 필요합니다 (Crossref/doi.org 조회)."
 echo
 echo "[사용법]"
-echo "  python3 -m citecheck <참고문헌파일>       # .bib 또는 텍스트"
-echo "  python3 -m citecheck refs.bib --json      # 기계용 JSON 출력"
-echo "  python3 -m citecheck refs.bib --verbose   # 정상 항목까지 표시"
-echo "  python3 -m citecheck refs.bib --strict    # 경고도 실패로 처리"
+echo "  python3 -m citecheck <참고문헌파일>        # .bib / .ris / .json / 텍스트 (자동 인식)"
+echo "  python3 -m citecheck refs.bib --json       # 기계용 JSON 출력"
+echo "  python3 -m citecheck refs.bib --report csv # 엑셀로 열 CSV (공동저자 공유)"
+echo "  python3 -m citecheck refs.bib --pubmed     # PubMed로 철회/PMID↔DOI 교차검증"
+echo "  python3 -m citecheck refs.bib --verbose    # 정상 항목까지 표시"
+echo "  python3 -m citecheck refs.bib --strict     # 경고도 실패로 처리"
 echo
 echo "--------------------------------------------------"
 echo "[예시] 동봉된 examples/sample.bib 로 지금 실행해봅니다:"
