@@ -16,6 +16,10 @@ import xml.etree.ElementTree as ET
 
 _YEAR_RE = re.compile(r"(19|20)\d{2}")
 _ENTITY_DECL_RE = re.compile(r"<!ENTITY", re.IGNORECASE)
+# RIS 레코드의 필수 시작 태그. NBIB 와 구분하는 유일하게 신뢰할 만한 신호.
+_RIS_TY_RE = re.compile(r"^TY\s{2}-", re.MULTILINE)
+# RIS 필드 줄: 2자 태그 + 공백2 + '-' (값은 비어 있을 수 있음).
+_RIS_FIELD_RE = re.compile(r"^([A-Z][A-Z0-9])\s{2}-\s?(.*)$")
 
 
 @dataclass
@@ -29,6 +33,7 @@ class Article:
     mesh: List[str] = field(default_factory=list)
     mesh_major: List[str] = field(default_factory=list)  # 대표(별표) 주제만
     keywords: List[str] = field(default_factory=list)     # 저자 키워드(MeSH 보조)
+    pub_types: List[str] = field(default_factory=list)    # PublicationType(연구 설계)
 
     def has(self, term: str) -> bool:
         return term in self.mesh
@@ -102,6 +107,20 @@ def _extract_keywords(art: ET.Element) -> List[str]:
     return kws
 
 
+def _extract_pub_types(art: ET.Element) -> List[str]:
+    """PublicationType(연구 설계) 목록. PubMed 는 논문마다 여러 개를 단다.
+
+    예: ['Journal Article', 'Randomized Controlled Trial', 'Multicenter Study'].
+    임상 연구자에게 '이 주제에 RCT 가 있는가'는 MeSH 만큼 중요한 정보다.
+    """
+    pts: List[str] = []
+    for pt in art.findall(".//PublicationTypeList/PublicationType"):
+        txt = _text(pt)
+        if txt and txt not in pts:
+            pts.append(txt)
+    return pts
+
+
 def parse_efetch_xml(xml_text: str) -> List[Article]:
     """efetch(db=pubmed, retmode=xml) 결과 문자열 → Article 리스트.
 
@@ -134,6 +153,7 @@ def parse_efetch_xml(xml_text: str) -> List[Article]:
                 mesh=mesh,
                 mesh_major=major,
                 keywords=_extract_keywords(art),
+                pub_types=_extract_pub_types(art),
             )
         )
     return articles
@@ -150,7 +170,7 @@ def parse_medline_nbib(text: str) -> List[Article]:
     앞 6칸 공백으로 시작하는 줄은 직전 필드의 이어짐이다.
 
     쓰는 태그: PMID, DP/DEP(연도), TA/JT(저널), TI(제목), MH(MeSH; '*' 는 대표),
-    OT(저자 키워드).
+    OT(저자 키워드), PT(연구 설계/publication type).
     """
     if not text or not text.strip():
         raise ValueError("빈 MEDLINE/NBIB 입력입니다.")
@@ -181,11 +201,14 @@ def parse_medline_nbib(text: str) -> List[Article]:
         fields: dict = {}
         mh_list: List[str] = []
         ot_list: List[str] = []
+        pt_list: List[str] = []
         for tag, val in rec:
             if tag == "MH":
                 mh_list.append(val)
             elif tag == "OT":
                 ot_list.append(val)
+            elif tag == "PT":  # 반복 태그 — 한 논문에 설계가 여러 개 붙는다
+                pt_list.append(val)
             else:
                 fields.setdefault(tag, val)  # 첫 값 사용
 
@@ -202,6 +225,11 @@ def parse_medline_nbib(text: str) -> List[Article]:
             k = kw.strip()
             if k and k not in keywords:
                 keywords.append(k)
+        pub_types: List[str] = []
+        for pt in pt_list:
+            p = pt.strip()
+            if p and p not in pub_types:
+                pub_types.append(p)
 
         articles.append(
             Article(
@@ -212,6 +240,7 @@ def parse_medline_nbib(text: str) -> List[Article]:
                 mesh=mesh,
                 mesh_major=major,
                 keywords=keywords,
+                pub_types=pub_types,
             )
         )
     return articles
@@ -271,17 +300,29 @@ def decode_bytes(raw: bytes) -> str:
 
 
 def detect_format(text: str) -> str:
-    """'xml' 또는 'nbib' 로 포맷을 추정한다(내용 기반)."""
+    """'xml' | 'ris' | 'nbib' 로 포맷을 추정한다(내용 기반).
+
+    RIS 와 NBIB 는 둘 다 `TAG - value` 꼴이라 태그 모양만으로는 못 가른다
+    (예: `TI  - ...` 는 양쪽 모두 유효). 판별은 각 포맷의 **고유 필수 태그**로 한다:
+    RIS 레코드는 반드시 `TY  - ` 로 시작하고 `ER  -` 로 끝난다.
+    """
     s = text.lstrip("﻿ \t\r\n")
-    return "xml" if s.startswith("<") else "nbib"
+    if s.startswith("<"):
+        return "xml"
+    if _RIS_TY_RE.search(text):
+        return "ris"
+    return "nbib"
 
 
 def parse_records(text: str) -> List[Article]:
-    """텍스트 내용으로 XML/NBIB 를 자동 판별해 파싱한다."""
+    """텍스트 내용으로 XML/RIS/NBIB 를 자동 판별해 파싱한다."""
     if not text or not text.strip():
         raise ValueError("빈 입력입니다.")
-    if detect_format(text) == "xml":
+    fmt = detect_format(text)
+    if fmt == "xml":
         return parse_efetch_xml(text)
+    if fmt == "ris":
+        return parse_ris(text)
     return parse_medline_nbib(text)
 
 
