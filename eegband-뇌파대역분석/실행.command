@@ -38,4 +38,5 @@ run examples/delta_deep_sleep.csv --fs 128 --epoch 20
 echo ""
 echo "→ 예제 1은 alpha 우세, 예제 2는 delta/SWA 우세로 뒤집히는 것을 확인하세요."
 echo ""
-read -p "엔터를 누르면 창이 닫힙니다..."
+# '|| true' so a non-interactive/EOF stdin (e.g. piped run) still exits 0.
+read -p "엔터를 누르면 창이 닫힙니다..." _ || true

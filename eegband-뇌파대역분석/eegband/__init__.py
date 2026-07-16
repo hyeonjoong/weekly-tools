@@ -10,6 +10,10 @@ Public API:
     to_dict(result) -> dict
 """
 
+# Defined before the submodule imports below so report.py can import it without a
+# circular-import failure.
+__version__ = "0.1.0"
+
 from .analyze import (
     AnalysisResult,
     BandPower,
@@ -19,9 +23,7 @@ from .analyze import (
     resolve_fs,
 )
 from .dataio import SignalData, infer_fs, load_signal
-from .report import render_text, to_dict
-
-__version__ = "0.1.0"
+from .report import render_csv, render_text, to_dict
 
 __all__ = [
     "analyze",
@@ -29,6 +31,7 @@ __all__ = [
     "load_signal",
     "infer_fs",
     "render_text",
+    "render_csv",
     "to_dict",
     "AnalysisResult",
     "Spectrum",

@@ -1,13 +1,17 @@
-"""Human-readable (Korean + English) and JSON rendering of an AnalysisResult."""
+"""Human-readable (Korean + English), JSON, and CSV rendering of an AnalysisResult."""
 
 from __future__ import annotations
 
+import csv
+import io
 import math
+import statistics
 from typing import Any, Dict, List, Optional
 
+from . import __version__
 from .analyze import AnalysisResult, Spectrum
 
-__all__ = ["render_text", "to_dict"]
+__all__ = ["render_text", "to_dict", "render_csv"]
 
 
 def _num(x: Optional[float], d: int = 3) -> str:
@@ -41,6 +45,8 @@ def render_text(res: AnalysisResult) -> str:
 
     L("")
     L("[정보 / Info]")
+    L(f"    eegband v{__version__}"
+      + (f",  input = {res.source_file}" if res.source_file else ""))
     L(f"    fs = {res.fs:.4g} Hz ({res.fs_source}),  N = {res.n_samples} samples,"
       f"  duration = {res.duration_sec:.2f} s")
     L(f"    Welch: nperseg = {res.nperseg}, noverlap = {res.noverlap}, "
@@ -54,12 +60,13 @@ def render_text(res: AnalysisResult) -> str:
     L(f"    SWA absolute  = {_num(res.overall.swa_abs)} µV²")
     L(f"    SWA relative  = {_num(res.overall.swa_rel * 100.0, 1)} %")
     dom = res.overall.dominant
+    tie = "  (⚠ near-tie: runner-up within 1%)" if res.overall.dominant_tie else ""
     if dom is None:
         L("    dominant band = n/a  (no spectral power — constant/zero signal)")
     elif dom == "delta":
-        L("    dominant band = delta   ← slow-wave/delta dominant")
+        L(f"    dominant band = delta   ← slow-wave/delta dominant{tie}")
     else:
-        L(f"    dominant band = {dom}   (delta is not the strongest band)")
+        L(f"    dominant band = {dom}   (delta is not the strongest band){tie}")
 
     # Spectral summary
     L("")
@@ -89,15 +96,29 @@ def render_text(res: AnalysisResult) -> str:
         for ep in res.epochs:
             sp = ep.spectrum
             rels = "".join(f"{sp_rel(sp, name) * 100:>7.1f}%" for name, _, _ in res.bands)
+            dom_cell = (sp.dominant or "n/a") + ("*" if sp.dominant_tie else "")
             L(f"    {ep.index:>3}{ep.start_sec:>8.1f}{ep.end_sec:>8.1f}{rels}"
-              f"{(sp.peak_freq or 0):>8.2f}{(sp.sef or 0):>8.2f}  {sp.dominant or 'n/a'}")
+              f"{(sp.peak_freq or 0):>8.2f}{(sp.sef or 0):>8.2f}  {dom_cell}")
         L("    (대역 값은 상대파워 % / band cells are relative power %)")
         if res.swa_density is not None:
             delta_dom = sum(1 for ep in res.epochs if ep.spectrum.dominant == "delta")
             L(f"    SWA density (delta-dominant epochs) = {delta_dom}/{len(res.epochs)}"
               f"  ({res.swa_density * 100:.0f} %)")
-            mean_rel_delta = sum(ep.spectrum.swa_rel for ep in res.epochs) / len(res.epochs)
-            L(f"    mean relative delta across epochs   = {mean_rel_delta * 100:.1f} %")
+            n_ep = len(res.epochs)
+            rel_deltas = [ep.spectrum.swa_rel for ep in res.epochs]
+            abs_swas = [ep.spectrum.swa_abs for ep in res.epochs]
+            mean_rel = statistics.fmean(rel_deltas)
+            sd_rel = statistics.stdev(rel_deltas) if n_ep > 1 else 0.0
+            mean_abs = statistics.fmean(abs_swas)
+            sd_abs = statistics.stdev(abs_swas) if n_ep > 1 else 0.0
+            sem_rel = sd_rel / math.sqrt(n_ep) if n_ep > 1 else 0.0
+            sem_abs = sd_abs / math.sqrt(n_ep) if n_ep > 1 else 0.0
+            # SD is the sample SD (n-1); SEM = SD/sqrt(n) for the endpoint mean.
+            L(f"    relative delta across epochs = {mean_rel * 100:.1f} "
+              f"± {sd_rel * 100:.1f} % (SD, n-1),  SEM {sem_rel * 100:.1f} %  "
+              f"(n={n_ep})")
+            L(f"    SWA absolute across epochs   = {_num(mean_abs)} "
+              f"± {_num(sd_abs)} µV² (SD, n-1),  SEM {_num(sem_abs)} µV²")
 
     # Warnings
     if res.warnings:
@@ -126,7 +147,7 @@ def _render_spectrum(L, spec: Spectrum, title: str) -> None:
         L(f"    {bp.name:<8}{_range(bp.lo, bp.hi):<12}{_num(bp.absolute):>14}"
           f"{_num(bp.relative * 100.0, 1):>10}{tag}")
     L(f"    {'total':<8}{_range(spec.band_lo, spec.band_hi):<12}"
-      f"{_num(spec.total_power):>14}{'100.0':>10}")
+      f"{_num(spec.total_power):>14}{_num(spec.rel_sum * 100.0, 1):>10}")
 
 
 def to_dict(res: AnalysisResult) -> Dict[str, Any]:
@@ -139,10 +160,12 @@ def to_dict(res: AnalysisResult) -> Dict[str, Any]:
                 for bp in spec.band_powers
             ],
             "total_power_uv2": spec.total_power,
+            "relative_sum": spec.rel_sum,
             "peak_freq_hz": spec.peak_freq,
             "sef_frac": spec.sef_frac,
             "sef_hz": spec.sef,
             "dominant_band": spec.dominant,
+            "dominant_tie": spec.dominant_tie,
             "swa": {"absolute_uv2": spec.swa_abs, "relative": spec.swa_rel},
             "ratios": {k: (None if (isinstance(v, float) and not math.isfinite(v))
                            else v)
@@ -151,6 +174,9 @@ def to_dict(res: AnalysisResult) -> Dict[str, Any]:
         }
 
     out: Dict[str, Any] = {
+        "tool": "eegband",
+        "version": __version__,
+        "source_file": res.source_file,
         "fs_hz": res.fs,
         "fs_source": res.fs_source,
         "n_samples": res.n_samples,
@@ -160,6 +186,11 @@ def to_dict(res: AnalysisResult) -> Dict[str, Any]:
                   "scaling": "density"},
         "bands": [{"name": n, "low_hz": lo, "high_hz": hi}
                   for n, lo, hi in res.bands],
+        "provenance": {
+            "sef_percent": res.sef_frac * 100.0,
+            "n_interpolated_samples": res.n_filled,
+            "input_encoding": res.input_encoding,
+        },
         "overall": spec_dict(res.overall),
         "warnings": res.warnings,
     }
@@ -172,3 +203,54 @@ def to_dict(res: AnalysisResult) -> Dict[str, Any]:
             for ep in res.epochs
         ]
     return out
+
+
+def render_csv(res: AnalysisResult) -> str:
+    """Tidy per-epoch (or single overall) band-power table as CSV, for stats tools.
+
+    One row per epoch when ``--epoch`` was used, otherwise one 'overall' row. Each
+    band contributes an ``<band>_abs_uv2`` and ``<band>_rel`` column; NaN/inf ratios
+    render as empty cells. The header echoes tool version and fs so the file is
+    self-describing when imported into R/SAS/Prism.
+    """
+    band_names = [bp.name for bp in res.overall.band_powers]
+    header = ["epoch", "start_sec", "end_sec"]
+    for name in band_names:
+        header += [f"{name}_abs_uv2", f"{name}_rel"]
+    header += ["total_uv2", "peak_hz", "sef_hz", "dominant", "dominant_tie"]
+
+    def _cell(x: Optional[float]) -> str:
+        if x is None or (isinstance(x, float) and not math.isfinite(x)):
+            return ""
+        return repr(x)
+
+    def _row(label: str, t0: float, t1: float, spec: Spectrum) -> List[str]:
+        row = [label, _cell(t0), _cell(t1)]
+        rel_by = {bp.name: (bp.absolute, bp.relative) for bp in spec.band_powers}
+        for name in band_names:
+            absv, rel = rel_by.get(name, (0.0, 0.0))
+            row += [_cell(absv), _cell(rel)]
+        row += [_cell(spec.total_power), _cell(spec.peak_freq), _cell(spec.sef),
+                spec.dominant or "", "1" if spec.dominant_tie else "0"]
+        return row
+
+    # Provenance as a SINGLE comment field (no internal commas) so a naive
+    # csv.DictReader sees one bogus column, not four fake headers; the full
+    # analysis parameters make an exported epoch table self-reproducible.
+    bands_str = ";".join(f"{n}:{lo:g}-{hi:g}" for n, lo, hi in res.bands)
+    prov = (f"# eegband v{__version__} | fs_hz={res.fs:g} ({res.fs_source}) | "
+            f"nperseg={res.nperseg} noverlap={res.noverlap} nfft={res.nfft} | "
+            f"sef={res.sef_frac * 100:g}% | bands={bands_str} | "
+            f"n_interpolated={res.n_filled} | "
+            f"encoding={res.input_encoding or 'utf-8-sig'} | "
+            f"source={res.source_file or ''}")
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow([prov])
+    w.writerow(header)
+    if res.epochs:
+        for ep in res.epochs:
+            w.writerow(_row(str(ep.index), ep.start_sec, ep.end_sec, ep.spectrum))
+    else:
+        w.writerow(_row("overall", 0.0, res.duration_sec, res.overall))
+    return buf.getvalue()
