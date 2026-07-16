@@ -13,6 +13,19 @@ Percentage Bland-Altman + subject id for repeated measures::
 Machine-readable output::
 
     agreestat data.csv -a sensor -b band --json
+
+Categorical agreement (kappa family) instead of Bland-Altman/ICC::
+
+    agreestat stages.csv --categorical -a psg_stage -b device_stage \
+        --categories "W,N1,N2,N3,REM"
+
+Ordinal scale (weighted kappa) with a pre-specified acceptance threshold::
+
+    agreestat grades.csv --categorical --ordinal --min-kappa 0.6
+
+Repeated units per subject (sleep epochs) -> cluster-robust CI::
+
+    agreestat epochs.csv --categorical -a psg -b device -s subject
 """
 
 from __future__ import annotations
@@ -24,7 +37,9 @@ from typing import Optional, Sequence
 
 from . import __version__
 from .analyze import analyze
-from .dataio import load_pairs
+from .catanalyze import analyze_categorical
+from .catreport import render_cat_json, render_cat_markdown, render_cat_text
+from .dataio import load_categorical_pairs, load_pairs
 from .report import (
     render_json,
     render_markdown,
@@ -37,9 +52,13 @@ from .report import (
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="agreestat",
-        description="측정 방법 일치도(agreement) 분석기 — 두 방법(A vs B)의 "
-                    "짝지은 측정값으로 Bland–Altman, ICC(2,1)/ICC(3,1), Lin's CCC, "
-                    "반복성, 상관/차이 검정을 계산하고 논문용 문장까지 출력합니다.",
+        description="측정 방법 일치도(agreement) 분석기 — 두 방법/평가자(A vs B)의 "
+                    "짝지은 측정값으로 일치도를 계산하고 논문용 문장까지 출력합니다. "
+                    "[연속형] Bland–Altman, ICC(2,1)/ICC(3,1), Lin's CCC, 반복성, "
+                    "Deming·Passing–Bablok 회귀, 상관/차이 검정. "
+                    "[범주형 --categorical] Cohen's kappa·가중 kappa, Gwet's AC1/AC2, "
+                    "Krippendorff's alpha, 범주별 일치도(PPA/NPA), kappa 역설 진단, "
+                    "주변 동질성 검정, 군집(피험자) 보정 CI.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument("csv", help="입력 CSV 파일 경로")
@@ -78,6 +97,38 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="의학적 결정수준 XC(기준법 값)에서의 예측 계통편향 "
                         "bias(XC)=절편+(기울기−1)·XC 를 회귀로 추정 (CLSI EP09). "
                         "--accept와 함께 쓰면 그 지점 편향이 허용한계 안인지 판정")
+    g = p.add_argument_group(
+        "범주형 일치도 / categorical agreement",
+        "두 평가자·기기가 '숫자'가 아니라 '범주'(수면단계, 등급, 양성/음성)를 "
+        "매길 때 사용합니다. Cohen's kappa·가중 kappa·Gwet's AC1/AC2·"
+        "Krippendorff's alpha·범주별 일치도·주변동질성 검정을 계산합니다.")
+    g.add_argument("--categorical", action="store_true",
+                   help="범주형 일치도(kappa) 분석 수행 "
+                        "(Bland–Altman/ICC 대신)")
+    g.add_argument("--ordinal", action="store_true",
+                   help="범주가 순서형(예: 경증<중등도<중증)임을 표시 — "
+                        "가중 kappa(기본 quadratic)를 계산")
+    g.add_argument("--weights", choices=("unweighted", "linear", "quadratic"),
+                   help="가중 kappa의 가중치 방식 (지정 시 --ordinal 자동 적용; "
+                        "--ordinal 기본값은 quadratic)")
+    g.add_argument("--categories", metavar="C1,C2,...",
+                   help="범주의 순서를 직접 지정 (순서형에서 중요; "
+                        "예: --categories \"W,N1,N2,N3,REM\")")
+    g.add_argument("--min-kappa", dest="min_kappa", type=float, metavar="K",
+                   help="사전 설정한 최소 허용 kappa. 신뢰구간 하한이 K 이상이면 "
+                        "'기준 충족' 판정 (점추정이 아니라 CI 하한으로 판정)")
+    g.add_argument("--na", dest="na", metavar="L1,L2,...",
+                   help="결측으로 처리할 라벨 목록 (기본: 빈 칸과 #N/A만 결측). "
+                        "범주형에서는 'None'·'-'·'.'·'NA' 가 실제 범주일 수 있어 "
+                        "임의로 버리지 않습니다 — 결측이면 여기에 지정하세요")
+    g.add_argument("--bootstrap", dest="bootstrap", type=int, default=2000,
+                   metavar="B",
+                   help="군집(피험자) 부트스트랩 재표본 수 (기본 2000). "
+                        "-s/--subject 로 피험자 열을 준 경우에만 사용")
+    g.add_argument("--seed", dest="seed", type=int, default=20260716,
+                   metavar="S",
+                   help="부트스트랩 난수 시드 (기본 20260716) — 같은 시드는 "
+                        "항상 같은 CI를 주므로 논문 결과가 재현됩니다")
     p.add_argument("--json", action="store_true", help="JSON으로 출력")
     p.add_argument("--markdown", nargs="?", const="-", metavar="PATH",
                    help="결과를 마크다운 표로 출력(경로 생략 시 표준출력)")
@@ -113,12 +164,134 @@ def _resolve_accept(args):
     return (lo, hi)
 
 
+_CAT_ONLY = (("--ordinal", "ordinal"), ("--weights", "weights"),
+             ("--categories", "categories"), ("--min-kappa", "min_kappa"),
+             ("--na", "na"))
+
+_CONT_ONLY = (("--percent", "percent"), ("--accept", "accept"),
+              ("--accept-lower", "accept_lower"),
+              ("--accept-upper", "accept_upper"),
+              ("--target-loa-hw", "target_loa_hw"), ("--at", "decision_point"),
+              ("--plot-data", "plot_data"), ("--svg", "svg"))
+
+
+def _check_mode_flags(args) -> Optional[str]:
+    """Reject flags that belong to the other analysis mode."""
+    if args.categorical:
+        bad = [flag for flag, dest in _CONT_ONLY if getattr(args, dest)]
+        if bad:
+            return (f"{', '.join(bad)} 는 연속형(Bland–Altman/ICC) 분석 전용이라 "
+                    "--categorical 과 함께 쓸 수 없습니다.")
+        if args.deming_lambda != 1.0:
+            return ("--deming-lambda 는 연속형 분석 전용이라 --categorical 과 "
+                    "함께 쓸 수 없습니다.")
+        return None
+    bad = [flag for flag, dest in _CAT_ONLY if getattr(args, dest) not in (None, False)]
+    if bad:
+        return (f"{', '.join(bad)} 는 범주형 분석 전용입니다 — "
+                "--categorical 을 함께 지정하세요.")
+    return None
+
+
+def _run_categorical(args) -> int:
+    if args.min_kappa is not None and not (
+            math.isfinite(args.min_kappa) and -1.0 <= args.min_kappa <= 1.0):
+        print("입력 오류: --min-kappa 는 -1과 1 사이의 유한한 값이어야 합니다.",
+              file=sys.stderr)
+        return 2
+
+    if args.bootstrap < 100 or args.bootstrap > 200_000:
+        print("입력 오류: --bootstrap 은 100 이상 200000 이하여야 합니다 "
+              "(백분위 CI에는 최소 수백 회가 필요합니다).", file=sys.stderr)
+        return 2
+
+    na = None
+    if args.na is not None:
+        na = [s.strip() for s in args.na.split(",") if s.strip()]
+        if not na:
+            print("입력 오류: --na 에는 결측으로 처리할 라벨을 쉼표로 구분해 "
+                  "하나 이상 지정하세요 (예: --na \"NA,모름\").", file=sys.stderr)
+            return 2
+
+    cats: Optional[Sequence[str]] = None
+    if args.categories:
+        cats = [c.strip() for c in args.categories.split(",") if c.strip()]
+        if len(cats) < 2:
+            print("입력 오류: --categories 에는 쉼표로 구분된 범주가 2개 이상 "
+                  "필요합니다 (예: --categories \"W,N1,N2,N3,REM\").",
+                  file=sys.stderr)
+            return 2
+        if len(set(cats)) != len(cats):
+            print("입력 오류: --categories 에 중복된 범주가 있습니다.",
+                  file=sys.stderr)
+            return 2
+
+    try:
+        data = load_categorical_pairs(args.csv, args.method_a, args.method_b,
+                                      encoding=args.encoding,
+                                      subject_col=args.subject, na_labels=na)
+    except (ValueError, OSError) as exc:
+        print(f"입력 오류: {exc}", file=sys.stderr)
+        return 2
+
+    if data.n < 2:
+        print(f"오류: 분석에 최소 2쌍이 필요합니다 (발견: {data.n}쌍).",
+              file=sys.stderr)
+        return 2
+
+    try:
+        res = analyze_categorical(
+            data.a, data.b,
+            name_a=args.name_a or data.name_a,
+            name_b=args.name_b or data.name_b,
+            alpha=args.alpha,
+            categories=cats,
+            ordinal=args.ordinal or args.weights not in (None, "unweighted"),
+            weights=args.weights,
+            dropped=data.dropped,
+            min_kappa=args.min_kappa,
+            extra_warnings=data.notes,
+            subjects=data.subjects,
+            bootstrap=args.bootstrap,
+            seed=args.seed,
+        )
+    except (ValueError, OverflowError) as exc:
+        print(f"분석 오류: {exc}", file=sys.stderr)
+        return 2
+
+    if args.markdown:
+        md = render_cat_markdown(res)
+        if args.markdown == "-":
+            print(md)
+        else:
+            try:
+                with open(args.markdown, "w", encoding="utf-8") as fh:
+                    fh.write(md)
+                print(f"마크다운 표를 저장했습니다: {args.markdown}", file=sys.stderr)
+            except OSError as exc:
+                print(f"출력 오류: {exc}", file=sys.stderr)
+                return 2
+    elif args.json:
+        print(render_cat_json(res))
+    else:
+        print(render_cat_text(res))
+    return 0
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = _build_parser().parse_args(argv)
 
     if not 0.0 < args.alpha < 1.0:
         print("입력 오류: --alpha 는 0과 1 사이여야 합니다.", file=sys.stderr)
         return 2
+
+    mode_err = _check_mode_flags(args)
+    if mode_err:
+        print(f"입력 오류: {mode_err}", file=sys.stderr)
+        return 2
+
+    if args.categorical:
+        return _run_categorical(args)
 
     if args.target_loa_hw is not None and not (
             math.isfinite(args.target_loa_hw) and args.target_loa_hw > 0.0):

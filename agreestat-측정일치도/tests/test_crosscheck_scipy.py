@@ -149,3 +149,134 @@ def test_deming_negative_slope_matches_odr():
     d = Reg.deming(x, y, lam=1.0)
     out = odr.ODR(odr.Data(x, y), odr.Model(_f), beta0=[-1.0, 0.0]).run()
     assert abs(d.slope - out.beta[0]) < 1e-4
+
+
+# ==========================================================================
+# Categorical agreement — cross-checks against sklearn / statsmodels
+# ==========================================================================
+from agreestat import categorical as Cat  # noqa: E402
+
+
+def _rater_sample(seed, n=200, cats=("W", "N1", "N2", "N3", "REM"), p_agree=0.7):
+    rng = random.Random(seed)
+    a = [rng.choice(cats) for _ in range(n)]
+    b = [x if rng.random() < p_agree else rng.choice(cats) for x in a]
+    return a, b
+
+
+@pytest.mark.parametrize("seed", [1, 2, 3, 17])
+@pytest.mark.parametrize("scheme,sk_weights", [
+    ("unweighted", None), ("linear", "linear"), ("quadratic", "quadratic"),
+])
+def test_kappa_matches_sklearn(seed, scheme, sk_weights):
+    sk = pytest.importorskip("sklearn.metrics")
+    a, b = _rater_sample(seed)
+    cm = Cat.confusion_matrix(a, b)
+    ours = Cat.kappa(cm, scheme).value
+    ref = sk.cohen_kappa_score(a, b, labels=cm.categories, weights=sk_weights)
+    assert abs(ours - ref) < 1e-12
+
+
+@pytest.mark.parametrize("seed", [1, 5, 9])
+def test_kappa_se_ci_and_ztest_match_statsmodels(seed):
+    ir = pytest.importorskip("statsmodels.stats.inter_rater")
+    a, b = _rater_sample(seed)
+    cm = Cat.confusion_matrix(a, b)
+    ours = Cat.kappa(cm)
+    ref = ir.cohens_kappa(np.array(cm.counts))
+    assert abs(ours.value - ref.kappa) < 1e-12
+    assert abs(ours.se - ref.std_kappa) < 1e-12
+    assert abs(ours.ci_lower - ref.kappa_low) < 1e-10
+    assert abs(ours.ci_upper - ref.kappa_upp) < 1e-10
+    assert abs(ours.z - ref.z_value) < 1e-9        # uses the H0 variance
+    assert abs(ours.pvalue - ref.pvalue_two_sided) < 1e-12
+
+
+@pytest.mark.parametrize("seed", [2, 6])
+def test_weighted_kappa_se_matches_statsmodels(seed):
+    ir = pytest.importorskip("statsmodels.stats.inter_rater")
+    a, b = _rater_sample(seed, cats=("0", "1", "2", "3"))
+    cm = Cat.confusion_matrix(a, b)
+    ours = Cat.kappa(cm, "linear")
+    ref = ir.cohens_kappa(np.array(cm.counts), wt="linear")
+    assert abs(ours.value - ref.kappa) < 1e-12
+    assert abs(ours.se - ref.std_kappa) < 1e-12
+
+
+@pytest.mark.parametrize("seed", [3, 8, 12])
+def test_mcnemar_exact_matches_statsmodels(seed):
+    ct = pytest.importorskip("statsmodels.stats.contingency_tables")
+    a, b = _rater_sample(seed, n=80, cats=("pos", "neg"), p_agree=0.8)
+    cm = Cat.confusion_matrix(a, b)
+    ours = Cat.mcnemar(cm)
+    ref = ct.mcnemar(np.array(cm.counts), exact=True)
+    assert abs(ours.pvalue - ref.pvalue) < 1e-12
+
+
+def test_mcnemar_chi2_matches_statsmodels():
+    ct = pytest.importorskip("statsmodels.stats.contingency_tables")
+    counts = [[10, 900], [700, 10]]
+    cm = Cat.ConfusionMatrix(["a", "b"], counts, 1620, [910, 710], [710, 910])
+    ours = Cat.mcnemar(cm, exact_max=100)
+    ref = ct.mcnemar(np.array(counts), exact=False, correction=True)
+    assert abs(ours.statistic - ref.statistic) < 1e-10
+    assert abs(ours.pvalue - ref.pvalue) < 1e-12
+
+
+@pytest.mark.parametrize("seed", [1, 4, 11])
+def test_stuart_maxwell_matches_statsmodels(seed):
+    ct = pytest.importorskip("statsmodels.stats.contingency_tables")
+    a, b = _rater_sample(seed)
+    cm = Cat.confusion_matrix(a, b)
+    ours = Cat.stuart_maxwell(cm)
+    # shift_zeros=False: statsmodels otherwise adds 0.5 to every cell when the
+    # table contains a zero, which changes the statistic.
+    ref = ct.SquareTable(np.array(cm.counts), shift_zeros=False).homogeneity()
+    assert ours.df == ref.df
+    assert abs(ours.statistic - ref.statistic) < 1e-8
+    assert abs(ours.pvalue - ref.pvalue) < 1e-10
+
+
+@pytest.mark.parametrize("seed", [7, 13])
+def test_kappa_se_agrees_with_bootstrap(seed):
+    """The asymptotic SE should track a nonparametric bootstrap SE."""
+    a, b = _rater_sample(seed, n=300)
+    cm = Cat.confusion_matrix(a, b)
+    ours = Cat.kappa(cm)
+    rng = random.Random(99)
+    boots = []
+    for _ in range(1500):
+        idx = [rng.randrange(len(a)) for _ in range(len(a))]
+        c = Cat.confusion_matrix([a[i] for i in idx], [b[i] for i in idx],
+                                 categories=cm.categories)
+        boots.append(Cat.kappa(c).value)
+    boot_se = np.std(boots, ddof=1)
+    assert abs(ours.se - boot_se) < 0.12 * ours.se
+
+
+@pytest.mark.parametrize("seed", [7, 13])
+def test_gwet_ac1_linearization_se_agrees_with_bootstrap(seed):
+    """Gwet's linearized variance vs a bootstrap. This is a coarse sanity net
+    (a bootstrap SE is itself noisy); the exact influence-function algebra is
+    pinned by the hand-computed test in test_categorical.py."""
+    a, b = _rater_sample(seed, n=300)
+    cm = Cat.confusion_matrix(a, b)
+    ours = Cat.gwet_ac(cm)
+    rng = random.Random(123)
+    boots = []
+    for _ in range(1500):
+        idx = [rng.randrange(len(a)) for _ in range(len(a))]
+        c = Cat.confusion_matrix([a[i] for i in idx], [b[i] for i in idx],
+                                 categories=cm.categories)
+        boots.append(Cat.gwet_ac(c).value)
+    boot_se = np.std(boots, ddof=1)
+    assert abs(ours.se - boot_se) < 0.12 * ours.se
+
+
+def test_quadratic_weighted_kappa_approximates_icc_on_scores():
+    """A classic identity: quadratic-weighted kappa ~ ICC(2,1) on the scores."""
+    a, b = _rater_sample(4, n=400, cats=("0", "1", "2", "3"))
+    cm = Cat.confusion_matrix(a, b)
+    kq = Cat.kappa(cm, "quadratic").value
+    i21, _i31, _ms = A.icc([[float(x), float(y)] for x, y in zip(a, b)])
+    assert abs(kq - i21.value) < 0.05
