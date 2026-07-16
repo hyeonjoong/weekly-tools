@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence
 
 from . import cat_tests, smd
-from .dataio import Frame, classify, is_missing, parse_float
+from .dataio import Frame, classify, is_missing, is_numeric_token, parse_float
 from .normality import shapiro_wilk
 from .tests_stat import (
     kruskal_wallis,
@@ -35,46 +35,80 @@ __all__ = ["Options", "Table1", "ContinuousRow", "CategoricalRow", "build_table1
 _MSG = {
     "ko": {
         "shapiro_cap": "표본이 {n}개를 초과해 정규성 검정은 {n}개 부분표본으로 근사했습니다.",
-        "normality_untestable": "정규성 검정 불가(각 그룹 n<3 또는 상수) → 평균±표준편차로 표시",
+        "normality_untestable": "정규성 검정 불가(각 그룹 n<3 또는 상수)",
         "skip_lt2": "한 그룹의 관측치가 2개 미만 → 검정 생략",
         "skip_groups_lt2": "분석 가능한 그룹이 2개 미만 → 검정 생략",
         "anova_levene": "등분산 가정 위배(Levene p<{alpha:.2g}) → ANOVA 해석 주의 (Welch/비모수 고려)",
-        "test_failed": "검정 계산 불가: {exc}",
+        "test_failed": "검정을 계산할 수 없습니다(자료 구조가 검정에 부적합).",
+        "unparseable": ("값 {n}개를 숫자로 해석할 수 없어 요약에서 제외했습니다"
+                        "(예: {ex}). 부등호·단위·백분율 기호·유럽식 콤마 소수 등을 "
+                        "제거하거나 결측으로 두세요 — 이 값들은 평균/중앙값에 "
+                        "반영되지 않습니다."),
         "stat_undefined": "검정 통계량이 정의되지 않음(예: 분산 0) → p값 생략",
         "chi_expected_low": "기대빈도 <5 셀 존재 → χ² 근사 주의(Fisher 권장)",
         "warn_group_missing": "그룹 값이 결측이라 제외한 행: {n}개",
+        "warn_group_case": ("대소문자만 다른 그룹 라벨이 별개의 군으로 처리됨: {labels}. "
+                            "같은 군이면 라벨 표기를 통일하세요."),
+        "warn_high_missing": ("변수 '{var}' 는 결측이 {pct:.0f}%로 많습니다 → 요약 통계가 "
+                              "소수 관측에 기반하므로 해석에 주의하세요."),
         "warn_var_all_missing": "변수 '{var}' 는 값이 모두 결측이라 건너뜀",
-        "warn_int_code": ("변수 '{var}' 는 정수값이 {n}종뿐이라 연속형(평균±SD)으로 "
-                          "처리했습니다. 순서형/범주형 코드라면 '--categorical {var}' 를 쓰세요."),
-        "warn_too_many_levels": ("변수 '{var}' 는 고유값이 {n}개로 너무 많아 "
-                                 "(ID/자유텍스트로 판단) 건너뜀. 표에 넣으려면 "
-                                 "'--categorical {var}' 또는 '--max-levels' 를 쓰세요."),
+        "warn_int_code": ("변수 '{var}' 는 정수값이 {n}종뿐이라 연속형으로 처리했습니다"
+                          "(정규성에 따라 평균±SD 또는 중앙값[IQR]). 순서형/범주형 "
+                          "코드라면 '--categorical {var}' 를 쓰세요."),
+        "warn_too_many_levels": ("변수 '{var}' 는 고유값이 {n}개로 너무 많아 건너뜀"
+                                 "(ID·자유텍스트이거나, 단위·기호가 섞인 수치일 수 있음). "
+                                 "수치라면 단위·기호를 제거해 '--continuous {var}', "
+                                 "범주라면 '--categorical {var}' 또는 '--max-levels' 를 "
+                                 "쓰세요."),
+        "warn_type_conflict": ("변수 '{var}' 가 --continuous 와 --categorical 에 "
+                               "모두 지정됨 → 연속형으로 처리했습니다."),
+        "warn_ref_missing": ("--ref '{var}={level}' 의 수준 '{level}' 이(가) 자료에 "
+                             "없어 무시했습니다(관측된 수준: {levels})."),
     },
     "en": {
         "shapiro_cap": ("sample exceeded {n}; normality was tested on a "
                         "{n}-point subsample."),
         "normality_untestable": ("normality not testable (each group n<3 or "
-                                 "constant) → shown as mean±SD"),
+                                 "constant)"),
         "skip_lt2": "a group has <2 observations → test skipped",
         "skip_groups_lt2": "fewer than 2 analyzable groups → test skipped",
         "anova_levene": ("equal-variance assumption violated (Levene "
                          "p<{alpha:.2g}) → interpret ANOVA with caution "
                          "(consider Welch/nonparametric)"),
-        "test_failed": "test could not be computed: {exc}",
+        "test_failed": ("test could not be computed (data structure unsuitable "
+                        "for the test)."),
+        "unparseable": ("{n} value(s) could not be parsed as numbers and were "
+                        "excluded from the summary (e.g. {ex}). Strip comparison "
+                        "signs, units, percent signs, or European decimal "
+                        "commas, or leave them blank — these values do not enter "
+                        "the mean/median."),
         "stat_undefined": ("test statistic undefined (e.g. zero variance) → "
                            "p-value omitted"),
         "chi_expected_low": ("cells with expected count <5 → chi-square "
                              "approximation unreliable (Fisher recommended)"),
         "warn_group_missing": "rows excluded for a missing group value: {n}",
+        "warn_group_case": ("group labels differing only in case are treated as "
+                            "separate arms: {labels}. Unify the labels if they "
+                            "are the same arm."),
+        "warn_high_missing": ("variable '{var}' is {pct:.0f}% missing → the "
+                              "summary rests on few observations; interpret with "
+                              "caution."),
         "warn_var_all_missing": "variable '{var}' skipped: all values missing",
         "warn_int_code": ("variable '{var}' had only {n} distinct integer "
-                          "values and was treated as continuous (mean±SD). If "
-                          "it is an ordinal/categorical code, use "
-                          "'--categorical {var}'."),
-        "warn_too_many_levels": ("variable '{var}' has {n} distinct values "
-                                 "(treated as an ID/free-text column) and was "
-                                 "skipped. To include it, use "
+                          "values and was treated as continuous (mean±SD or "
+                          "median[IQR] by normality). If it is an "
+                          "ordinal/categorical code, use '--categorical {var}'."),
+        "warn_too_many_levels": ("variable '{var}' has {n} distinct values and "
+                                 "was skipped (an ID/free-text column, or a "
+                                 "numeric column with units/symbols mixed in). "
+                                 "If numeric, strip units/symbols and use "
+                                 "'--continuous {var}'; if categorical, use "
                                  "'--categorical {var}' or '--max-levels'."),
+        "warn_type_conflict": ("variable '{var}' was given to both --continuous "
+                               "and --categorical → treated as continuous."),
+        "warn_ref_missing": ("--ref '{var}={level}': level '{level}' is not "
+                             "present in the data and was ignored (observed "
+                             "levels: {levels})."),
     },
 }
 
@@ -94,10 +128,18 @@ class Options:
     max_display_levels: int = 20   # skip auto-detected categoricals with more
                                    # distinct levels than this (likely IDs)
     display: str = "auto"          # auto | mean | median | both
+    test_cont: str = "auto"        # auto | welch | student | nonparam
+                                   # controls the continuous TEST (not the summary
+                                   # text): 'welch' avoids the Levene pre-test that
+                                   # 'auto' uses (Delacre 2017), 'nonparam' forces
+                                   # Mann-Whitney/Kruskal regardless of normality.
     alpha_norm: float = 0.05
     force_fisher: bool = False
     pct: str = "col"               # col | row
+    pct_decimals: int = 1          # decimals for categorical percentages
     missing_as_level: bool = False
+    binary_single: bool = False    # collapse a 2-level categorical to a single row
+    ref: Dict[str, str] = field(default_factory=dict)  # column -> reference level
     overall: bool = True
     decimals: int = 1
     show_pvalue: bool = True        # False -> omit the p-value column (CONSORT: RCT
@@ -239,7 +281,10 @@ def _is_nonnormal(group_vals: Sequence[Sequence[float]], alpha: float,
         tested = True
         if p < alpha:
             nonnormal = True
-    if capped:
+    if capped and tested:
+        # Only note the subsampling when it actually produced a normality result;
+        # if the subsample was constant/untestable the cap note is just noise
+        # alongside the "untestable" note.
         notes.append(_msg(lang, "shapiro_cap", n=_SHAPIRO_MAX_N))
     if not tested:
         notes.append(_msg(lang, "normality_untestable"))
@@ -254,6 +299,8 @@ def _continuous_row(name: str, group_cells: List[List[str]], opt: Options
                     ) -> ContinuousRow:
     per_vals: List[List[float]] = []
     per_missing: List[int] = []
+    unparseable = 0            # non-blank cells that are NOT numbers (units/censor)
+    unparse_examples: List[str] = []
     for cells in group_cells:
         vals = []
         miss = 0
@@ -264,6 +311,14 @@ def _continuous_row(name: str, group_cells: List[List[str]], opt: Options
             f = parse_float(c)
             if f is None:
                 miss += 1  # non-numeric in a continuous column counts as missing
+                # Distinguish a genuinely non-numeric token (e.g. ">100", "12 kg",
+                # a European "1,5") — silently dropping it would bias the mean —
+                # from a non-finite NUMBER (inf/nan), which is legitimately missing.
+                if not is_numeric_token(c):
+                    unparseable += 1
+                    tok = c.strip()[:20]  # cap length; dedup on the stored form
+                    if len(unparse_examples) < 3 and tok not in unparse_examples:
+                        unparse_examples.append(tok)
             else:
                 vals.append(f)
         per_vals.append(vals)
@@ -274,8 +329,20 @@ def _continuous_row(name: str, group_cells: List[List[str]], opt: Options
     overall = _summ(all_vals, sum(per_missing))
 
     notes: List[str] = []
+    if unparseable:
+        notes.append(_msg(opt.lang, "unparseable", n=unparseable,
+                          ex=", ".join(unparse_examples)))
     nonnormal = _is_nonnormal(per_vals, opt.alpha_norm, notes, opt.lang)
-    use_nonparam = bool(nonnormal)  # None -> False (default parametric)
+
+    # The --test-cont override decides parametric vs nonparametric explicitly;
+    # otherwise fall back to the normality-gated default. The normality note above
+    # is still emitted so the user sees why "auto" would have chosen what it did.
+    if opt.test_cont == "nonparam":
+        use_nonparam = True
+    elif opt.test_cont in ("welch", "student"):
+        use_nonparam = False
+    else:  # "auto"
+        use_nonparam = bool(nonnormal)  # None -> False (default parametric)
 
     if opt.display == "auto":
         display = "median" if use_nonparam else "mean"
@@ -293,7 +360,13 @@ def _continuous_row(name: str, group_cells: List[List[str]], opt: Options
             elif use_nonparam:
                 res = mann_whitney_u(per_vals[0], per_vals[1])
                 test_name, pvalue = "Mann-Whitney U", res.pvalue
-            else:
+            elif opt.test_cont == "student":
+                res = students_t(per_vals[0], per_vals[1])
+                test_name, pvalue = "Student t", res.pvalue
+            elif opt.test_cont == "welch":
+                res = welch_t(per_vals[0], per_vals[1])
+                test_name, pvalue = "Welch t", res.pvalue
+            else:  # auto: Levene-gated Student vs Welch
                 lev = levene(per_vals)
                 if lev.pvalue >= opt.alpha_norm:
                     res = students_t(per_vals[0], per_vals[1])
@@ -309,15 +382,23 @@ def _continuous_row(name: str, group_cells: List[List[str]], opt: Options
                 res = kruskal_wallis(per_vals)
                 test_name, pvalue = "Kruskal-Wallis", res.pvalue
             else:
+                # welch/student only alter the 2-group test; for k>=3 there is no
+                # Welch-ANOVA here, so they fall back to one-way ANOVA. The Levene
+                # caution note is a pre-test artifact of "auto" mode — suppress it
+                # when the user has explicitly fixed the test (it would otherwise
+                # recommend the very thing they just chose).
                 res = one_way_anova(per_vals)
                 test_name, pvalue = "One-way ANOVA", res.pvalue
-                if all(s >= 2 for s in sizes):
+                if opt.test_cont == "auto" and all(s >= 2 for s in sizes):
                     lev = levene(per_vals)
                     if lev.pvalue < opt.alpha_norm:
                         notes.append(_msg(opt.lang, "anova_levene",
                                           alpha=opt.alpha_norm))
-    except (ValueError, ZeroDivisionError) as exc:
-        notes.append(_msg(opt.lang, "test_failed", exc=exc))
+    except (ValueError, ZeroDivisionError):
+        # Localized, data-free note (never embed the raw exception text — it may
+        # be an untranslated English message and, defensively, must not carry a
+        # cell value).
+        notes.append(_msg(opt.lang, "test_failed"))
         test_name, pvalue = "—", None
 
     if pvalue is not None and (math.isnan(pvalue) or math.isinf(pvalue)):
@@ -410,8 +491,8 @@ def _categorical_row(name: str, group_cells: List[List[str]], opt: Options
             test_name, pvalue = "Pearson χ²", res.pvalue
             if res.min_expected < 5:
                 notes.append(_msg(opt.lang, "chi_expected_low"))
-    except ValueError as exc:
-        notes.append(_msg(opt.lang, "test_failed", exc=exc))
+    except ValueError:
+        notes.append(_msg(opt.lang, "test_failed"))
         test_name, pvalue = "—", None
 
     if pvalue is not None and (math.isnan(pvalue) or math.isinf(pvalue)):
@@ -473,6 +554,17 @@ def build_table1(frame: Frame, opt: Options) -> Table1:
             f"그룹이 2개 미만입니다(발견: {group_order or '없음'}). "
             "'--group' 열에 2개 이상의 그룹 라벨이 필요합니다.")
 
+    # Warn on group labels that differ only in case (e.g. "Device" vs "device"):
+    # almost always one arm split by a data-entry inconsistency, which would
+    # otherwise silently render as extra arms.
+    by_lower: Dict[str, List[str]] = {}
+    for g in group_order:
+        by_lower.setdefault(g.lower(), []).append(g)
+    for variants in by_lower.values():
+        if len(variants) > 1:
+            warnings.append(_msg(opt.lang, "warn_group_case",
+                                 labels=", ".join(variants)))
+
     row_index_by_group: Dict[str, List[int]] = {g: [] for g in group_order}
     for i in keep_idx:
         row_index_by_group[group_raw[i].strip()].append(i)
@@ -482,6 +574,13 @@ def build_table1(frame: Frame, opt: Options) -> Table1:
     forced_cont = set(opt.continuous)
     forced_cat = set(opt.categorical)
 
+    def _warn_high_missing(row_obj) -> None:
+        # Flag a variable that is mostly missing so a summary resting on a
+        # handful of observations isn't read as if it were complete.
+        if overall_size and row_obj.n_missing_total / overall_size > 0.5:
+            warnings.append(_msg(opt.lang, "warn_high_missing", var=row_obj.name,
+                                 pct=100.0 * row_obj.n_missing_total / overall_size))
+
     rows: List[object] = []
     for var in var_cols:
         col = frame.column(var)
@@ -489,6 +588,8 @@ def build_table1(frame: Frame, opt: Options) -> Table1:
                        for g in group_order]
         if var in forced_cont:
             kind = "continuous"
+            if var in forced_cat:
+                warnings.append(_msg(opt.lang, "warn_type_conflict", var=var))
         elif var in forced_cat:
             kind = "categorical"
         else:
@@ -509,7 +610,9 @@ def build_table1(frame: Frame, opt: Options) -> Table1:
                         float(x).is_integer() for x in distinct):
                     warnings.append(_msg(opt.lang, "warn_int_code",
                                          var=var, n=len(distinct)))
-            rows.append(_continuous_row(var, group_cells, opt))
+            crow = _continuous_row(var, group_cells, opt)
+            _warn_high_missing(crow)
+            rows.append(crow)
         else:
             # Guard against ID-like columns: an auto-detected categorical with a
             # huge number of levels is almost always an identifier or free text.
@@ -520,7 +623,19 @@ def build_table1(frame: Frame, opt: Options) -> Table1:
                 warnings.append(_msg(opt.lang, "warn_too_many_levels",
                                      var=var, n=n_levels))
                 continue
-            rows.append(_categorical_row(var, group_cells, opt))
+            crow = _categorical_row(var, group_cells, opt)
+            # If a --ref level was given for this column but never appears in the
+            # data, warn instead of silently falling back to the default
+            # reference (a typo would otherwise pick the unintended level).
+            ref_level = opt.ref.get(var)
+            if ref_level is not None:
+                observed = [lvl.label for lvl in crow.levels]
+                if ref_level not in observed:
+                    warnings.append(_msg(opt.lang, "warn_ref_missing", var=var,
+                                         level=ref_level,
+                                         levels=", ".join(observed)))
+            _warn_high_missing(crow)
+            rows.append(crow)
 
     if not rows:
         raise ValueError("요약할 수 있는 변수가 없습니다(모두 결측/제외).")

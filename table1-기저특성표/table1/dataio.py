@@ -12,6 +12,7 @@ import csv
 import io
 import math
 import re
+import sys
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence
 
@@ -123,16 +124,31 @@ def _sniff_delimiter(sample: str) -> str:
 
 
 def load_frame(path: str, delimiter: Optional[str] = None) -> Frame:
-    """Load a CSV into a Frame. Raises ValueError / FileNotFoundError on failure."""
-    try:
-        with open(path, "r", newline="", encoding="utf-8-sig") as fh:
-            text = fh.read()
-    except FileNotFoundError:
-        raise
-    except UnicodeDecodeError:
-        raise ValueError(
-            f"'{path}' 을(를) UTF-8로 읽을 수 없습니다. 엑셀에서 "
-            "'CSV UTF-8'로 다시 저장한 뒤 실행하세요.")
+    """Load a CSV into a Frame. Raises ValueError / OSError on failure.
+
+    ``path == "-"`` reads the CSV from standard input, so the tool can sit in a
+    shell pipeline (e.g. ``cut -d, -f2- data.csv | table1 - --group arm``).
+    """
+    if path == "-":
+        # Read bytes so we can strip a UTF-8 BOM and give the same friendly
+        # non-UTF-8 message as for a file.
+        raw = sys.stdin.buffer.read()
+        try:
+            text = raw.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            raise ValueError(
+                "표준입력(stdin)을 UTF-8로 읽을 수 없습니다. "
+                "'CSV UTF-8'로 인코딩해 전달하세요.")
+    else:
+        try:
+            with open(path, "r", newline="", encoding="utf-8-sig") as fh:
+                text = fh.read()
+        except (FileNotFoundError, IsADirectoryError, PermissionError):
+            raise
+        except UnicodeDecodeError:
+            raise ValueError(
+                f"'{path}' 을(를) UTF-8로 읽을 수 없습니다. 엑셀에서 "
+                "'CSV UTF-8'로 다시 저장한 뒤 실행하세요.")
     if not text.strip():
         raise ValueError(f"'{path}' 이(가) 비어 있습니다.")
 

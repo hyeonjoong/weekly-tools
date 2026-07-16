@@ -33,4 +33,4 @@ echo ""
 echo "### 같은 표를 CSV로 저장하려면:"
 echo "\$ table1 examples/serene_baseline.csv --group arm --format csv -o 표1.csv"
 echo ""
-read -p "엔터를 누르면 창이 닫힙니다..."
+read -p "엔터를 누르면 창이 닫힙니다..." _ || true

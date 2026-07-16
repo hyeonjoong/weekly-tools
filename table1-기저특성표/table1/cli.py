@@ -56,8 +56,21 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--display", choices=["auto", "mean", "median", "both"],
                    default="auto",
                    help="연속형 표기: auto(정규성 따라)·mean·median·both (기본 auto)")
+    p.add_argument("--test-cont", choices=["auto", "welch", "student", "nonparam"],
+                   default="auto",
+                   help="연속형 검정 선택: auto(정규성/등분산 사전검정, 기본)·"
+                        "welch(항상 Welch t)·student(항상 Student t)·"
+                        "nonparam(항상 Mann-Whitney/Kruskal). 사전검정을 피하려면 "
+                        "welch 권장(Delacre 2017)")
     p.add_argument("--pct", choices=["col", "row"], default="col",
                    help="범주형 %% 기준: col(그룹 내, 기본)·row(수준 내)")
+    p.add_argument("--pct-decimals", type=int, default=1,
+                   help="범주형 %% 소수 자릿수 (기본 1, 0~10)")
+    p.add_argument("--binary-single", action="store_true",
+                   help="2수준(이진) 범주형을 한 줄로 축약 표시 (예: 'sex = M — n(%%)')")
+    p.add_argument("--ref", nargs="*", metavar="COL=수준", default=None,
+                   help="이진 축약 시 기준(참조) 수준 지정. 표에는 반대 수준을 표시 "
+                        "(예: --ref sex=F 이면 M 행을 표시)")
     p.add_argument("--alpha-norm", type=float, default=0.05,
                    help="정규성/등분산 판정 유의수준 (기본 0.05)")
     p.add_argument("--fisher", action="store_true",
@@ -88,12 +101,12 @@ def _build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def _parse_labels(items: Optional[Sequence[str]]) -> dict:
-    """Parse ``COL=display name`` pairs into a mapping."""
+def _parse_labels(items: Optional[Sequence[str]], flag: str = "--labels") -> dict:
+    """Parse ``COL=value`` pairs into a mapping."""
     out: dict = {}
     for item in items or []:
         if "=" not in item:
-            raise ValueError(f"--labels 항목은 'COL=이름' 형식이어야 합니다: {item!r}")
+            raise ValueError(f"{flag} 항목은 'COL=값' 형식이어야 합니다: {item!r}")
         key, val = item.split("=", 1)
         key = key.strip()
         if key:
@@ -103,8 +116,13 @@ def _parse_labels(items: Optional[Sequence[str]]) -> dict:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = _build_parser().parse_args(argv)
-    if args.decimals < 0:
-        print("입력 오류: --decimals 는 0 이상이어야 합니다.", file=sys.stderr)
+    # Cap decimals: a huge value would zero-pad every number to millions of digits
+    # (unbounded output/memory) with no analytic benefit past ~15 significant figs.
+    if not 0 <= args.decimals <= 15:
+        print("입력 오류: --decimals 는 0~15 사이여야 합니다.", file=sys.stderr)
+        return 2
+    if not 0 <= args.pct_decimals <= 10:
+        print("입력 오류: --pct-decimals 는 0~10 사이여야 합니다.", file=sys.stderr)
         return 2
     if not 0.0 < args.alpha_norm < 1.0:
         print("입력 오류: --alpha-norm 은 0과 1 사이여야 합니다 (예: 0.05).",
@@ -112,6 +130,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 2
     try:
         labels = _parse_labels(args.labels)
+        ref = _parse_labels(args.ref, "--ref")
     except ValueError as exc:
         print(f"입력 오류: {exc}", file=sys.stderr)
         return 2
@@ -127,8 +146,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     except FileNotFoundError:
         print(f"입력 오류: 파일을 찾을 수 없습니다: {args.csv}", file=sys.stderr)
         return 2
+    except IsADirectoryError:
+        print(f"입력 오류: '{args.csv}' 은(는) 폴더입니다. CSV 파일을 지정하세요.",
+              file=sys.stderr)
+        return 2
+    except PermissionError:
+        print(f"입력 오류: 파일을 읽을 권한이 없습니다: {args.csv} "
+              "(엑셀 등에서 열려 있지 않은지 확인하세요).", file=sys.stderr)
+        return 2
     except ValueError as exc:
         print(f"입력 오류: {exc}", file=sys.stderr)
+        return 2
+    except OSError as exc:
+        # Any other filesystem/IO error (bad descriptor, I/O error, ...) — never
+        # let a raw traceback reach the researcher.
+        print(f"입력 오류: 파일을 읽을 수 없습니다: {exc}", file=sys.stderr)
         return 2
 
     opt = Options(
@@ -139,10 +171,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         cat_max_levels=args.cat_max_levels,
         max_display_levels=args.max_levels,
         display=args.display,
+        test_cont=args.test_cont,
         alpha_norm=args.alpha_norm,
         force_fisher=args.fisher,
         pct=args.pct,
+        pct_decimals=args.pct_decimals,
         missing_as_level=args.missing_as_level,
+        binary_single=args.binary_single,
+        ref=ref,
         overall=not args.no_overall,
         decimals=args.decimals,
         show_pvalue=not args.no_pvalue,

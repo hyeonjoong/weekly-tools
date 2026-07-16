@@ -23,4 +23,4 @@
 **SMD**: 표준화 평균차(절대값). |SMD|>0.1 이면 두 군 간 불균형을 시사(범주형은 Yang–Dalton 다변량 SMD).
 
 **경고**
-- 변수 'subject_id' 는 고유값이 48개로 너무 많아 (ID/자유텍스트로 판단) 건너뜀. 표에 넣으려면 '--categorical subject_id' 또는 '--max-levels' 를 쓰세요.
+- 변수 'subject_id' 는 고유값이 48개로 너무 많아 건너뜀(ID·자유텍스트이거나, 단위·기호가 섞인 수치일 수 있음). 수치라면 단위·기호를 제거해 '--continuous subject_id', 범주라면 '--categorical subject_id' 또는 '--max-levels' 를 쓰세요.
