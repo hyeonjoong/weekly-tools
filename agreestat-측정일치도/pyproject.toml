@@ -4,14 +4,16 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agreestat"
-version = "0.1.0"
-description = "측정 방법 일치도(method comparison / agreement) 분석기 — Bland–Altman(LoA·CI), ICC(2,1)/ICC(3,1), Lin's CCC, 반복성, 상관/차이 검정을 한 번에 계산하고 논문용 문장까지 출력 (표준 라이브러리만)"
+version = "0.3.0"
+description = "측정 방법 일치도(method comparison / agreement) 분석기 — 연속형은 Bland–Altman(LoA·CI)·ICC(2,1)/ICC(3,1)·Lin's CCC·반복성·Deming/Passing–Bablok, 범주형은 Cohen's/가중 kappa·Gwet's AC1/AC2·범주별 일치도·군집 보정 CI를 계산하고 논문용 문장까지 출력 (표준 라이브러리만)"
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
 authors = [{ name = "hyeonjoong", email = "hyeonjoongk@gmail.com" }]
 keywords = ["agreement", "bland-altman", "icc", "concordance", "lin-ccc",
-            "method-comparison", "repeatability", "validation", "clinical"]
+            "method-comparison", "repeatability", "validation", "clinical",
+            "cohens-kappa", "weighted-kappa", "gwet-ac1", "inter-rater",
+            "krippendorff-alpha", "agreement-coefficient"]
 
 # No third-party dependencies — every statistic (distribution quantiles,
 # incomplete beta/gamma, ICC/CCC/Bland–Altman) is implemented in the standard

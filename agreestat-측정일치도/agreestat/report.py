@@ -29,9 +29,13 @@ def _p(p: float) -> str:
 def _lvl(alpha: float) -> str:
     """Confidence-level label; avoids the degenerate '0%'/'100%' at extremes."""
     v = (1.0 - alpha) * 100.0
-    if abs(v - round(v)) < 1e-9:
+    if abs(v - round(v)) < 1e-9 and 0 < round(v) < 100:
         return str(int(round(v)))
-    return f"{v:.4g}"
+    for prec in (4, 8, 12, 17):   # e.g. --alpha 1e-12 must not print "100% CI"
+        txt = f"{v:.{prec}g}"
+        if float(txt) not in (0.0, 100.0):
+            return txt
+    return f"{v:.17g}"
 
 
 def _ci(lo: float, hi: float, level: str, d: int = 3, unit: str = "") -> str:
@@ -654,6 +658,16 @@ def render_markdown(res: AnalysisResult) -> str:
     out.append("|---|---|---|---|")
     for r in rows:
         out.append("| " + " | ".join(r) + " |")
+
+    # Markdown is the paste-into-the-paper path; shipping the table without the
+    # warnings would strip exactly the caveats the reader needs (proportional
+    # bias, repeated measures, zero variance, degenerate CIs).
+    if res.warnings:
+        out.append("")
+        out.append("## 주의 / Warnings")
+        out.append("")
+        for w in res.warnings:
+            out.append(f"- {_mdname(w)}")
     return "\n".join(out) + "\n"
 
 

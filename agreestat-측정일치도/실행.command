@@ -4,13 +4,16 @@ cd "$(dirname "$0")"
 echo "=================================================================="
 echo "  agreestat — 측정 방법 일치도(agreement) 분석기"
 echo "=================================================================="
-echo "  두 측정 방법(A vs B)의 짝지은 값을 넣으면 Bland–Altman(bias·LoA·CI),"
-echo "  ICC(2,1)/ICC(3,1), Lin's CCC, 반복성, 방법비교 회귀(Deming·Passing–Bablok),"
-echo "  상관/차이 검정을 한 번에 계산하고 논문에 바로 붙일 문장까지 출력합니다."
+echo "  [연속형] 두 측정 방법(A vs B)의 짝지은 값 → Bland–Altman(bias·LoA·CI),"
+echo "           ICC(2,1)/ICC(3,1), Lin's CCC, 반복성, 방법비교 회귀(Deming·PB)"
+echo "  [범주형] 두 평가자의 범주 판정 → Cohen's kappa·가중 kappa·Gwet's AC1,"
+echo "           범주별 일치도(PPA/NPA), kappa 역설 진단, 주변 동질성 검정"
+echo "  둘 다 논문에 바로 붙일 문장까지 출력합니다."
 echo ""
 echo "  내 데이터로 실행:"
 echo "    python3 -m agreestat.cli 내파일.csv -a 방법A열 -b 방법B열"
 echo "    python3 -m agreestat.cli 내파일.csv -a watch -b ecg -s subject --percent"
+echo "    python3 -m agreestat.cli 내파일.csv --categorical -a 판독1 -b 판독2"
 echo "=================================================================="
 echo ""
 
@@ -39,6 +42,31 @@ echo "### 예제 3) 임상 허용한계 ±2 brpm — 교환가능(interchangeabl
 echo "\$ agreestat examples/resp_rate_good.csv -a contactless_brpm -b band_brpm --accept 2 --markdown"
 echo ""
 run examples/resp_rate_good.csv -a contactless_brpm -b band_brpm --accept 2 --markdown
+
+echo ""
+echo "### 예제 4) [범주형] 수면단계 5단계 — 기기 vs PSG (Cohen's kappa)"
+echo "\$ agreestat examples/sleep_stage_device_vs_psg.csv --categorical \\"
+echo "      -a psg_stage -b device_stage --categories \"W,N1,N2,N3,REM\""
+echo ""
+run examples/sleep_stage_device_vs_psg.csv --categorical \
+    -a psg_stage -b device_stage --categories "W,N1,N2,N3,REM" \
+    --name-a PSG --name-b 기기
+
+echo ""
+echo "### 예제 5) [범주형·순서형] 병변 등급 0–3 — 판독의 2명 (가중 kappa + 기준 판정)"
+echo "\$ agreestat examples/lesion_grade_two_readers.csv --categorical --ordinal --min-kappa 0.6"
+echo ""
+run examples/lesion_grade_two_readers.csv --categorical --ordinal --min-kappa 0.6
+
+echo ""
+echo "### 예제 6) [범주형·군집] 피험자 20명 × epoch 90개 — 군집 보정 CI (-s subject)"
+echo "    naive CI는 기준 0.70을 통과하지만, 군집 보정 CI는 통과하지 못합니다."
+echo "\$ agreestat examples/sleep_stage_clustered.csv --categorical \\"
+echo "      -a psg_stage -b device_stage -s subject --min-kappa 0.70"
+echo ""
+run examples/sleep_stage_clustered.csv --categorical \
+    -a psg_stage -b device_stage -s subject --categories "W,N1,N2,N3,REM" \
+    --min-kappa 0.70
 
 echo ""
 read -p "엔터를 누르면 창이 닫힙니다..."
