@@ -9,11 +9,14 @@ from __future__ import annotations
 
 import csv
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Dict, Iterable, List, Optional
 
 # 결측을 뜻하는 흔한 토큰 (pandas/엑셀 CSV 내보내기에서 자주 나옴). 이 값들은 빈 칸처럼 건너뛴다.
 NULL_TOKENS = {"", "nan", "null", "none", "na", "n/a", "#n/a"}
+
+# 구분자 자동감지에 시도할 후보들 (엑셀 유럽 로케일의 ';', TSV 의 '\t' 등).
+_DELIM_CANDIDATES = ",;\t|"
 
 
 @dataclass(frozen=True)
@@ -56,11 +59,11 @@ def parse_timestamp(raw: str) -> datetime:
 
 
 def _looks_numeric(s: str) -> bool:
-    body = s[1:] if s[:1] in "+-" else s
-    if not body:
+    if not s:
         return False
-    # 숫자와 소수점 한 개까지만 epoch로 취급 (날짜의 '-'/':' 는 제외됨)
-    return body.replace(".", "", 1).isdigit()
+    # 부호 없는 숫자 + 소수점 한 개까지만 epoch로 취급 (날짜의 '-'/':', 음수 epoch는 제외).
+    # 음수/부호 붙은 값은 epoch로 보지 않으므로 아래 ISO 파싱에서 명확한 오류가 난다.
+    return s.replace(".", "", 1).isdigit()
 
 
 def load_events(
@@ -72,6 +75,10 @@ def load_events(
     tz_offset_hours: float = 0.0,
     skip_bad_rows: bool = False,
     counters: Optional[Dict[str, int]] = None,
+    delimiter: Optional[str] = None,
+    dedup: bool = False,
+    date_from: Optional[date] = None,
+    date_to: Optional[date] = None,
 ) -> List[Event]:
     """CSV 파일을 읽어 Event 리스트로 반환 (타임스탬프 오름차순 정렬).
 
@@ -79,42 +86,102 @@ def load_events(
       현지시각 기준이 되도록 보정할 때 쓴다. 예: 로그가 UTC인데 KST(+9) 기준으로
       날짜를 끊고 싶으면 9 를 준다.
     - skip_bad_rows: True 면 파싱 불가한 타임스탬프 행을 오류 없이 건너뛴다(기본은 오류).
-    - counters: 주어지면 {'skipped_missing','skipped_bad'} 카운트를 채워 넣는다.
+    - counters: 주어지면 {'skipped_missing','skipped_bad','deduped','filtered'} 카운트를 채운다.
+    - delimiter: None(기본)이면 구분자를 자동감지(',', ';', 탭, '|')한다. 지정하면 그대로.
+    - dedup: True 면 (user, event, ts) 가 완전히 같은 중복 행을 하나만 남긴다.
+    - date_from/date_to: (tz 보정 후) 이 달력 날짜 구간[포함] 밖의 이벤트를 제외한다.
 
+    열 이름은 앞뒤 공백을 무시하고 매칭하며, 정확히 못 찾으면 대소문자 무시로 재시도한다.
     필수 열이 없으면 명확한 오류를 던진다.
     """
     if counters is None:
         counters = {}
-    counters.setdefault("skipped_missing", 0)
-    counters.setdefault("skipped_bad", 0)
+    for key in ("skipped_missing", "skipped_bad", "deduped", "filtered"):
+        counters.setdefault(key, 0)
+    if date_from is not None and date_to is not None and date_from > date_to:
+        raise ValueError(f"date_from({date_from}) 이 date_to({date_to}) 보다 늦습니다")
     shift = timedelta(hours=tz_offset_hours)
 
     with open(path, "r", newline="", encoding=encoding) as fh:
-        reader = csv.DictReader(fh)
+        sample = fh.read(8192)
+        fh.seek(0)
+        delim = delimiter or _detect_delimiter(sample)
+        reader = csv.DictReader(fh, delimiter=delim)
         if reader.fieldnames is None:
             raise ValueError(f"빈 파일이거나 헤더가 없습니다: {path}")
-        _require_columns(reader.fieldnames, [user_col, event_col, time_col], path)
+        colmap = _resolve_columns(reader.fieldnames, [user_col, event_col, time_col], path)
         events = _rows_to_events(
-            reader, user_col, event_col, time_col, shift, skip_bad_rows, counters
+            reader, colmap[user_col], colmap[event_col], colmap[time_col],
+            shift, skip_bad_rows, counters, date_from, date_to,
         )
 
+    if dedup:
+        events = _dedup(events, counters)
     if not events:
         raise ValueError(f"유효한 데이터 행이 없습니다: {path}")
     events.sort(key=lambda e: (e.ts, e.user))
     return events
 
 
-def _require_columns(fieldnames: Iterable[str], needed: Iterable[str], path: str) -> None:
-    present = set(fieldnames)
-    missing = [c for c in needed if c not in present]
+def _detect_delimiter(sample: str) -> str:
+    """헤더/본문 샘플에서 구분자를 추정. 실패하면 콤마."""
+    if not sample:
+        return ","
+    try:
+        return csv.Sniffer().sniff(sample, delimiters=_DELIM_CANDIDATES).delimiter
+    except csv.Error:
+        # 첫 줄에서 가장 많이 등장하는 후보를 고른다 (동률이면 콤마 우선).
+        first = sample.splitlines()[0] if sample.splitlines() else ""
+        best, best_n = ",", 0
+        for cand in ",;\t|":
+            n = first.count(cand)
+            if n > best_n:
+                best, best_n = cand, n
+        return best
+
+
+def _resolve_columns(
+    fieldnames: Iterable[str], needed: Iterable[str], path: str
+) -> Dict[str, str]:
+    """요청한 열 이름을 실제 헤더 키로 매핑. 공백/대소문자 관용 매칭.
+
+    반환: {요청이름: 실제헤더키}. 못 찾은 열이 있으면 오류.
+    """
+    actual = list(fieldnames)
+    # 여러 헤더가 공백/대소문자만 다른 경우 모호하므로 후보를 모아 둔다.
+    strip_groups: Dict[str, List[str]] = {}
+    lower_groups: Dict[str, List[str]] = {}
+    for fn in actual:
+        strip_groups.setdefault((fn or "").strip(), []).append(fn)
+        lower_groups.setdefault((fn or "").strip().lower(), []).append(fn)
+    resolved: Dict[str, str] = {}
+    missing = []
+    for want in needed:
+        w = want.strip()
+        if w in strip_groups:
+            group = strip_groups[w]
+        elif w.lower() in lower_groups:
+            group = lower_groups[w.lower()]
+        else:
+            missing.append(want)
+            continue
+        if len(group) > 1:
+            raise ValueError(
+                f"열 이름이 모호합니다: {want!r} 에 대응하는 헤더가 여러 개입니다 "
+                f"({group}). 헤더의 공백/대소문자를 정리하거나 정확한 열 이름을 지정하세요."
+            )
+        resolved[want] = group[0]
     if missing:
+        shown = sorted((fn or "").strip() for fn in actual)
         raise ValueError(
-            f"필수 열이 없습니다: {missing} (파일 {path} 의 열: {sorted(present)})"
+            f"필수 열이 없습니다: {missing} (파일 {path} 의 열: {shown})"
         )
+    return resolved
 
 
 def _rows_to_events(
-    reader, user_col, event_col, time_col, shift, skip_bad_rows, counters
+    reader, user_col, event_col, time_col, shift, skip_bad_rows, counters,
+    date_from, date_to,
 ) -> List[Event]:
     events: List[Event] = []
     for i, row in enumerate(reader, start=2):  # 2 = 헤더 다음 첫 데이터 행
@@ -139,5 +206,24 @@ def _rows_to_events(
                 f"{i}행 타임스탬프 파싱 실패 ({raw_ts!r}): {exc}. "
                 f"손상된 행을 건너뛰려면 --skip-bad-rows 를 쓰세요."
             ) from exc
+        d = ts.date()
+        if (date_from is not None and d < date_from) or (
+            date_to is not None and d > date_to
+        ):
+            counters["filtered"] += 1
+            continue
         events.append(Event(user=user, name=name, ts=ts))
     return events
+
+
+def _dedup(events: List[Event], counters: Dict[str, int]) -> List[Event]:
+    seen = set()
+    out: List[Event] = []
+    for e in events:
+        key = (e.user, e.name, e.ts)
+        if key in seen:
+            counters["deduped"] += 1
+            continue
+        seen.add(key)
+        out.append(e)
+    return out
