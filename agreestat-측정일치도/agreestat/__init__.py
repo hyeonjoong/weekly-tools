@@ -11,8 +11,10 @@ Public API:
 """
 
 from .analyze import AnalysisResult, analyze
+from .regression import deming, passing_bablok
 from .report import render_json, render_text
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
-__all__ = ["analyze", "render_text", "render_json", "AnalysisResult"]
+__all__ = ["analyze", "render_text", "render_json", "AnalysisResult",
+           "deming", "passing_bablok"]

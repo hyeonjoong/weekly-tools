@@ -223,12 +223,91 @@ output that misleads. README example numbers still exact; docs match behavior.
 
 ---
 
+## Session 2 (2026-07-16) — Method-comparison regression (Deming & Passing–Bablok) + 3 adversarial rounds
+
+**Motivation.** The tool measured *how far apart* two methods are (Bland–Altman)
+but had only a crude OLS `diff ~ mean` check for the two decisions a
+method-comparison study (CLSI EP09) actually makes: is there **constant bias**
+(intercept ≠ 0) or **proportional bias** (slope ≠ 1)? OLS is the wrong tool —
+it assumes the reference is error-free and biases the slope by regression
+dilution. Added the two standard error-in-both-variables regressions, the single
+most-requested missing capability for a sensor-vs-reference validation.
+
+### Added — real new capability (v0.1.0 → v0.2.0)
+- **Deming regression** (`agreestat/regression.py`, Linnet 1990): closed-form ML
+  slope for a known error-variance ratio λ = Var(err_x)/Var(err_y) (x=reference,
+  y=test; λ=1 = orthogonal), with **leave-one-out jackknife CIs** (t(n−2)) for
+  slope, intercept, and the decision-point bias. Verified: Deming λ=1 slope
+  matches `scipy.odr` to ≤1e-4 and an exact ML minimizer to 2.4e-9 (positive &
+  negative correlation); jackknife SE matches a 20 000-rep bootstrap.
+- **Passing–Bablok regression** (1983): distribution-free, robust to outliers;
+  slope = shifted median of all pairwise slopes (offset K = #{slopes < −1},
+  slope = −1 excluded), rank-based CI `Cγ = z·√(n(n−1)(2n+5)/18)`. Matched an
+  independent reimplementation to **0 difference over 700+ datasets** (incl.
+  x-ties, negative corr) and a hand-computed 4-point example.
+- **`--at Xc` — predicted systematic bias at a medical decision level** (the most
+  actionable EP09 number): `bias(Xc) = intercept + (slope−1)·Xc` in absolute
+  units, with a Deming jackknife CI that correctly captures slope/intercept
+  covariance (a naïve combination of the two marginal CIs is ~9× too wide and
+  would wrongly include 0). With `--accept` it prints a within/outside-limits
+  verdict at that level (absolute mode only).
+- **`--deming-lambda L`** to set the error-variance ratio.
+- Every block wired into the text report ([7] + a "which regression to prefer"
+  guideline), JSON (`regression.*`, `bias_at_decision_point`), markdown table,
+  the paste-ready sentence (Passing–Bablok clause), and an automatic warning when
+  the regression flags a bias the single-number Bland–Altman summary would miss.
+
+### Fixed — findings from three fresh adversarial panels
+- **HIGH / correctness — Deming λ was the reciprocal of its documented meaning.**
+  Two independent reviewers proved `deming(...,lam=L)` computed the fit for error
+  ratio 1/L (the closed form's parameter is δ = Var(err_y)/Var(err_x)). The docs,
+  CLI help, and prose disagreed among themselves. Fixed the code to the standard
+  convention (`delta = 1/lam`, so λ = Var(err_x)/Var(err_y)); λ=1 unchanged. Now
+  the options table, CLI help, docstrings, and prose all agree and match an exact
+  ML fit. (`regression.py`, README, 사용법.md, cli.py)
+- **MED — `--at` with a huge Xc overflowed** the jackknife variance (`**2` raises
+  `OverflowError`) and discarded the entire report with a raw errno. Guarded: skip
+  only the CI, keep the point estimate and the rest of the report; `analyze`/CLI
+  also catch `OverflowError`. (`regression.py`, `analyze.py`)
+- **MED — Deming emitted `inf`/`nan` as `available=True`** on sub-cap magnitudes
+  (`t*t` overflows silently). Added an output-finiteness guard (mirrors the
+  Passing–Bablok guard). Both estimators now also reject non-finite inputs.
+- **MED — Passing–Bablok had no size cap** (O(n²) memory) — added `_MAX_PB_N=3000`
+  with a clear "use Deming / subsample" note (Deming keeps its n>5000 jackknife cap).
+- **MED — decision-point bias mislabeled with the `%` unit in `--percent` mode**
+  and would have compared an absolute bias against a percentage `--accept` limit.
+  The regression is always fit on raw values, so bias(Xc) is absolute; the unit is
+  now dropped and the `--accept` comparison is suppressed (with a note) in percent
+  mode. (`report.py`)
+- **LOW — misleading Passing–Bablok note** ("all points identical/tied" for the
+  all-slopes-−1 anti-correlation case), stale README test count, and
+  `analyze`'s ICC/CCC catch widened to `OverflowError` for absurd magnitudes.
+
+### Tests (160 → 209)
+New `tests/test_regression.py` (Deming closed-form & orthogonal identity, λ→0/∞
+limits, Passing–Bablok hand example + property tests, bias flags, finiteness
+guards, size cap, decision-point CI); `scipy.odr` cross-checks for Deming (λ=1,
+positive & negative); integration in `test_analyze.py`/`test_cli.py` (regression
+blocks, `--deming-lambda`, `--at` text/JSON/markdown, percent-mode unit safety,
+`--accept` verdict, overflow-resilience). Deterministic, offline, ~1.3 s.
+
+**Round verdicts.** R1 correctness: no wrong result except the λ reciprocal
+(fixed). R1 edge: finiteness/cap gaps (fixed). R2 correctness: **no defects** —
+λ, decision-point jackknife (covariance-aware, vs bootstrap), and `--accept`
+logic all verified correct. R2 edge: `--at` overflow + markdown parity (fixed).
+R3 verification: **CLEAN**. R3 docs: only a stale test count (fixed).
+
+---
+
 ## Status
 
-Three clean adversarial rounds. The statistics were verified correct from first
-principles against scipy/pingouin/bootstrap in every round; rounds 2–3 added the
-genuinely-useful features a device-validation researcher needs (repeated-measures
-LoA, regression LoA, interchangeability verdict, precision/required-n,
-markdown/SVG export) and hardened every messy-input path (encoding, non-finite,
-huge-finite, malformed CSV, output errors). The final usefulness review judged
-the tool **complete for its 2-method agreement scope**. Stopping here.
+Two sessions, six clean adversarial rounds total. Session 1 verified the core
+agreement statistics (Bland–Altman, ICC, CCC, repeatability, repeated-measures &
+regression LoA, interchangeability, precision/required-n) correct from first
+principles and hardened every messy-input path. Session 2 added the CLSI EP09
+method-comparison regressions (Deming + Passing–Bablok) and the decision-point
+predicted-bias number a clinician actually uses, fixed a genuine λ-convention
+correctness bug plus a cluster of overflow/robustness edges, and re-verified the
+new math against scipy.odr, an exact ML minimizer, an independent Passing–Bablok
+reimplementation, and a bootstrap. 209 offline tests. The tool now covers the
+full "can method A replace method B?" workflow for paired continuous data.

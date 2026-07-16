@@ -70,6 +70,14 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--target-loa-hw", dest="target_loa_hw", type=float,
                    metavar="H",
                    help="목표 LoA CI 반너비 H. 그 정밀도 달성에 필요한 표본수 n을 계산")
+    p.add_argument("--deming-lambda", dest="deming_lambda", type=float,
+                   default=1.0, metavar="L",
+                   help="Deming 회귀의 오차분산비 λ=Var(err_기준B)/Var(err_검증A) "
+                        "(기본 1.0 = 직교회귀). 값이 클수록 기준(B)의 오차가 크다고 가정")
+    p.add_argument("--at", dest="decision_point", type=float, metavar="XC",
+                   help="의학적 결정수준 XC(기준법 값)에서의 예측 계통편향 "
+                        "bias(XC)=절편+(기울기−1)·XC 를 회귀로 추정 (CLSI EP09). "
+                        "--accept와 함께 쓰면 그 지점 편향이 허용한계 안인지 판정")
     p.add_argument("--json", action="store_true", help="JSON으로 출력")
     p.add_argument("--markdown", nargs="?", const="-", metavar="PATH",
                    help="결과를 마크다운 표로 출력(경로 생략 시 표준출력)")
@@ -118,6 +126,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
               file=sys.stderr)
         return 2
 
+    if not (math.isfinite(args.deming_lambda) and args.deming_lambda > 0.0):
+        print("입력 오류: --deming-lambda 는 0보다 큰 유한한 값이어야 합니다.",
+              file=sys.stderr)
+        return 2
+
+    if args.decision_point is not None and not math.isfinite(args.decision_point):
+        print("입력 오류: --at 는 유한한 값이어야 합니다.", file=sys.stderr)
+        return 2
+
     accept = _resolve_accept(args)
     if accept == "error":
         print("입력 오류: 허용한계는 --accept DELTA 또는 "
@@ -149,6 +166,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             nonfinite=data.nonfinite,
             extra_warnings=data.notes,
             target_loa_hw=args.target_loa_hw,
+            deming_lambda=args.deming_lambda,
+            decision_point=args.decision_point,
         )
     except (ValueError, OverflowError) as exc:
         print(f"분석 오류: {exc}", file=sys.stderr)

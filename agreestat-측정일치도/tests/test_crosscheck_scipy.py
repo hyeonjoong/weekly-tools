@@ -13,6 +13,7 @@ np = pytest.importorskip("numpy")
 stats = pytest.importorskip("scipy.stats")
 
 from agreestat import agreement as A
+from agreestat import regression as Reg
 from agreestat import special as sp
 
 
@@ -118,3 +119,33 @@ def test_icc_ci_matches_independent_mcgraw_wong():
     hi2 = n * (fl_c * msr - mse) / (common + n * fl_c * msr)
     assert abs(icc21.ci_lower - lo2) < 1e-6
     assert abs(icc21.ci_upper - hi2) < 1e-6
+
+
+def test_deming_lambda1_matches_scipy_odr():
+    """Deming with lam=1 is orthogonal distance regression == scipy.odr."""
+    odr = pytest.importorskip("scipy.odr")
+
+    def _f(beta, xx):
+        return beta[0] * xx + beta[1]
+
+    for seed in (1, 2, 3, 21):
+        x, y = _sample(seed)
+        d = Reg.deming(x, y, lam=1.0)
+        out = odr.ODR(odr.Data(x, y), odr.Model(_f), beta0=[1.0, 0.0]).run()
+        slope_ref, intercept_ref = out.beta
+        assert abs(d.slope - slope_ref) < 1e-4
+        assert abs(d.intercept - intercept_ref) < 1e-3
+
+
+def test_deming_negative_slope_matches_odr():
+    odr = pytest.importorskip("scipy.odr")
+
+    def _f(beta, xx):
+        return beta[0] * xx + beta[1]
+
+    random.seed(31)
+    x = [random.gauss(20, 5) for _ in range(40)]
+    y = [-0.8 * xi + 100 + random.gauss(0, 3) for xi in x]
+    d = Reg.deming(x, y, lam=1.0)
+    out = odr.ODR(odr.Data(x, y), odr.Model(_f), beta0=[-1.0, 0.0]).run()
+    assert abs(d.slope - out.beta[0]) < 1e-4

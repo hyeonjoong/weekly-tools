@@ -251,3 +251,92 @@ def test_resolve_accept_errors():
     assert _resolve_accept(_Args(accept=2.0, lo=-1.0)) == "error"
     assert _resolve_accept(_Args(lo=3.0, hi=-1.0)) == "error"  # lo >= hi
     assert _resolve_accept(_Args(lo=1.0)) == "error"  # incomplete
+
+
+# --------------------------------------------------------------------------
+# Method-comparison regression flag
+# --------------------------------------------------------------------------
+def test_cli_regression_in_output(tmp_path, capsys):
+    rc = main([_good_csv(tmp_path), "-a", "x", "-b", "y"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "방법비교 회귀" in out
+    assert "Passing–Bablok" in out and "Deming" in out
+
+
+def test_cli_regression_in_json(tmp_path, capsys):
+    rc = main([_good_csv(tmp_path), "-a", "x", "-b", "y", "--json"])
+    obj = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    reg = obj["regression"]
+    assert reg["deming"]["available"] is True
+    assert reg["passing_bablok"]["available"] is True
+
+
+def test_cli_deming_lambda_accepted(tmp_path, capsys):
+    rc = main([_good_csv(tmp_path), "-a", "x", "-b", "y",
+               "--deming-lambda", "2.5", "--json"])
+    obj = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert obj["regression"]["deming"]["lambda"] == 2.5
+
+
+def test_cli_deming_lambda_rejects_nonpositive(tmp_path, capsys):
+    rc = main([_good_csv(tmp_path), "-a", "x", "-b", "y",
+               "--deming-lambda", "0"])
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "deming-lambda" in err
+
+
+def test_cli_deming_lambda_rejects_inf(tmp_path, capsys):
+    rc = main([_good_csv(tmp_path), "-a", "x", "-b", "y",
+               "--deming-lambda", "inf"])
+    assert rc == 2
+    assert "deming-lambda" in capsys.readouterr().err
+
+
+def test_cli_decision_point_text(tmp_path, capsys):
+    rc = main([_good_csv(tmp_path), "-a", "x", "-b", "y", "--at", "6"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "결정수준" in out and "예측 계통편향" in out
+
+
+def test_cli_decision_point_json(tmp_path, capsys):
+    rc = main([_good_csv(tmp_path), "-a", "x", "-b", "y", "--at", "6", "--json"])
+    obj = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    dp = obj["regression"]["deming"]["bias_at_decision_point"]
+    assert dp["level"] == 6.0
+    assert dp["bias"] is not None and dp["bias_ci"][0] is not None
+
+
+def test_cli_decision_point_with_accept_verdict(tmp_path, capsys):
+    rc = main([_good_csv(tmp_path), "-a", "x", "-b", "y",
+               "--at", "6", "--accept", "3"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "허용한계" in out and "bias(XC)" in out
+
+
+def test_cli_decision_point_rejects_inf(tmp_path, capsys):
+    rc = main([_good_csv(tmp_path), "-a", "x", "-b", "y", "--at", "inf"])
+    assert rc == 2
+    assert "--at" in capsys.readouterr().err
+
+
+def test_cli_extreme_at_does_not_nuke_report(tmp_path, capsys):
+    # a huge --at must not discard the whole report with a raw errno
+    rc = main([_good_csv(tmp_path), "-a", "x", "-b", "y", "--at", "1e200"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "Bland" in out and "ICC" in out and "결정수준" in out
+
+
+def test_cli_markdown_shows_decision_point(tmp_path, capsys):
+    rc = main([_good_csv(tmp_path), "-a", "x", "-b", "y", "--at", "6",
+               "--markdown"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "Predicted bias at Xc" in out

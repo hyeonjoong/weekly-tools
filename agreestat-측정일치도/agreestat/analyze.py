@@ -12,7 +12,7 @@ import math
 from dataclasses import dataclass, field
 from typing import List, Optional, Sequence, Tuple
 
-from . import agreement
+from . import agreement, regression
 from .agreement import (
     BlandAltmanResult,
     CCCResult,
@@ -23,6 +23,7 @@ from .agreement import (
     RepeatedMeasuresBA,
     interpret_icc,
 )
+from .regression import DemingResult, PassingBablokResult
 
 __all__ = ["AnalysisResult", "analyze"]
 
@@ -56,6 +57,9 @@ class AnalysisResult:
     interchangeable: Optional[bool] = None
     # repeated-measures LoA (when a subject column with replicates exists)
     rm_ba: Optional[RepeatedMeasuresBA] = None
+    # method-comparison regression (CLSI EP09): test A regressed on reference B
+    deming: Optional[DemingResult] = None
+    passing_bablok: Optional[PassingBablokResult] = None
     # LoA-CI precision / required-n guidance
     precision_target_hw: Optional[float] = None
     precision_required_n: Optional[int] = None
@@ -74,7 +78,9 @@ def analyze(a: Sequence[float], b: Sequence[float],
             accept: Optional[Tuple[float, float]] = None,
             nonfinite: int = 0,
             extra_warnings: Optional[Sequence[str]] = None,
-            target_loa_hw: Optional[float] = None) -> AnalysisResult:
+            target_loa_hw: Optional[float] = None,
+            deming_lambda: float = 1.0,
+            decision_point: Optional[float] = None) -> AnalysisResult:
     """Run every agreement statistic and return an :class:`AnalysisResult`.
 
     ``accept`` = (lower, upper) pre-specified clinically acceptable difference;
@@ -131,7 +137,7 @@ def analyze(a: Sequence[float], b: Sequence[float],
     rows = [[x, y] for x, y in zip(a, b)]
     try:
         icc21, icc31, _ms = agreement.icc(rows, alpha=alpha)
-    except ValueError as exc:
+    except (ValueError, OverflowError) as exc:
         warnings.append(f"ICC 계산 불가: {exc}")
         nan = float("nan")
         icc21 = ICCResult("ICC(2,1)", "", nan, nan, nan, nan, nan, nan, nan,
@@ -141,7 +147,7 @@ def analyze(a: Sequence[float], b: Sequence[float],
 
     try:
         ccc_res = agreement.ccc(a, b, alpha=alpha)
-    except ValueError as exc:
+    except (ValueError, OverflowError) as exc:
         warnings.append(f"CCC 계산 불가: {exc}")
         nan = float("nan")
         ccc_res = CCCResult(nan, nan, nan, nan, nan, "판정 불가 / undefined", alpha)
@@ -179,6 +185,20 @@ def analyze(a: Sequence[float], b: Sequence[float],
 
     pear = agreement.pearson(a, b, alpha=alpha)
     paired = agreement.paired_t(a, b)
+
+    # Method-comparison regression (CLSI EP09): regress the TEST method (A, y) on
+    # the REFERENCE method (B, x). Slope CI excluding 1 => proportional bias;
+    # intercept CI excluding 0 => constant bias. Deming assumes error in both
+    # methods (unlike the OLS diff~mean check above); Passing–Bablok is
+    # distribution-free and robust to outliers.
+    try:
+        deming_res = regression.deming(b, a, lam=deming_lambda, alpha=alpha,
+                                       decision_point=decision_point)
+    except (ValueError, OverflowError) as exc:
+        deming_res = DemingResult(False, f"Deming 계산 불가: {exc}")
+    pb_res = regression.passing_bablok(b, a, alpha=alpha,
+                                       decision_point=decision_point)
+    _regression_warnings(deming_res, pb_res, warnings)
 
     accept_lower = accept_upper = None
     interchangeable: Optional[bool] = None
@@ -224,7 +244,29 @@ def analyze(a: Sequence[float], b: Sequence[float],
         interchangeable=interchangeable, rm_ba=rm_ba,
         precision_target_hw=target_loa_hw,
         precision_required_n=req_n,
-        precision_required_n_approx=req_n_approx)
+        precision_required_n_approx=req_n_approx,
+        deming=deming_res, passing_bablok=pb_res)
+
+
+def _regression_warnings(deming_res: DemingResult, pb_res: PassingBablokResult,
+                         warnings: List[str]) -> None:
+    """Warn when the error-in-both-variables regression flags a bias the naive
+    Bland-Altman single-bias summary would miss."""
+    flags = []
+    if pb_res is not None and pb_res.available:
+        if pb_res.constant_bias:
+            flags.append(
+                f"상수 편향(constant bias): Passing–Bablok 절편 CI가 0을 "
+                f"제외 (절편={_num(pb_res.intercept, 3)})")
+        if pb_res.proportional_bias:
+            flags.append(
+                f"비례 편향(proportional bias): Passing–Bablok 기울기 CI가 1을 "
+                f"제외 (기울기={_num(pb_res.slope, 3)})")
+    if flags:
+        warnings.append(
+            "방법비교 회귀(CLSI EP09)에서 계통오차가 감지되었습니다 — "
+            + "; ".join(flags) + ". Bland–Altman의 단일 bias 요약만으로는 "
+            "이런 크기-의존/상수 편향을 놓칠 수 있으니 회귀 결과도 함께 보고하세요.")
 
 
 _Z_LOA = 1.96
