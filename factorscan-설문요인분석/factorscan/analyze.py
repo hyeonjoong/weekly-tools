@@ -43,9 +43,18 @@ def analyze(prep: Prepared,
         "n_total": prep.n_total,
         "n_used": prep.n_used,
         "n_dropped": prep.n_dropped,
+        "extraction": "principal_component",  # 추출 방식(SPSS 기본과 동일)
         "warnings": [],
         "notes": [],
     }
+
+    # 숫자로 못 읽어 결측처리된 값이 있으면(오타·문자 혼입·이상한 구분자) 알린다.
+    coercion = getattr(prep, "coercion", {}) or {}
+    if coercion:
+        detail = ", ".join(f"{k}({v}개)" for k, v in coercion.items())
+        result["warnings"].append(
+            f"숫자로 해석할 수 없어 결측처리된 값이 있습니다: {detail}. "
+            f"오타나 잘못된 구분자가 아닌지 확인하세요.")
 
     if p < 2:
         raise ValueError("요인분석에는 최소 2개 이상의 문항(열)이 필요합니다.")
@@ -70,6 +79,16 @@ def analyze(prep: Prepared,
     r = efa.correlation_matrix(x)
     result["correlation_matrix"] = r
     pos_def = efa.is_positive_definite(r)
+
+    # 상관행렬 행렬식(다중공선성 진단): 0에 가까우면 문항 간 과도한 중복/완전상관 신호.
+    with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
+        sign_r, logdet_r = np.linalg.slogdet(r)
+    det_r = float(np.exp(logdet_r)) if sign_r > 0 else 0.0
+    result["r_determinant"] = det_r
+    if 0.0 < det_r < 1e-5:
+        result["warnings"].append(
+            f"상관행렬 행렬식이 매우 작습니다(det={det_r:.2e}). 문항 간 다중공선성(거의 중복되는 "
+            f"문항)이 의심되니 중복 문항을 확인하세요.")
 
     # --- 요인분석 적합성: Bartlett & KMO (역행렬/행렬식 필요) ---
     if pos_def:
@@ -99,12 +118,22 @@ def analyze(prep: Prepared,
     result["cum_variance"] = eig.cum_variance.tolist()
     result["kaiser_k"] = eig.kaiser_k
 
+    # 평행분석 관련 키는 생략/불가 시에도 항상 존재(null)하도록 초기화 — JSON 스키마 안정성.
     pa_k = None
+    result["parallel_eigenvalues"] = None
+    result["parallel_k"] = None
     if parallel_iter and parallel_iter > 0:
-        pa = efa.parallel_analysis(n, p, iters=parallel_iter, seed=seed)
-        result["parallel_eigenvalues"] = pa.tolist()
-        pa_k = int(np.sum(eig.values > pa))
-        result["parallel_k"] = pa_k
+        if n <= p:
+            # n<=p 이면 무작위 상관행렬도 특이(0/음수 고유값 포함)해 기준선이 왜곡된다.
+            result["warnings"].append(
+                f"평행분석 생략: 응답자 수(n={n})가 문항 수(p={p}) 이하여서 "
+                f"무작위 기준선이 왜곡됩니다.")
+        else:
+            pa = efa.parallel_analysis(n, p, iters=parallel_iter, seed=seed)
+            result["parallel_eigenvalues"] = pa.tolist()
+            # 첫 교차(관측<=무작위)에서 멈추는 표준 규칙으로 선행 요인 수만 센다.
+            pa_k = efa.retained_by_parallel(eig.values, pa)
+            result["parallel_k"] = pa_k
 
     # --- 유지 요인 수 결정 ---
     # 기본값: 평행분석(Horn)을 우선한다. Kaiser 기준(고유값>1)은 요인을 과대추정하는
@@ -133,25 +162,87 @@ def analyze(prep: Prepared,
 
     # --- 적재량 / 회전 / 공통성 ---
     raw = efa.component_loadings(r, k)
-    rotated = raw
-    applied_rotation = "none"
-    if rotation == "varimax" and k >= 2:
+    phi = None                      # 요인 상관행렬(사교회전/추정)
+    if k >= 2 and rotation == "varimax":
         rotated = efa.varimax(raw)
         applied_rotation = "varimax"
-    rotated = efa.apply_sign_convention(rotated)
-    result["rotation"] = applied_rotation
-    result["loadings"] = rotated.tolist()
-    comm = efa.communalities(rotated)
-    result["communalities"] = comm.tolist()
+    elif k >= 2 and rotation == "promax":
+        rotated, phi = efa.promax(raw)
+        applied_rotation = "promax"
+    else:
+        rotated = raw
+        applied_rotation = "none"
 
-    # 회전 후 요인별 설명분산(적재제곱합)
-    ss_loadings = (rotated ** 2).sum(axis=0)
+    # 부호 정렬(관례). 사교회전이면 요인 상관행렬 phi의 부호도 함께 뒤집는다.
+    signs = efa.sign_convention_signs(rotated)
+    rotated = rotated * signs
+    if phi is not None:
+        phi = phi * np.outer(signs, signs)
+
+    result["rotation"] = applied_rotation
+    if applied_rotation == "none" and k >= 2:
+        result["notes"].append(
+            "비회전(rotation=none) 상태에서는 첫 성분에 문항이 몰려 교차적재 플래그·요인별 ω·"
+            "요인총점이 왜곡될 수 있습니다. 문항의 요인 소속 해석에는 Varimax 회전을 권장합니다.")
+    result["loadings"] = rotated.tolist()
+
+    # 구조행렬 S = P Φ (직교회전이면 Φ=I 이므로 S=P). 요인-문항 상관이며 |성분|≤1.
+    structure = rotated @ phi if phi is not None else rotated
+
+    # 공통성·설명분산: 직교회전은 적재제곱합, 사교(promax)회전은 구조행렬 S=PΦ 사용.
+    if applied_rotation == "promax" and phi is not None:
+        comm = np.einsum("ij,ij->i", rotated, structure)  # diag(P Φ Pᵀ)
+        ss_loadings = (structure ** 2).sum(axis=0)
+        result["notes"].append(
+            "사교(promax)회전이 적용되었습니다. 요인이 서로 상관되어 요인별 설명분산이 겹치므로 "
+            "합이 총분산과 일치하지 않을 수 있습니다(구조행렬 기준).")
+    else:
+        comm = efa.communalities(rotated)
+        ss_loadings = (rotated ** 2).sum(axis=0)
+    result["communalities"] = comm.tolist()
     result["ss_loadings"] = ss_loadings.tolist()
     result["ss_prop_variance"] = (ss_loadings / p).tolist()
 
-    # --- 수정된 문항-총점 상관 ---
-    it = efa.corrected_item_total(x)
-    result["item_total"] = it.tolist()
+    # 요인 상관 진단: 어떤 회전이든 promax로 요인 상관을 추정해 사교회전 필요성을 안내.
+    if k >= 2:
+        if phi is not None:
+            phi_est = phi
+        else:
+            est_pattern, est_phi = efa.promax(raw)
+            est_phi = est_phi * np.outer(efa.sign_convention_signs(est_pattern),
+                                         efa.sign_convention_signs(est_pattern))
+            phi_est = est_phi
+        result["factor_correlation"] = np.asarray(phi_est).tolist()
+        off = phi_est[np.triu_indices_from(phi_est, k=1)]
+        max_abs = float(np.max(np.abs(off))) if off.size else 0.0
+        result["factor_correlation_max"] = max_abs
+        if max_abs >= 0.32 and applied_rotation != "promax":
+            result["notes"].append(
+                f"요인 간 상관 추정치가 큽니다(|r|최대={max_abs:.2f}, promax 기준). 요인들이 서로 "
+                f"상관되어 있을 수 있으니 사교회전(--rotation promax)도 함께 검토하세요.")
+    else:
+        result["factor_correlation"] = None
+        result["factor_correlation_max"] = None
+
+    # 각 문항의 주적재 요인(0-based) — 하위척도 그룹핑에 사용
+    groups = np.argmax(np.abs(rotated), axis=1)
+
+    # --- 수정된 문항-총점 상관: 전체 척도 기준 + 소속 요인(하위척도) 기준 ---
+    it_overall = efa.corrected_item_total(x)
+    it_factor = efa.corrected_item_total_by_group(x, groups)
+    result["item_total_overall"] = it_overall.tolist()   # 전체 문항 합 기준
+    result["item_total_by_factor"] = it_factor.tolist()  # 소속 요인 내 합 기준(다차원 권장)
+    # 다차원 척도에서는 소속 요인 기준을 진단·표시에 쓴다(k=1이면 둘이 동일).
+    it = it_factor
+
+    # --- 모형 적합도(재현 상관행렬 잔차) + 요인별 신뢰도(McDonald ω) ---
+    # 사교(promax) 회전이면 R̂ = P Φ Pᵀ 로 재현해야 RMSR이 올바르다.
+    resid_phi = phi if applied_rotation == "promax" else None
+    result["residual"] = efa.residual_stats(r, rotated, phi=resid_phi)
+    # ω는 구조행렬(요인-문항 상관, |값|≤1)로 계산 → 사교회전에서도 [0,1] 유계 보장.
+    # 직교회전이면 structure==loadings 이므로 값이 동일하다.
+    omega = efa.omega_by_group(structure, groups)
+    result["omega"] = [omega.get(f) for f in range(k)]
 
     # --- 문항별 진단 플래그 ---
     msa = result["kmo"]["per_item"] if result.get("kmo") else [None] * p
@@ -159,7 +250,7 @@ def analyze(prep: Prepared,
     for i, name in enumerate(names):
         row = rotated[i]
         abs_row = np.abs(row)
-        top = int(np.argmax(abs_row))
+        top = int(groups[i])
         loads = np.where(abs_row >= min_loading)[0]
         problems = []
         if msa[i] is not None and msa[i] < MSA_POOR:
@@ -176,6 +267,7 @@ def analyze(prep: Prepared,
             "item": name,
             "primary_factor": top + 1,
             "primary_loading": float(row[top]),
+            "msa": float(msa[i]) if msa[i] is not None else None,
             "problems": problems,
         })
     result["item_flags"] = flags
