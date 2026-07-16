@@ -13,9 +13,12 @@ from .timedomain import time_domain, geometric_indices
 from .nonlinear import poincare, sample_entropy, dfa, dfa_alpha
 from .frequency import frequency_domain
 from .analyze import HRVResult, analyze_rr, flat_metrics
-from .stats import wilcoxon_signed_rank, paired_summary
+from .stats import (wilcoxon_signed_rank, paired_summary, hodges_lehmann,
+                    wilcoxon_ci, holm_adjust, benjamini_hochberg,
+                    walsh_averages)
 from .report import (render_text, render_comparison, render_batch_table,
-                     render_paired_group, paired_group, metrics_to_csv)
+                     render_paired_group, paired_group, metrics_to_csv,
+                     paired_group_to_csv)
 
 __all__ = [
     "clean_rr",
@@ -32,12 +35,18 @@ __all__ = [
     "HRVResult",
     "wilcoxon_signed_rank",
     "paired_summary",
+    "hodges_lehmann",
+    "wilcoxon_ci",
+    "walsh_averages",
+    "holm_adjust",
+    "benjamini_hochberg",
     "render_text",
     "render_comparison",
     "render_batch_table",
     "render_paired_group",
     "paired_group",
     "metrics_to_csv",
+    "paired_group_to_csv",
 ]
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"

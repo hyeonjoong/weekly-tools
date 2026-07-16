@@ -29,8 +29,9 @@ from typing import Any, List, Optional, Sequence
 from . import __version__
 from .analyze import HRVResult, analyze_rr, flat_metrics
 from .dataio import load_manifest, load_series
-from .report import (metrics_to_csv, paired_group, render_batch_table,
-                     render_comparison, render_paired_group, render_text)
+from .report import (metrics_to_csv, paired_group, paired_group_to_csv,
+                     render_batch_table, render_comparison,
+                     render_paired_group, render_text)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -61,13 +62,22 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="국소 중앙값 대비 상대 급변 임계값 (기본 0.2 = 20%%)")
     p.add_argument("--fs", type=float, default=4.0,
                    help="주파수영역 리샘플 주파수 Hz (기본 4)")
+    p.add_argument("--nperseg", type=int, default=None,
+                   help="Welch 구간 길이(표본, 2의 거듭제곱으로 내림). 기본은 기록의 "
+                        "약 절반(상한 256 = fs 4 Hz 기준 64초). 구간이 길수록 저주파 "
+                        "해상도가 좋아지지만 평균할 구간 수가 줄어 분산이 커집니다. "
+                        "VLF(0.003–0.04 Hz)를 신뢰하려면 구간이 333초 이상이어야 "
+                        "하므로 긴 기록에서 예: --nperseg 2048 (fs 4 Hz → 512초)")
     p.add_argument("--no-sampen", action="store_true",
                    help="표본 엔트로피(SampEn) 계산 생략")
     p.add_argument("--compare", action="store_true",
                    help="정확히 2개 파일을 기저 대 개입으로 짝지어 비교")
     p.add_argument("--paired", metavar="MANIFEST",
                    help="매니페스트 CSV(기저,개입[,라벨] 열)로 여러 피험자 코호트 "
-                        "통계(Wilcoxon·효과크기)를 계산")
+                        "통계(Wilcoxon·효과크기·HL 신뢰구간·다중비교 보정)를 계산")
+    p.add_argument("--alpha", type=float, default=0.05,
+                   help="유의수준 — Hodges–Lehmann 신뢰구간은 1-alpha 수준으로, "
+                        "유의성 판정도 이 값 기준 (기본 0.05 → 95%% CI)")
     p.add_argument("--format", default=None,
                    choices=["text", "json", "csv"],
                    help="출력 형식 (기본 text; --json 은 --format json 과 동일)")
@@ -114,11 +124,16 @@ def _analyze_file(args, path: str) -> HRVResult:
         min_rr=args.min_rr,
         max_rr=args.max_rr,
         rel_thresh=args.rel_thresh,
+        nperseg=args.nperseg,
         do_sampen=not args.no_sampen,
     )
     if meta["n_dropped"]:
         res.warnings.append(
             f"{meta['n_dropped']}개 셀이 비수치/빈칸으로 무시되었습니다.")
+    if meta.get("unit_note"):
+        res.warnings.append(meta["unit_note"])
+    if meta.get("column_note"):
+        res.warnings.append(meta["column_note"])
     if meta.get("looks_like_timestamps"):
         res.warnings.append(
             "값이 누적 박동 발생시각처럼 보입니다. 간격(RR)이 아니라 발생시각이라면 "
@@ -135,6 +150,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = _build_parser().parse_args(argv)
     fmt = args.format or ("json" if args.json else "text")
     paths: List[str] = args.csv
+
+    if not (0.0 < args.alpha < 1.0):
+        print(f"입력 오류: --alpha 는 0과 1 사이여야 합니다 (받은 값: {args.alpha:g}).",
+              file=sys.stderr)
+        return 2
 
     # ---- 짝지은 코호트 통계 (--paired MANIFEST) ----
     if args.paired:
@@ -154,10 +174,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 return 2
             result_pairs.append((b, v))
         if fmt == "json":
-            g = paired_group(result_pairs)
+            g = paired_group(result_pairs, alpha=args.alpha)
             _print_json({"mode": "paired", **g})
+        elif fmt == "csv":
+            print(paired_group_to_csv(result_pairs, alpha=args.alpha), end="")
         else:
-            print(render_paired_group(result_pairs))
+            print(render_paired_group(result_pairs, alpha=args.alpha))
         return 0
 
     if not paths:
