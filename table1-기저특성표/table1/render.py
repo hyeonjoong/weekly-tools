@@ -62,6 +62,13 @@ _LANG = {
         "leg_padj": ("**p(보정)**: {method} 다중비교 보정(변수 {m}개 기준). "
                      "무작위배정 시험의 기저 p값 보정은 권장되지 않습니다"
                      "(비교/관찰 연구용)."),
+        "leg_weighted": ("**가중 분석**: 가중치 열 '{col}' 로 가중한 유사모집단"
+                         "(pseudo-population) 요약입니다. 연속형은 가중 평균(가중 SD) "
+                         "또는 가중 중앙값[가중 IQR], 범주형은 **가중 n(가중 %)** 이며, "
+                         "머리글의 n 은 실제 관측 수, ESS 는 Kish 유효표본수"
+                         "((Σw)²/Σw²)입니다. 균형은 **가중 SMD**(Austin & Stuart 2015)로 "
+                         "판단하세요 — 가중 p값·차이(95% CI)는 설계기반 분산이 필요해 "
+                         "생략했습니다."),
     },
     "en": {
         "title": "Table 1. Baseline characteristics",
@@ -113,6 +120,16 @@ _LANG = {
                      "(family of {m} variables). Adjusting baseline p-values in a "
                      "randomized trial is discouraged (for comparative/"
                      "observational tables)."),
+        "leg_weighted": ("**Weighted analysis**: summaries describe the "
+                         "pseudo-population weighted by column '{col}'. "
+                         "Continuous = weighted mean (weighted SD) or weighted "
+                         "median [weighted IQR]; categorical = **weighted n "
+                         "(weighted %)**. In the header, n is the raw number of "
+                         "observations and ESS is Kish's effective sample size "
+                         "((sum w)^2 / sum w^2). Judge balance with the "
+                         "**weighted SMD** (Austin & Stuart 2015) — weighted "
+                         "p-values and difference CIs need design-based "
+                         "variances and are omitted."),
     },
 }
 
@@ -246,6 +263,51 @@ def _cat_cell(count: int, denom: int, level_total: int, pct_mode: str,
     return f"{count} ({_fmt_num(p, pct_decimals)})"
 
 
+def _ess_suffix(t: Table1, gi: Optional[int], opt: Options) -> str:
+    """', ESS=…' for a weighted group header ('' when unweighted).
+
+    Kish's effective sample size is the honest denominator of a weighted group:
+    it equals n when the weights are equal and shrinks as they spread out, so a
+    reader can see immediately how much information an IPTW arm really carries.
+    ``gi=None`` gives the whole-cohort ESS (pooled across groups).
+    """
+    if not t.meta.get("weighted"):
+        return ""
+    ess = t.meta.get("ess") or []
+    if gi is None:
+        # Pooled over every retained row's weight — NOT the sum of the per-group
+        # ESS values, which is a different (larger) quantity.
+        pooled = t.meta.get("ess_overall")
+        return "" if pooled is None else f", ESS={_fmt_num(pooled, 1)}"
+    if gi >= len(ess):
+        return ""
+    return f", ESS={_fmt_num(ess[gi], 1)}"
+
+
+def _cat_cell_for(row: CategoricalRow, lvl, gi: Optional[int],
+                  opt: Options) -> str:
+    """Render one categorical cell — the Overall column when ``gi`` is None,
+    otherwise group ``gi``.
+
+    Single choke point for the count/percent basis so the weighted and
+    unweighted tables cannot drift apart across the four renderers. Under
+    weighting the cell shows the *summed weight* and the *weighted* percent
+    (the pseudo-population is what a weighted Table 1 describes); the raw
+    head-count still drives the header n and the missing counts.
+    """
+    if row.wdenom_per_group is not None and lvl.wcounts is not None:
+        count = lvl.woverall if gi is None else lvl.wcounts[gi]
+        denom = (row.woverall_denom if gi is None
+                 else row.wdenom_per_group[gi])
+        base = lvl.woverall if row.pct == "row" else denom
+        p = 100.0 * count / base if base else float("nan")
+        return (f"{_fmt_num(count, opt.decimals)} "
+                f"({_fmt_num(p, opt.pct_decimals)})")
+    count = lvl.overall if gi is None else lvl.counts[gi]
+    denom = row.overall_denom if gi is None else row.denom_per_group[gi]
+    return _cat_cell(count, denom, lvl.overall, row.pct, opt.pct_decimals)
+
+
 def _binary_collapse(row: CategoricalRow, opt: Options):
     """For --binary-single: the single CatLevel to display for a 2-level
     categorical, or None if the row should render normally.
@@ -285,8 +347,14 @@ def _col_flags(t: Table1, opt: Options):
     """
     two_group = len(t.groups) == 2
     single_group = len(t.groups) < 2
-    show_p = opt.show_pvalue and not single_group
-    show_effect = two_group and getattr(opt, "effect", False)
+    # A weighted table has no p-values, no adjusted p-values and no effect CI
+    # (all would need design-based variances) — build_table1 records the
+    # decision in meta so every renderer agrees with the builder rather than
+    # re-deriving it.
+    weighted = bool(t.meta.get("weighted"))
+    show_p = bool(t.meta.get("show_pvalue", opt.show_pvalue)) and not single_group
+    show_effect = (two_group and getattr(opt, "effect", False)
+                   and not weighted)
     # Only show the adjusted-p column when at least one variable is actually
     # testable; otherwise the column is all "—" and the legend reads "0 vars".
     any_testable = any(getattr(r, "pvalue", None) is not None for r in t.rows)
@@ -318,7 +386,8 @@ def _render_markdown(t: Table1, opt: Options) -> str:
     # so show only Overall (forced on) and drop the test column.
     show_overall = True if single_group else opt.overall
     show_groups = not single_group
-    show_test = not single_group
+    # No test is run under weighting, so the 검정/Test column is dropped too.
+    show_test = not single_group and not bool(t.meta.get("weighted"))
     out: List[str] = []
     out.append("## " + L["title"])
     out.append("")
@@ -352,10 +421,11 @@ def _render_markdown(t: Table1, opt: Options) -> str:
 
     headers = [L["char"]]
     if show_overall:
-        headers.append(f"{L['overall']} (N={t.overall_size})")
+        headers.append(f"{L['overall']} (N={t.overall_size}"
+                       f"{_ess_suffix(t, None, opt)})")
     if show_groups:
-        for g, n in zip(t.groups, t.group_sizes):
-            headers.append(f"{_md_escape(g)} (n={n})")
+        for gi, (g, n) in enumerate(zip(t.groups, t.group_sizes)):
+            headers.append(f"{_md_escape(g)} (n={n}{_ess_suffix(t, gi, opt)})")
     if show_effect:
         headers.append(L["effect"])
     if show_p:
@@ -420,12 +490,10 @@ def _render_markdown(t: Table1, opt: Options) -> str:
                          + note_suffix(row.notes))
                 cells = [label]
                 if show_overall:
-                    cells.append(_cat_cell(single.overall, row.overall_denom,
-                                           single.overall, row.pct, pd))
+                    cells.append(_cat_cell_for(row, single, None, opt))
                 if show_groups:
                     for gi, c in enumerate(single.counts):
-                        cells.append(_cat_cell(c, row.denom_per_group[gi],
-                                               single.overall, row.pct, pd))
+                        cells.append(_cat_cell_for(row, single, gi, opt))
                 cells.extend(value_tail(row, with_level=False))
                 out.append("| " + " | ".join(cells) + " |")
                 continue
@@ -443,12 +511,10 @@ def _render_markdown(t: Table1, opt: Options) -> str:
             for lvl in row.levels:
                 lcells = [" " + _md_escape(lvl.label)]
                 if show_overall:
-                    lcells.append(_cat_cell(lvl.overall, row.overall_denom,
-                                            lvl.overall, row.pct, pd))
+                    lcells.append(_cat_cell_for(row, lvl, None, opt))
                 if show_groups:
                     for gi, c in enumerate(lvl.counts):
-                        lcells.append(_cat_cell(c, row.denom_per_group[gi],
-                                                lvl.overall, row.pct, pd))
+                        lcells.append(_cat_cell_for(row, lvl, gi, opt))
                 lcells.extend(blank_tail())
                 out.append("| " + " | ".join(lcells) + " |")
 
@@ -466,6 +532,11 @@ def _render_markdown(t: Table1, opt: Options) -> str:
     else:
         pct_desc = L["pct_row"]
     legend = [L["leg_notation"] + pct_desc + "."]
+    if t.meta.get("weighted"):
+        # State the weighting up front: every number above it is a weighted
+        # (pseudo-population) quantity, which a reader must not mistake for a
+        # raw count.
+        legend.append(L["leg_weighted"].format(col=t.meta.get("weight_col")))
     if show_effect:
         legend.append(L["leg_effect"])
     if show_p:
@@ -512,7 +583,8 @@ def _render_delimited(t: Table1, opt: Options, delim: str) -> str:
     two_group, show_p, show_effect, show_padj, single_group = _col_flags(t, opt)
     show_overall = True if single_group else opt.overall
     show_groups = not single_group
-    show_test = not single_group
+    # No test is run under weighting, so the 검정/Test column is dropped too.
+    show_test = not single_group and not bool(t.meta.get("weighted"))
     buf = io.StringIO()
     writer = _csv.writer(buf, delimiter=delim, lineterminator="\n")
 
@@ -520,7 +592,8 @@ def _render_delimited(t: Table1, opt: Options, delim: str) -> str:
     if show_overall:
         header.append(f"overall_N={t.overall_size}")
     if show_groups:
-        header += [f"{g}_n={n}" for g, n in zip(t.groups, t.group_sizes)]
+        header += [f"{g}_n={n}{_ess_suffix(t, gi, opt)}"
+                   for gi, (g, n) in enumerate(zip(t.groups, t.group_sizes))]
     if show_p:
         header.append("p_value")
     if show_test:
@@ -579,12 +652,10 @@ def _render_delimited(t: Table1, opt: Options, delim: str) -> str:
             if single is not None:
                 line = [sname, _csv_safe(single.label)]
                 if show_overall:
-                    line.append(_cat_cell(single.overall, row.overall_denom,
-                                          single.overall, row.pct, pd))
+                    line.append(_cat_cell_for(row, single, None, opt))
                 if show_groups:
                     for gi, c in enumerate(single.counts):
-                        line.append(_cat_cell(c, row.denom_per_group[gi],
-                                              single.overall, row.pct, pd))
+                        line.append(_cat_cell_for(row, single, gi, opt))
                 if show_p:
                     line.append(_fmt_p(row.pvalue))
                 if show_test:
@@ -612,12 +683,10 @@ def _render_delimited(t: Table1, opt: Options, delim: str) -> str:
             for lvl in row.levels:
                 lline = [sname, _csv_safe(lvl.label)]
                 if show_overall:
-                    lline.append(_cat_cell(lvl.overall, row.overall_denom,
-                                           lvl.overall, row.pct, pd))
+                    lline.append(_cat_cell_for(row, lvl, None, opt))
                 if show_groups:
                     for gi, c in enumerate(lvl.counts):
-                        lline.append(_cat_cell(c, row.denom_per_group[gi],
-                                               lvl.overall, row.pct, pd))
+                        lline.append(_cat_cell_for(row, lvl, gi, opt))
                 if show_p:
                     lline.append("")
                 if show_test:
@@ -647,6 +716,10 @@ def _render_json(t: Table1, opt: Options) -> str:
             "mean": _finite(st.mean), "sd": _finite(st.sd),
             "median": _finite(st.median), "q1": _finite(st.q1),
             "q3": _finite(st.q3), "min": _finite(st.vmin), "max": _finite(st.vmax),
+            # Weighted mode only (null otherwise). Under weighting, mean/sd/
+            # median/q1/q3 above are already the WEIGHTED estimates, while "n"
+            # stays the raw observation count.
+            "weight_sum": _finite(st.wsum), "ess": _finite(st.ess),
         }
 
     def effect(e):
@@ -679,7 +752,15 @@ def _render_json(t: Table1, opt: Options) -> str:
                 "overall_denom": row.overall_denom,
                 "missing_per_group": row.missing_per_group,
                 "levels": [{"label": l.label, "counts": l.counts,
-                            "overall": l.overall} for l in row.levels],
+                            "overall": l.overall,
+                            # Weighted mode only (null otherwise): summed
+                            # weights per level; "counts" stays the raw
+                            # head-count in both modes.
+                            "weighted_counts": l.wcounts,
+                            "weighted_overall": l.woverall}
+                           for l in row.levels],
+                "weighted_denom_per_group": row.wdenom_per_group,
+                "weighted_overall_denom": row.woverall_denom,
                 "p_value": _finite(row.pvalue),
                 "p_adjusted": _finite(row.p_adjusted), "test": row.test_name,
                 "smd": _finite(row.smd), "effect": effect(row.effect),
@@ -719,7 +800,8 @@ def _render_html(t: Table1, opt: Options) -> str:
     two_group, show_p, show_effect, show_padj, single_group = _col_flags(t, opt)
     show_overall = True if single_group else opt.overall
     show_groups = not single_group
-    show_test = not single_group
+    # No test is run under weighting, so the 검정/Test column is dropped too.
+    show_test = not single_group and not bool(t.meta.get("weighted"))
 
     def value_tail(row, with_level: bool = True) -> List[str]:
         tail: List[str] = []
@@ -763,10 +845,11 @@ def _render_html(t: Table1, opt: Options) -> str:
 
     headers = [L["char"]]
     if show_overall:
-        headers.append(f"{L['overall']} (N={t.overall_size})")
+        headers.append(f"{L['overall']} (N={t.overall_size}"
+                       f"{_ess_suffix(t, None, opt)})")
     if show_groups:
-        for g, n in zip(t.groups, t.group_sizes):
-            headers.append(f"{g} (n={n})")
+        for gi, (g, n) in enumerate(zip(t.groups, t.group_sizes)):
+            headers.append(f"{g} (n={n}{_ess_suffix(t, gi, opt)})")
     if show_effect:
         headers.append(L["effect"])
     if show_p:
@@ -818,12 +901,10 @@ def _render_html(t: Table1, opt: Options) -> str:
                          + note_suffix(row.notes))
                 cells = []
                 if show_overall:
-                    cells.append(_h(_cat_cell(single.overall, row.overall_denom,
-                                              single.overall, row.pct, pd)))
+                    cells.append(_h(_cat_cell_for(row, single, None, opt)))
                 if show_groups:
                     for gi, c in enumerate(single.counts):
-                        cells.append(_h(_cat_cell(c, row.denom_per_group[gi],
-                                                  single.overall, row.pct, pd)))
+                        cells.append(_h(_cat_cell_for(row, single, gi, opt)))
                 cells.extend(value_tail(row, with_level=False))
                 emit(label, cells)
                 continue
@@ -841,12 +922,10 @@ def _render_html(t: Table1, opt: Options) -> str:
             for lvl in row.levels:
                 lcells = []
                 if show_overall:
-                    lcells.append(_h(_cat_cell(lvl.overall, row.overall_denom,
-                                               lvl.overall, row.pct, pd)))
+                    lcells.append(_h(_cat_cell_for(row, lvl, None, opt)))
                 if show_groups:
                     for gi, c in enumerate(lvl.counts):
-                        lcells.append(_h(_cat_cell(c, row.denom_per_group[gi],
-                                                   lvl.overall, row.pct, pd)))
+                        lcells.append(_h(_cat_cell_for(row, lvl, gi, opt)))
                 lcells.extend(blank_tail())
                 # &#160; (numeric NBSP) keeps the output valid XHTML/XML too.
                 emit("&#160;" + _h(lvl.label), lcells, is_level=True)
@@ -863,6 +942,11 @@ def _render_html(t: Table1, opt: Options) -> str:
     else:
         pct_desc = L["pct_row"]
     legend = [L["leg_notation"] + pct_desc + "."]
+    if t.meta.get("weighted"):
+        # State the weighting up front: every number above it is a weighted
+        # (pseudo-population) quantity, which a reader must not mistake for a
+        # raw count.
+        legend.append(L["leg_weighted"].format(col=t.meta.get("weight_col")))
     if show_effect:
         legend.append(L["leg_effect"])
     if show_p:
