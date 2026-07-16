@@ -2,6 +2,14 @@
 
 - 비율(proportion)의 신뢰구간: Wilson score interval — 리텐션/퍼널 전환율처럼
   0/1 비율을 논문·리포트에 실을 때 표본이 작아도 안정적인 95% 구간을 준다.
+- 두 비율의 차(risk difference)와 그 신뢰구간: Newcombe hybrid-score 구간 —
+  군(arm) 간 리텐션/완주율 차이를 보고할 때 Wald 보다 작은 표본에서 정확하다.
+- 정확검정: Fisher exact (양측, 2×2) — 임상 유저테스트처럼 셀 빈도가 작을 때
+  카이제곱 근사 대신 써야 하는 검정.
+- 순위검정: Mann-Whitney U (동점 보정 + 연속성 보정 정규근사) — 이벤트 수처럼
+  치우친 분포의 군 간 비교에 t-검정보다 적절.
+- 생존분석: Kaplan-Meier 추정(Greenwood 분산)과 log-rank 검정 — 사용자 이탈까지의
+  시간을 우측 절단(censoring)을 지키며 다루기 위함.
 - 분위수(quantile): 세션 길이처럼 치우친(skewed) 분포를 평균 하나로 요약하면
   오해를 부르므로 중앙값·사분위수를 함께 보고하기 위한 헬퍼.
 
@@ -11,7 +19,12 @@
 from __future__ import annotations
 
 import math
-from typing import List, Optional, Sequence, Tuple
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Sequence, Tuple
+
+# Fisher exact 에서 "관측 확률 이하" 를 판정할 때의 상대 허용오차.
+# 부동소수 반올림 때문에 이론상 같은 확률의 표가 탈락하는 것을 막는다 (scipy 와 동일한 관례).
+_FISHER_EPS = 1.0 + 1e-7
 
 # 자주 쓰는 신뢰수준의 z 값 (양측). 95% 기본.
 Z_BY_CONFIDENCE = {
@@ -103,6 +116,350 @@ def describe(values: Sequence[float]) -> Optional[dict]:
         "p90": quantile(xs, 0.90),
         "max": float(xs[-1]),
     }
+
+
+# ---------------------------------------------------------------- 분포 함수
+
+def norm_sf(z: float) -> float:
+    """표준정규 상측꼬리 P(Z > z). erfc 기반이라 꼬리에서도 상대오차가 작다."""
+    return 0.5 * math.erfc(z / math.sqrt(2.0))
+
+
+def chi2_sf_1df(x: float) -> float:
+    """자유도 1 카이제곱의 상측꼬리 P(X > x).
+
+    자유도 1 에서 X = Z^2 이므로 P(X > x) = 2·P(Z > sqrt(x)) = erfc(sqrt(x/2)).
+    """
+    if x <= 0.0:
+        return 1.0
+    if math.isinf(x):
+        return 0.0
+    return math.erfc(math.sqrt(x / 2.0))
+
+
+# ---------------------------------------------------------------- 두 비율의 차
+
+@dataclass
+class DiffResult:
+    """두 비율의 차(risk difference) p1 - p2 와 그 신뢰구간."""
+
+    p1: float
+    p2: float
+    diff: float
+    ci: Tuple[float, float]
+    n1: int
+    n2: int
+
+
+def newcombe_diff_interval(
+    s1: int, n1: int, s2: int, n2: int, confidence: float = 0.95
+) -> Optional[DiffResult]:
+    """두 독립 비율의 차 (p1 - p2) 에 대한 Newcombe hybrid-score 신뢰구간.
+
+    (Newcombe 1998, method 10.) 각 군의 Wilson 구간 (l_i, u_i) 를 구한 뒤
+
+        lo = (p1 - p2) - sqrt((p1 - l1)^2 + (u2 - p2)^2)
+        hi = (p1 - p2) + sqrt((u1 - p1)^2 + (p2 - l2)^2)
+
+    로 합성한다. 단순 Wald 구간과 달리 표본이 작거나 비율이 0%/100% 근처여도
+    [-1, 1] 을 벗어나지 않고 실제 포함확률이 명목 수준에 가깝다 — 군당 수십 명
+    규모의 임상 유저테스트에서 특히 중요하다.
+
+    n1 또는 n2 가 0 이면 (비교 대상이 없으면) None.
+    """
+    if n1 < 0 or n2 < 0:
+        raise ValueError("n 은 음수일 수 없습니다")
+    if not (0 <= s1 <= n1) or not (0 <= s2 <= n2):
+        raise ValueError("successes 는 0..n 범위여야 합니다")
+    if n1 == 0 or n2 == 0:
+        return None
+    w1 = wilson_interval(s1, n1, confidence)
+    w2 = wilson_interval(s2, n2, confidence)
+    assert w1 is not None and w2 is not None  # n>0 이므로 항상 존재
+    l1, u1 = w1
+    l2, u2 = w2
+    p1 = s1 / n1
+    p2 = s2 / n2
+    diff = p1 - p2
+    lo = diff - math.sqrt((p1 - l1) ** 2 + (u2 - p2) ** 2)
+    hi = diff + math.sqrt((u1 - p1) ** 2 + (p2 - l2) ** 2)
+    return DiffResult(
+        p1=p1, p2=p2, diff=diff,
+        ci=(max(-1.0, lo), min(1.0, hi)), n1=n1, n2=n2,
+    )
+
+
+# ---------------------------------------------------------------- Fisher exact
+
+def _log_hypergeom_pmf(k: int, row1: int, row2: int, col1: int) -> float:
+    """초기하 분포 pmf 의 로그값 — lgamma 로 계산해 큰 n 에서도 넘치지 않는다."""
+    n = row1 + row2
+
+    def lc(a: int, b: int) -> float:  # log C(a, b)
+        return (
+            math.lgamma(a + 1) - math.lgamma(b + 1) - math.lgamma(a - b + 1)
+        )
+
+    return lc(row1, k) + lc(row2, col1 - k) - lc(n, col1)
+
+
+def fisher_exact_two_sided(a: int, b: int, c: int, d: int) -> float:
+    """2×2 분할표 [[a, b], [c, d]] 의 Fisher 정확검정 양측 p 값.
+
+    행 합·열 합을 고정한 초기하 분포에서, 관측된 표보다 확률이 같거나 낮은 모든
+    표의 확률을 더한다 (conditional/'sum of small p' 정의 — R 의 `fisher.test`,
+    scipy 의 `fisher_exact` 와 같은 관례).
+
+    셀 빈도가 작을 때(임상 유저테스트에서 흔함) 카이제곱 근사는 1종 오류를 부풀리므로
+    이 검정을 쓴다. 어떤 행이나 열의 합이 0 이면 비교할 것이 없으므로 1.0 을 반환한다.
+    """
+    for v in (a, b, c, d):
+        if v < 0:
+            raise ValueError("분할표 셀은 음수일 수 없습니다")
+    row1, row2 = a + b, c + d
+    col1, col2 = a + c, b + d
+    if row1 == 0 or row2 == 0 or col1 == 0 or col2 == 0:
+        return 1.0
+
+    log_p_obs = _log_hypergeom_pmf(a, row1, row2, col1)
+    p_obs = math.exp(log_p_obs)
+    lo = max(0, col1 - row2)
+    hi = min(row1, col1)
+    total = 0.0
+    for k in range(lo, hi + 1):
+        p_k = math.exp(_log_hypergeom_pmf(k, row1, row2, col1))
+        if p_k <= p_obs * _FISHER_EPS:
+            total += p_k
+    return min(1.0, total)
+
+
+# ---------------------------------------------------------------- Mann-Whitney U
+
+@dataclass
+class MannWhitneyResult:
+    u: float               # 1군 기준 U 통계량
+    z: float               # 연속성 보정 정규근사 z
+    p: float               # 양측 p 값
+    n1: int
+    n2: int
+    median1: Optional[float]
+    median2: Optional[float]
+    rank_biserial: float   # 효과크기 (-1..1): 2U/(n1·n2) - 1
+
+
+def _ranks_with_ties(xs: Sequence[float]) -> Tuple[List[float], float]:
+    """오름차순 평균순위(midrank)와 동점 보정항 sum(t^3 - t) 를 반환."""
+    order = sorted(range(len(xs)), key=lambda i: xs[i])
+    ranks = [0.0] * len(xs)
+    tie_term = 0.0
+    i = 0
+    while i < len(order):
+        j = i
+        while j + 1 < len(order) and xs[order[j + 1]] == xs[order[i]]:
+            j += 1
+        # i..j 는 동점 그룹 → 평균순위(1-기반)를 공유
+        avg = (i + j) / 2.0 + 1.0
+        for k in range(i, j + 1):
+            ranks[order[k]] = avg
+        t = j - i + 1
+        if t > 1:
+            tie_term += t ** 3 - t
+        i = j + 1
+    return ranks, tie_term
+
+
+def mann_whitney_u(
+    x: Sequence[float], y: Sequence[float]
+) -> Optional[MannWhitneyResult]:
+    """Mann-Whitney U 검정 (양측, 동점 보정 + 연속성 보정 정규근사).
+
+    사용자당 이벤트 수·세션 길이처럼 심하게 치우친(skewed) 분포를 군 간 비교할 때
+    t-검정보다 적절하다. 정규성을 가정하지 않고 순위만 쓴다.
+
+    반환값의 `rank_biserial` 은 효과크기로, "1군에서 뽑은 값이 2군에서 뽑은 값보다
+    클 확률 - 작을 확률" 이다 (동점은 절반씩). 0 = 차이 없음.
+
+    주의 — 정규근사이므로 표본이 아주 작으면(각 군 ~8 미만) p 값이 대략적이다.
+    이 경우 리포트는 p 값을 참고용으로만 표시한다. 한쪽 군이 비면 None.
+    """
+    n1, n2 = len(x), len(y)
+    if n1 == 0 or n2 == 0:
+        return None
+    combined = list(x) + list(y)
+    ranks, tie_term = _ranks_with_ties(combined)
+    r1 = sum(ranks[:n1])
+    u1 = r1 - n1 * (n1 + 1) / 2.0
+    mu = n1 * n2 / 2.0
+    n = n1 + n2
+    if n > 1:
+        var = (n1 * n2 / 12.0) * ((n + 1) - tie_term / (n * (n - 1.0)))
+    else:
+        var = 0.0
+    if var <= 0.0:
+        # 모든 값이 동점 → 순위로 구분할 정보가 없음
+        z, p = 0.0, 1.0
+    else:
+        z = (abs(u1 - mu) - 0.5) / math.sqrt(var)
+        z = max(0.0, z)  # 연속성 보정이 차이를 넘어서면 0 으로 (p=1)
+        p = min(1.0, 2.0 * norm_sf(z))
+    return MannWhitneyResult(
+        u=u1, z=z, p=p, n1=n1, n2=n2,
+        median1=median(x), median2=median(y),
+        rank_biserial=2.0 * u1 / (n1 * n2) - 1.0,
+    )
+
+
+# ---------------------------------------------------------------- 생존분석
+
+@dataclass
+class KMPoint:
+    time: float
+    n_risk: int
+    n_event: int
+    survival: float
+    ci: Optional[Tuple[float, float]]
+
+
+@dataclass
+class KMCurve:
+    points: List[KMPoint]
+    n: int
+    n_events: int
+    median_survival: Optional[float]   # S(t) 가 처음 0.5 이하가 되는 t (없으면 None)
+
+
+def kaplan_meier(
+    times: Sequence[float],
+    events: Sequence[bool],
+    confidence: float = 0.95,
+) -> Optional[KMCurve]:
+    """Kaplan-Meier 생존함수 추정 (Greenwood 분산 + log-log 변환 신뢰구간).
+
+    - times:  각 대상의 관찰 시간 (이탈까지 또는 절단까지)
+    - events: True = 사건(이탈) 관찰, False = 우측 절단(censored)
+
+    같은 시각에 사건과 절단이 겹치면 관례대로 **사건을 먼저** 처리한다(절단된 대상은
+    그 시각의 위험집합에 포함).
+
+    신뢰구간은 log-log 변환(θ = ln(-ln S))으로 만들어 [0,1] 을 벗어나지 않으며
+    꼬리에서 단순 Greenwood 구간보다 포함확률이 낫다. S(t) 가 0 또는 1 인 구간에서는
+    변환이 정의되지 않아 구간을 None 으로 둔다.
+
+    입력이 비었으면 None. times 와 events 의 길이는 같아야 한다.
+    """
+    if len(times) != len(events):
+        raise ValueError("times 와 events 의 길이가 다릅니다")
+    if not times:
+        return None
+    if any(t < 0 or not math.isfinite(t) for t in times):
+        raise ValueError("생존 시간은 0 이상의 유한한 값이어야 합니다")
+    z = z_for_confidence(confidence)
+
+    pairs = sorted(zip(times, events), key=lambda p: (p[0], not p[1]))
+    n_total = len(pairs)
+    distinct = sorted({t for t, _ in pairs})
+
+    points: List[KMPoint] = []
+    surv = 1.0
+    var_sum = 0.0  # Greenwood 누적합 Σ d/(n(n-d))
+    n_events_total = 0
+    median_surv: Optional[float] = None
+    for t in distinct:
+        n_risk = sum(1 for tt, _ in pairs if tt >= t)
+        d = sum(1 for tt, ev in pairs if tt == t and ev)
+        if d == 0:
+            continue  # 절단만 있는 시각은 생존 계단을 만들지 않는다
+        n_events_total += d
+        surv *= 1.0 - d / n_risk
+        if n_risk > d:
+            var_sum += d / (n_risk * (n_risk - d))
+        else:
+            var_sum = math.inf  # 위험집합이 모두 사건 → 분산 발산
+        points.append(
+            KMPoint(
+                time=float(t), n_risk=n_risk, n_event=d, survival=surv,
+                ci=_km_ci(surv, var_sum, z),
+            )
+        )
+        if median_surv is None and surv <= 0.5:
+            median_surv = float(t)
+    return KMCurve(
+        points=points, n=n_total, n_events=n_events_total,
+        median_survival=median_surv,
+    )
+
+
+def _km_ci(surv: float, var_sum: float, z: float) -> Optional[Tuple[float, float]]:
+    """KM 생존확률의 log-log 변환 신뢰구간. S∈(0,1) 이고 분산이 유한할 때만."""
+    if not (0.0 < surv < 1.0) or not math.isfinite(var_sum) or var_sum <= 0.0:
+        return None
+    log_s = math.log(surv)
+    theta = math.log(-log_s)
+    se_theta = math.sqrt(var_sum) / abs(log_s)
+    lo = math.exp(-math.exp(theta + z * se_theta))
+    hi = math.exp(-math.exp(theta - z * se_theta))
+    return (max(0.0, lo), min(1.0, hi))
+
+
+@dataclass
+class LogRankResult:
+    chi2: float
+    p: float
+    observed1: int
+    expected1: float
+    observed2: int
+    expected2: float
+
+
+def logrank_test(
+    times1: Sequence[float], events1: Sequence[bool],
+    times2: Sequence[float], events2: Sequence[bool],
+) -> Optional[LogRankResult]:
+    """두 군의 생존곡선 동일성에 대한 log-rank 검정 (자유도 1).
+
+    각 사건 시각에서 초기하 분포의 기대 사건수 E1 = d·n1/n 과 분산
+    V = d·n1·n2·(n-d) / (n^2·(n-1)) 을 누적해 chi2 = (O1-E1)^2 / ΣV 로 계산한다.
+    동점(같은 시각의 사건)도 이 초기하 분산이 정확히 처리한다.
+
+    비례위험(proportional hazards)을 가정하며, 곡선이 교차하면 검정력이 떨어진다 —
+    p 값만 보지 말고 KM 곡선을 함께 볼 것.
+
+    어느 한 군이 비었거나 사건이 전혀 없으면 None.
+    """
+    if len(times1) != len(events1) or len(times2) != len(events2):
+        raise ValueError("times 와 events 의 길이가 다릅니다")
+    if not times1 or not times2:
+        return None
+    o1_total = sum(1 for e in events1 if e)
+    o2_total = sum(1 for e in events2 if e)
+    if o1_total + o2_total == 0:
+        return None
+
+    all_times = sorted({t for t in list(times1) + list(times2)})
+    o1 = 0
+    e1_sum = 0.0
+    v_sum = 0.0
+    for t in all_times:
+        n1 = sum(1 for tt in times1 if tt >= t)
+        n2 = sum(1 for tt in times2 if tt >= t)
+        d1 = sum(1 for tt, ev in zip(times1, events1) if tt == t and ev)
+        d2 = sum(1 for tt, ev in zip(times2, events2) if tt == t and ev)
+        d = d1 + d2
+        n = n1 + n2
+        if d == 0 or n < 2:
+            continue
+        o1 += d1
+        e1_sum += d * n1 / n
+        v_sum += d * n1 * n2 * (n - d) / (n * n * (n - 1.0))
+    if v_sum <= 0.0:
+        return None
+    chi2 = (o1 - e1_sum) ** 2 / v_sum
+    return LogRankResult(
+        chi2=chi2, p=chi2_sf_1df(chi2),
+        observed1=o1, expected1=e1_sum,
+        observed2=(o1_total + o2_total) - o1,
+        expected2=(o1_total + o2_total) - e1_sum,
+    )
 
 
 def _inv_norm_cdf(p: float) -> float:
