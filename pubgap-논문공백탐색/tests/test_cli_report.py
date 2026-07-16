@@ -7,7 +7,7 @@ import pytest
 
 from pubgap.cli import main
 from pubgap.records import parse_efetch_xml
-from pubgap.report import build_report, render_markdown
+from pubgap.report import build_report, render_csv, render_markdown
 
 EXAMPLE = Path(__file__).resolve().parent.parent / "examples" / "sleep_pubmed.xml"
 
@@ -123,3 +123,201 @@ def test_cli_network_path_is_isolated(monkeypatch, capsys):
     rc = main(["sleep breathing"])
     assert rc == 0
     assert "리포트" in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------- #
+# 새 기능: Mann–Kendall / q-value / CSV / 새 CLI 옵션
+# --------------------------------------------------------------------------- #
+def test_report_includes_mann_kendall_and_qvalues():
+    rep = build_report(load_example(), "example")
+    assert "mann_kendall" in rep
+    mk = rep["mann_kendall"]
+    assert set(mk) == {"n", "tau", "s", "z", "p_value", "direction"}
+    # 모든 gap 에 q_value 가 있고 0..1 범위
+    for g in rep["gaps"]:
+        assert 0.0 <= g["q_value"] <= 1.0
+        assert g["q_value"] >= g["p_value"] - 1e-12
+
+
+def test_markdown_shows_qvalue_column_and_cagr_line():
+    md = render_markdown(build_report(load_example(), "example"))
+    assert "q(FDR)" in md
+    assert "Mann–Kendall" in md
+
+
+def test_render_csv_structure():
+    csv_text = render_csv(build_report(load_example(), "example"))
+    lines = csv_text.lstrip("﻿").splitlines()
+    assert lines[0] == (
+        "term_a,term_b,observed,expected,lift,count_a,count_b,p_value,q_value,"
+        "pmids_a,pmids_b,pmids_both,bridges"
+    )
+    # 예시에는 공백이 최소 1개 이상
+    assert len(lines) >= 2
+    # BOM 으로 시작(엑셀 한글)
+    assert csv_text.startswith("﻿")
+
+
+def test_cli_format_csv(capsys):
+    rc = main(["--from-file", str(EXAMPLE), "--format", "csv"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "term_a,term_b,observed" in out
+
+
+def test_cli_format_json_equivalent_to_flag(capsys):
+    rc = main(["--from-file", str(EXAMPLE), "--format", "json"])
+    assert rc == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["n_articles"] == 18
+
+
+def test_cli_gap_max_q_filters(capsys):
+    # 아주 엄격한 q 임계 → 공백 표가 줄거나 사라져도 rc 0
+    rc = main(["--from-file", str(EXAMPLE), "--gap-max-q", "0.0", "--format", "csv"])
+    assert rc == 0
+    lines = capsys.readouterr().out.lstrip("﻿").splitlines()
+    assert lines[0].startswith("term_a")  # 헤더는 항상 존재
+
+
+def test_cli_major_topics_only_runs(capsys):
+    # 예시 데이터는 major 표기가 없어 주제가 비지만, 크래시 없이 처리되어야 함
+    rc = main(["--from-file", str(EXAMPLE), "--major-topics-only"])
+    # major 가 전무 → mesh 공백 → 유효 결과 없음(rc 1) 또는 리포트(rc 0) 모두 허용,
+    # 핵심은 예외로 죽지 않는 것.
+    assert rc in (0, 1)
+
+
+def test_cli_major_topics_only_restricts_topics(tmp_path, capsys):
+    # major 가 실제로 있는 입력에서, --major-topics-only 는 대표주제만 남긴다.
+    nbib = tmp_path / "m.nbib"
+    nbib.write_text(
+        "PMID- 1\nDP  - 2020\nTA  - J\nTI  - t\nMH  - *Sleep\nMH  - Respiration\n\n"
+        "PMID- 2\nDP  - 2021\nTA  - J\nTI  - t\nMH  - *Sleep\nMH  - Heart Rate\n",
+        encoding="utf-8",
+    )
+    rc = main(["--from-file", str(nbib), "--major-topics-only", "--json"])
+    assert rc == 0
+    data = json.loads(capsys.readouterr().out)
+    topics = {t for t, _ in data["top_mesh"]}
+    assert topics == {"Sleep"}  # Respiration/Heart Rate 는 대표가 아니라 제외
+
+
+def test_cli_year_filter(capsys):
+    rc = main(["--from-file", str(EXAMPLE), "--min-year", "2020", "--json"])
+    assert rc == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["year_span"][0] >= 2020
+
+
+def test_cli_reads_nbib_file(tmp_path, capsys):
+    nbib = tmp_path / "x.nbib"
+    nbib.write_text(
+        "PMID- 1\nDP  - 2020\nTA  - J\nTI  - t\nMH  - Sleep\nMH  - Respiration\n\n"
+        "PMID- 2\nDP  - 2021\nTA  - J\nTI  - t\nMH  - Sleep\nMH  - Heart Rate\n",
+        encoding="utf-8",
+    )
+    rc = main(["--from-file", str(nbib), "--json"])
+    assert rc == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["n_articles"] == 2
+
+
+def test_cli_reads_gzip_file(tmp_path, capsys):
+    import gzip
+
+    gz = tmp_path / "s.xml.gz"
+    gz.write_bytes(gzip.compress(EXAMPLE.read_bytes()))
+    rc = main(["--from-file", str(gz), "--json"])
+    assert rc == 0
+    assert json.loads(capsys.readouterr().out)["n_articles"] == 18
+
+
+# --------------------------------------------------------------------------- #
+# 라운드 2 수정/기능: 유효 JSON / 체크태그 / 가교 / 음수 플래그 / CAGR 게이팅
+# --------------------------------------------------------------------------- #
+def test_json_output_is_strict_valid_when_ratio_infinite(tmp_path, capsys):
+    # 단일 연도 코퍼스 → early_total=0 → ratio=inf. 표준 JSON 이어야 한다.
+    f = tmp_path / "single.nbib"
+    f.write_text("PMID- 1\nDP  - 2020\nTA  - J\nTI  - t\nMH  - Sleep\nMH  - Respiration\n",
+                 encoding="utf-8")
+    rc = main(["--from-file", str(f), "--json"])
+    assert rc == 0
+    raw = capsys.readouterr().out
+    # 엄격 파서: Infinity/NaN 를 상수로 허용하지 않음
+    data = json.loads(raw, parse_constant=lambda c: (_ for _ in ()).throw(ValueError(c)))
+    assert data["growth"]["ratio"] is None  # inf → null
+
+
+def test_cli_check_tags_filtered_by_default(tmp_path, capsys):
+    f = tmp_path / "ct.nbib"
+    f.write_text(
+        "PMID- 1\nDP  - 2020\nTA  - J\nTI  - t\nMH  - Humans\nMH  - Male\nMH  - Sleep\n\n"
+        "PMID- 2\nDP  - 2021\nTA  - J\nTI  - t\nMH  - Humans\nMH  - Female\nMH  - Sleep\n",
+        encoding="utf-8",
+    )
+    rc = main(["--from-file", str(f), "--json"])
+    assert rc == 0
+    topics = {t for t, _ in json.loads(capsys.readouterr().out)["top_mesh"]}
+    assert topics == {"Sleep"}  # Humans/Male/Female 제외
+
+
+def test_cli_include_check_tags_opt_out(tmp_path, capsys):
+    f = tmp_path / "ct.nbib"
+    f.write_text(
+        "PMID- 1\nDP  - 2020\nTA  - J\nTI  - t\nMH  - Humans\nMH  - Sleep\n",
+        encoding="utf-8",
+    )
+    rc = main(["--from-file", str(f), "--include-check-tags", "--json"])
+    assert rc == 0
+    topics = {t for t, _ in json.loads(capsys.readouterr().out)["top_mesh"]}
+    assert "Humans" in topics
+
+
+def test_cli_negative_count_flag_rejected(capsys):
+    with pytest.raises(SystemExit):
+        main(["--from-file", str(EXAMPLE), "--top-mesh", "-2"])
+
+
+def test_report_gap_has_bridges_and_pmids_in_json():
+    from pubgap.records import Article
+
+    arts = []
+    for i in range(8):
+        arts.append(Article(f"a{i}", 2020, "J", "t", ["Sleep", "Autonomic"]))
+    for i in range(8):
+        arts.append(Article(f"b{i}", 2020, "J", "t", ["Inflammation", "Autonomic"]))
+    for i in range(3):
+        arts.append(Article(f"c{i}", 2020, "J", "t", ["Sleep"]))
+    for i in range(3):
+        arts.append(Article(f"d{i}", 2020, "J", "t", ["Inflammation"]))
+    rep = build_report(arts, "x", gap_min_expected=1.0, gap_max_lift=1.0)
+    g = next(x for x in rep["gaps"] if {x["term_a"], x["term_b"]} == {"Sleep", "Inflammation"})
+    assert g["bridges"][0][0] == "Autonomic"
+    assert g["pmids_a"] and g["pmids_b"]
+
+
+def test_markdown_shows_bridge_and_pmids():
+    from pubgap.records import Article
+
+    arts = []
+    for i in range(8):
+        arts.append(Article(f"a{i}", 2020, "J", "t", ["Sleep", "Autonomic"]))
+    for i in range(8):
+        arts.append(Article(f"b{i}", 2020, "J", "t", ["Inflammation", "Autonomic"]))
+    md = render_markdown(build_report(arts, "x", gap_min_expected=1.0, gap_max_lift=1.0))
+    assert "가교(Swanson ABC)" in md
+    assert "대표 PMID" in md
+
+
+def test_two_year_corpus_suppresses_cagr_line(tmp_path, capsys):
+    f = tmp_path / "twoyr.nbib"
+    f.write_text(
+        "PMID- 1\nDP  - 2019\nTA  - J\nTI  - t\nMH  - Sleep\n\n"
+        "PMID- 2\nDP  - 2020\nTA  - J\nTI  - t\nMH  - Sleep\n",
+        encoding="utf-8",
+    )
+    rc = main(["--from-file", str(f)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "연평균" not in out  # 2개 연도(연도<3) → CAGR 표시 안 함

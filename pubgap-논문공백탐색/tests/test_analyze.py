@@ -198,7 +198,13 @@ def test_hypergeom_clamps_out_of_range_k():
 
 
 def test_growth_summary_empty():
-    assert growth_summary({}) == {"total": 0, "recent_share": 0.0, "ratio": 0.0, "split": None}
+    assert growth_summary({}) == {
+        "total": 0,
+        "recent_share": 0.0,
+        "ratio": 0.0,
+        "split": None,
+        "cagr": None,
+    }
 
 
 def test_growth_summary_uses_given_split_consistently():
