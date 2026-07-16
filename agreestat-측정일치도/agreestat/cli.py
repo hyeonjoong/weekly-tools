@@ -18,13 +18,20 @@ Machine-readable output::
 from __future__ import annotations
 
 import argparse
+import math
 import sys
 from typing import Optional, Sequence
 
 from . import __version__
 from .analyze import analyze
 from .dataio import load_pairs
-from .report import render_json, render_text
+from .report import (
+    render_json,
+    render_markdown,
+    render_plot_data,
+    render_svg,
+    render_text,
+)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -51,10 +58,51 @@ def _build_parser() -> argparse.ArgumentParser:
                         "비례오차가 있는 데이터에 적합")
     p.add_argument("--alpha", type=float, default=0.05,
                    help="유의수준 / 신뢰구간 폭 (기본 0.05 → 95%% CI)")
+    p.add_argument("--accept", type=float, metavar="DELTA",
+                   help="사전 설정한 임상 허용한계 ±DELTA. 95%% LoA가 "
+                        "[−DELTA, +DELTA] 안이면 '교환가능' 판정을 출력")
+    p.add_argument("--accept-lower", dest="accept_lower", type=float,
+                   help="비대칭 허용한계의 하한 (--accept-upper와 함께 사용)")
+    p.add_argument("--accept-upper", dest="accept_upper", type=float,
+                   help="비대칭 허용한계의 상한 (--accept-lower와 함께 사용)")
+    p.add_argument("--encoding",
+                   help="입력 CSV 인코딩 (기본: 자동 감지 utf-8/utf-16/cp949/euc-kr)")
+    p.add_argument("--target-loa-hw", dest="target_loa_hw", type=float,
+                   metavar="H",
+                   help="목표 LoA CI 반너비 H. 그 정밀도 달성에 필요한 표본수 n을 계산")
     p.add_argument("--json", action="store_true", help="JSON으로 출력")
+    p.add_argument("--markdown", nargs="?", const="-", metavar="PATH",
+                   help="결과를 마크다운 표로 출력(경로 생략 시 표준출력)")
+    p.add_argument("--plot-data", dest="plot_data", metavar="PATH",
+                   help="Bland–Altman 플롯 데이터(mean,diff)를 CSV로 저장")
+    p.add_argument("--svg", metavar="PATH",
+                   help="Bland–Altman 플롯을 SVG 파일로 저장")
     p.add_argument("--version", action="version",
                    version=f"agreestat {__version__}")
     return p
+
+
+def _resolve_accept(args):
+    """Turn --accept / --accept-lower / --accept-upper into (lo, hi) or None.
+
+    Returns the string ``"error"`` on an invalid/incomplete specification
+    (mixing forms, non-positive/non-finite delta, incomplete or lo>=hi pair).
+    """
+    lo, hi = args.accept_lower, args.accept_upper
+    if args.accept is not None:
+        if lo is not None or hi is not None:
+            return "error"  # can't mix symmetric and asymmetric forms
+        d = abs(args.accept)
+        if d == 0.0 or not math.isfinite(d):
+            return "error"
+        return (-d, d)
+    if lo is None and hi is None:
+        return None
+    if lo is None or hi is None:
+        return "error"
+    if not (math.isfinite(lo) and math.isfinite(hi)) or lo >= hi:
+        return "error"
+    return (lo, hi)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -64,9 +112,23 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print("입력 오류: --alpha 는 0과 1 사이여야 합니다.", file=sys.stderr)
         return 2
 
+    if args.target_loa_hw is not None and not (
+            math.isfinite(args.target_loa_hw) and args.target_loa_hw > 0.0):
+        print("입력 오류: --target-loa-hw 는 0보다 큰 유한한 값이어야 합니다.",
+              file=sys.stderr)
+        return 2
+
+    accept = _resolve_accept(args)
+    if accept == "error":
+        print("입력 오류: 허용한계는 --accept DELTA 또는 "
+              "--accept-lower/--accept-upper 쌍으로 지정하세요 (하한 < 상한).",
+              file=sys.stderr)
+        return 2
+
     try:
-        data = load_pairs(args.csv, args.method_a, args.method_b, args.subject)
-    except (ValueError, FileNotFoundError) as exc:
+        data = load_pairs(args.csv, args.method_a, args.method_b, args.subject,
+                          encoding=args.encoding)
+    except (ValueError, OSError) as exc:
         print(f"입력 오류: {exc}", file=sys.stderr)
         return 2
 
@@ -83,12 +145,42 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             alpha=args.alpha,
             mode="percent" if args.percent else "absolute",
             dropped=data.dropped,
+            accept=accept,
+            nonfinite=data.nonfinite,
+            extra_warnings=data.notes,
+            target_loa_hw=args.target_loa_hw,
         )
-    except ValueError as exc:
+    except (ValueError, OverflowError) as exc:
         print(f"분석 오류: {exc}", file=sys.stderr)
         return 2
 
-    if args.json:
+    # Side-car file outputs (plot data / SVG); these don't replace the report.
+    try:
+        if args.plot_data:
+            with open(args.plot_data, "w", encoding="utf-8") as fh:
+                fh.write(render_plot_data(result))
+            print(f"플롯 데이터를 저장했습니다: {args.plot_data}", file=sys.stderr)
+        if args.svg:
+            with open(args.svg, "w", encoding="utf-8") as fh:
+                fh.write(render_svg(result))
+            print(f"SVG 플롯을 저장했습니다: {args.svg}", file=sys.stderr)
+    except OSError as exc:
+        print(f"출력 오류: {exc}", file=sys.stderr)
+        return 2
+
+    if args.markdown:
+        md = render_markdown(result)
+        if args.markdown == "-":
+            print(md)
+        else:
+            try:
+                with open(args.markdown, "w", encoding="utf-8") as fh:
+                    fh.write(md)
+                print(f"마크다운 표를 저장했습니다: {args.markdown}", file=sys.stderr)
+            except OSError as exc:
+                print(f"출력 오류: {exc}", file=sys.stderr)
+                return 2
+    elif args.json:
         print(render_json(result))
     else:
         print(render_text(result))

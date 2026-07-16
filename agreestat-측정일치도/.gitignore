@@ -8,3 +8,8 @@ dist/
 .venv/
 venv/
 .DS_Store
+
+# Avoid accidentally committing real patient/subject CSVs. The bundled synthetic
+# example data is explicitly allow-listed below.
+*.csv
+!examples/*.csv

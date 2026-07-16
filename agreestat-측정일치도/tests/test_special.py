@@ -71,3 +71,33 @@ def test_betainc_bounds():
 
 def test_gammainc_complement():
     assert approx(sp.gammainc_lower(2.5, 3.0) + sp.gammainc_upper(2.5, 3.0), 1.0, 1e-12)
+
+
+def test_norm_ppf_domain_guard():
+    import pytest
+    for p in (0.0, 1.0, -0.1, 1.5):
+        with pytest.raises(ValueError):
+            sp.norm_ppf(p)
+
+
+def test_t_ppf_domain_guard():
+    import pytest
+    for p in (0.0, 1.0, -0.5):
+        with pytest.raises(ValueError):
+            sp.t_ppf(p, 10)
+
+
+def test_t_ppf_extreme_tails_and_fractional_df():
+    # Previously the bisection bracket was fixed at +-1e6 and clamped here.
+    # Reference values from scipy.stats.t.ppf.
+    assert approx(sp.t_ppf(1e-7, 1), -3183098.8618, 1e-3)
+    assert approx(sp.t_ppf(1 - 1e-7, 1), 3183098.8618, 1e-3)
+    # fractional df round-trip
+    for df in (0.5, 3.3, 7.7):
+        for p in (1e-4, 0.025, 0.5, 0.975, 1 - 1e-4):
+            assert approx(sp.t_cdf(sp.t_ppf(p, df), df), p, 1e-8)
+
+
+def test_t_ppf_midpoint_exact():
+    for df in (1, 5.5, 30):
+        assert sp.t_ppf(0.5, df) == 0.0

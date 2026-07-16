@@ -255,10 +255,21 @@ def t_cdf(t: float, df: float) -> float:
 
 
 def t_ppf(p: float, df: float) -> float:
-    """Inverse Student-t CDF via bisection (accurate to ~1e-10)."""
+    """Inverse Student-t CDF via bracketed bisection (accurate to ~1e-10).
+
+    The bracket is expanded outward until it straddles the quantile, so very
+    small/large ``p`` or heavy tails (small df) do not clamp at a fixed edge.
+    """
     if not 0.0 < p < 1.0:
         raise ValueError("p must be in (0, 1)")
-    lo, hi = -1e6, 1e6
+    if p == 0.5:
+        return 0.0
+    hi = 1.0
+    while t_cdf(hi, df) < p and hi < 1e300:
+        hi *= 2.0
+    lo = -1.0
+    while t_cdf(lo, df) > p and lo > -1e300:
+        lo *= 2.0
     for _ in range(200):
         mid = 0.5 * (lo + hi)
         if t_cdf(mid, df) < p:

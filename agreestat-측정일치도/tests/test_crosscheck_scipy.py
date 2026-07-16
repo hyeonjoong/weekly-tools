@@ -69,6 +69,14 @@ def test_f_ppf_matches_scipy():
         assert abs(sp.f_ppf(p, d1, d2) - stats.f.ppf(p, d1, d2)) < 1e-6
 
 
+def test_t_ppf_matches_scipy():
+    for df in (1, 2.5, 5, 12.0, 30, 0.5):
+        for p in (1e-4, 0.025, 0.5, 0.975, 1 - 1e-4):
+            got = sp.t_ppf(p, df)
+            ref = stats.t.ppf(p, df)
+            assert abs(got - ref) <= 1e-6 * max(1.0, abs(ref))
+
+
 def test_ccc_matches_numpy_definition():
     x, y = _sample(9)
     xa, ya = np.array(x), np.array(y)
