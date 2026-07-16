@@ -97,26 +97,127 @@ def n_for_paired(d: float, alpha: float = 0.05, power: float = 0.80) -> int:
     return math.ceil(n)
 
 
+def n_total_two_group(
+    d: float, alpha: float = 0.05, power: float = 0.80, allocation: float = 0.5
+) -> int:
+    """Total N for a two-group mean comparison with a possibly unbalanced split.
+
+    ``allocation`` is the fraction of the sample in group 1 (0<alloc<1). The
+    normal approximation::
+
+        N_total = (z_a + z_b)^2 / (p (1 - p)) / d^2
+
+    reduces to ``4 (z_a+z_b)^2 / d^2`` = 2 * per-group at p=0.5. Unbalanced
+    designs need more: a 30/70 split inflates N by 1/(4·0.3·0.7) ≈ 1.19×.
+    """
+    d = abs(float(d))
+    if d <= 0:
+        raise ValueError("d must be > 0")
+    if not 0.0 < allocation < 1.0:
+        raise ValueError("allocation must satisfy 0 < allocation < 1")
+    za = _z(_Z_ALPHA_TWO_SIDED, alpha, "alpha")
+    zb = _z(_Z_POWER, power, "power")
+    return math.ceil((za + zb) ** 2 / (allocation * (1.0 - allocation)) / d ** 2)
+
+
+def n_for_regression_change(
+    f2: float, k_tested: int, k_control: int,
+    alpha: float = 0.05, power: float = 0.80,
+) -> int:
+    """Total N for an *incremental*-R^2 test (hierarchical regression / ΔR^2).
+
+    Sizes the test of whether ``k_tested`` added predictors explain variance
+    beyond ``k_control`` covariates already in the model. The numerator df is
+    the number of *added* predictors (not the full model), which is the correct
+    test for an incremental-validity hypothesis::
+
+        numerator df = k_tested
+        denominator df = N - (k_tested + k_control) - 1
+        non-centrality lambda = f2 * N     (f2 on the R^2 *increment*)
+
+    Uses the same exact non-central F machinery as :func:`n_for_regression`.
+    """
+    f2 = float(f2)
+    k_tested, k_control = int(k_tested), int(k_control)
+    if f2 <= 0:
+        raise ValueError("f2 must be > 0")
+    if k_tested < 1 or k_control < 0:
+        raise ValueError("k_tested must be >= 1 and k_control >= 0")
+    _z(_Z_ALPHA_TWO_SIDED, alpha, "alpha")
+    _z(_Z_POWER, power, "power")
+    k_full = k_tested + k_control
+    for n in range(k_full + 2, 1_000_000):
+        d2 = n - k_full - 1
+        f_crit = _f_quantile(1.0 - alpha, k_tested, d2)
+        pw = 1.0 - _ncf_cdf(f_crit, k_tested, d2, f2 * n)
+        if pw >= power:
+            return n
+    raise ValueError("Required N exceeds 1e6; check f2/effect size.")
+
+
+def scale_effect(effect: dict, factor: float) -> dict:
+    """Return a copy of ``effect`` with its magnitude scaled by ``factor``.
+
+    Used for effect-size sensitivity: ``factor<1`` assumes a *smaller* true
+    effect (→ larger required N), ``factor>1`` a larger one. Correlation r is
+    capped below 1. Exploratory effects are returned unchanged.
+    """
+    factor = float(factor)
+    if factor <= 0:
+        raise ValueError("factor must be > 0")
+    e = dict(effect)
+    etype = e.get("type")
+    if etype == "correlation":
+        e["r"] = min(abs(e["r"]) * factor, 0.999)
+    elif etype in ("two_group", "paired"):
+        e["d"] = abs(e["d"]) * factor
+    elif etype in ("regression", "regression_change"):
+        e["f2"] = e["f2"] * factor
+    return e
+
+
+def effect_magnitude(effect: dict):
+    """The headline magnitude of an effect spec (r / d / f2), or ``None``."""
+    etype = effect.get("type")
+    if etype == "correlation":
+        return effect["r"]
+    if etype in ("two_group", "paired"):
+        return effect["d"]
+    if etype in ("regression", "regression_change"):
+        return effect["f2"]
+    return None
+
+
 def required_total_n(effect: dict, alpha: float = 0.05, power: float = 0.80):
     """Required *total* N for an effect spec, or ``None`` when not applicable.
 
     ``effect`` is one of::
 
         {"type": "correlation", "r": 0.3}
-        {"type": "two_group", "d": 0.5}        # total = 2 * per-group
+        {"type": "two_group", "d": 0.5, "allocation": 0.5}   # total (opt. split)
         {"type": "paired", "d": 0.5}           # within-subject; total = n pairs
-        {"type": "regression", "f2": 0.15, "k": 3}
+        {"type": "regression", "f2": 0.15, "k": 3}           # overall-R^2 test
+        {"type": "regression_change", "f2": 0.15,            # incremental-R^2
+         "k_tested": 2, "k_control": 1}
         {"type": "exploratory"}                # no closed-form target -> None
     """
     etype = effect.get("type")
     if etype == "correlation":
         return n_for_correlation(effect["r"], alpha, power)
     if etype == "two_group":
-        return 2 * n_per_group_two_means(effect["d"], alpha, power)
+        alloc = effect.get("allocation", 0.5)
+        if alloc == 0.5:
+            # Preserve the exact 2*per-group value (round each group up).
+            return 2 * n_per_group_two_means(effect["d"], alpha, power)
+        return n_total_two_group(effect["d"], alpha, power, alloc)
     if etype == "paired":
         return n_for_paired(effect["d"], alpha, power)
     if etype == "regression":
         return n_for_regression(effect["f2"], effect.get("k", 1), alpha, power)
+    if etype == "regression_change":
+        return n_for_regression_change(
+            effect["f2"], effect["k_tested"], effect["k_control"], alpha, power
+        )
     if etype == "exploratory":
         return None
     raise ValueError(f"Unknown effect type: {etype!r}")
@@ -199,20 +300,53 @@ def _f_quantile(p: float, d1: float, d2: float) -> float:
 
 
 def _ncf_cdf(x: float, d1: float, d2: float, lam: float) -> float:
-    """Non-central F CDF: Poisson(lam/2)-weighted sum of central beta CDFs."""
+    """Non-central F CDF: Poisson(lam/2)-weighted sum of central beta CDFs.
+
+    The Poisson weights peak at the mode j≈lam/2, so we sum *outward from the
+    mode* in both directions and stop each side once the log-weight has fallen
+    ~50 below the peak (exp(-50)≈2e-22, negligible). Summing from j=0 with a
+    fixed iteration cap — as a naive implementation does — silently truncates
+    before reaching the mode once lam/2 exceeds the cap, collapsing the CDF
+    toward 0 and any 1-CDF power toward a spurious 1. Centering on the mode
+    keeps the result accurate for arbitrarily large lam.
+    """
     if x <= 0:
         return 0.0
     if lam <= 0:
         return _f_cdf(x, d1, d2)
     y = d1 * x / (d1 * x + d2)
     half = lam / 2.0
+    loghalf = math.log(half)
+    a_half, b_half = d1 / 2.0, d2 / 2.0
+    mode = int(half)
+
+    def _logw(j: int) -> float:
+        return -half + j * loghalf - math.lgamma(j + 1)
+
+    peak = _logw(mode)
     total = 0.0
-    logw = -half  # log Poisson weight for j = 0
-    for j in range(0, 5000):
-        total += math.exp(logw) * _betai(d1 / 2.0 + j, d2 / 2.0, y)
-        if j > half and math.exp(logw) < 1e-13:
+
+    # Upward from the mode (weights fall monotonically above the mode).
+    j = mode
+    logw = peak
+    while True:
+        total += math.exp(logw) * _betai(a_half + j, b_half, y)
+        if logw < peak - 50.0 and j > half:
             break
-        logw += math.log(half) - math.log(j + 1)
+        j += 1
+        logw += loghalf - math.log(j)
+
+    # Downward from just below the mode.
+    if mode > 0:
+        j = mode - 1
+        logw = peak - loghalf + math.log(mode)  # = _logw(mode - 1)
+        while j >= 0:
+            total += math.exp(logw) * _betai(a_half + j, b_half, y)
+            if j == 0 or logw < peak - 50.0:
+                break
+            logw += math.log(j) - loghalf  # -> _logw(j - 1)
+            j -= 1
+
     return total
 
 
@@ -242,3 +376,185 @@ def n_for_regression(f2: float, k: int, alpha: float = 0.05, power: float = 0.80
         if pw >= power:
             return n
     raise ValueError("Required N exceeds 1e6; check f2/effect size.")
+
+
+# --- Sensitivity analysis: minimum detectable effect (MDES) ------------------
+#
+# The inverse question of ``required_total_n``: *given the N you already have*,
+# what is the smallest effect you could detect at the chosen alpha/power? This
+# turns an "underpowered" verdict into an actionable number ("with N=90 you can
+# still detect r>=0.29"). Each MDES is the algebraic inverse of the matching
+# forward formula, so the two are mutually consistent: feeding an MDES back into
+# ``required_total_n`` returns (approximately) the same N.
+
+
+def mdes_correlation(n: int, alpha: float = 0.05, power: float = 0.80) -> float:
+    """Smallest |r| detectable with total sample ``n`` (Fisher-z inverse).
+
+    Inverts ``n = ((z_a + z_b) / atanh(r))^2 + 3``::
+
+        r = tanh((z_a + z_b) / sqrt(n - 3))
+    """
+    n = int(n)
+    if n <= 3:
+        raise ValueError("n must be > 3 for a correlation MDES")
+    za = _z(_Z_ALPHA_TWO_SIDED, alpha, "alpha")
+    zb = _z(_Z_POWER, power, "power")
+    return math.tanh((za + zb) / math.sqrt(n - 3))
+
+
+def mdes_two_group(
+    n_total: int, alpha: float = 0.05, power: float = 0.80, allocation: float = 0.5
+) -> float:
+    """Smallest Cohen's d detectable with ``n_total`` split over 2 groups.
+
+    Inverts ``N_total = (z_a+z_b)^2 / (p(1-p)) / d^2``::
+
+        d = (z_a + z_b) / sqrt(N_total * p * (1 - p))
+
+    which is ``(z_a+z_b) * 2 / sqrt(N_total)`` at the balanced split p=0.5.
+    """
+    n_total = int(n_total)
+    if n_total < 4:
+        raise ValueError("n_total must be >= 4 (>= 2 per group)")
+    if not 0.0 < allocation < 1.0:
+        raise ValueError("allocation must satisfy 0 < allocation < 1")
+    za = _z(_Z_ALPHA_TWO_SIDED, alpha, "alpha")
+    zb = _z(_Z_POWER, power, "power")
+    return (za + zb) / math.sqrt(n_total * allocation * (1.0 - allocation))
+
+
+def mdes_paired(n: int, alpha: float = 0.05, power: float = 0.80) -> float:
+    """Smallest d_z detectable with ``n`` subjects in a within-subject design.
+
+    Inverts ``n = (z_a + z_b)^2 / d_z^2 + 1``::
+
+        d_z = (z_a + z_b) / sqrt(n - 1)
+    """
+    n = int(n)
+    if n <= 1:
+        raise ValueError("n must be > 1 for a paired MDES")
+    za = _z(_Z_ALPHA_TWO_SIDED, alpha, "alpha")
+    zb = _z(_Z_POWER, power, "power")
+    return (za + zb) / math.sqrt(n - 1)
+
+
+def mdes_regression(n: int, k: int, alpha: float = 0.05, power: float = 0.80) -> float:
+    """Smallest Cohen's f^2 detectable with ``n`` cases and ``k`` predictors.
+
+    Power is strictly increasing in f^2 (N, k, alpha fixed), so we bisect the
+    exact non-central F power curve for the f^2 that just reaches the target.
+    This is the inverse of :func:`n_for_regression` and reproduces it: the MDES
+    at N = n_for_regression(f2, k) rounds back to ~f2.
+    """
+    n = int(n)
+    k = int(k)
+    if k < 1:
+        raise ValueError("k must be >= 1")
+    if n < k + 2:
+        raise ValueError("n must be >= k + 2 for a regression MDES")
+    _z(_Z_ALPHA_TWO_SIDED, alpha, "alpha")
+    _z(_Z_POWER, power, "power")
+    d2 = n - k - 1
+    f_crit = _f_quantile(1.0 - alpha, k, d2)
+
+    def _power(f2: float) -> float:
+        return 1.0 - _ncf_cdf(f_crit, k, d2, f2 * n)
+
+    lo, hi = 1e-9, 1.0
+    # Expand the upper bracket until it exceeds the target power. This always
+    # terminates: because _ncf_cdf sums around the Poisson mode (not from a
+    # truncated j=0), lambda -> inf genuinely drives power -> 1 for any d2 >= 1.
+    while _power(hi) < power:
+        hi *= 2.0
+        if hi > 1e9:
+            raise ValueError("No detectable f^2 below 1e9; n likely too small.")
+    # Bisect to a relative tolerance (converges in ~30 steps even when hi is
+    # large); the 200-cap is only a safety backstop.
+    for _ in range(200):
+        mid = 0.5 * (lo + hi)
+        if _power(mid) < power:
+            lo = mid
+        else:
+            hi = mid
+        if hi - lo <= 1e-9 * hi:
+            break
+    return 0.5 * (lo + hi)
+
+
+def mdes_regression_change(
+    n: int, k_tested: int, k_control: int,
+    alpha: float = 0.05, power: float = 0.80,
+) -> float:
+    """Smallest incremental f^2 detectable for a ΔR^2 test (see
+    :func:`n_for_regression_change`). Numerator df = ``k_tested``, denominator
+    df = ``n - (k_tested + k_control) - 1``; bisected on the exact power curve.
+    """
+    n = int(n)
+    k_tested, k_control = int(k_tested), int(k_control)
+    if k_tested < 1 or k_control < 0:
+        raise ValueError("k_tested must be >= 1 and k_control >= 0")
+    k_full = k_tested + k_control
+    if n < k_full + 2:
+        raise ValueError("n must be >= k_tested + k_control + 2")
+    _z(_Z_ALPHA_TWO_SIDED, alpha, "alpha")
+    _z(_Z_POWER, power, "power")
+    d2 = n - k_full - 1
+    f_crit = _f_quantile(1.0 - alpha, k_tested, d2)
+
+    def _power(f2: float) -> float:
+        return 1.0 - _ncf_cdf(f_crit, k_tested, d2, f2 * n)
+
+    lo, hi = 1e-9, 1.0
+    while _power(hi) < power:
+        hi *= 2.0
+        if hi > 1e9:
+            raise ValueError("No detectable f^2 below 1e9; n likely too small.")
+    for _ in range(200):
+        mid = 0.5 * (lo + hi)
+        if _power(mid) < power:
+            lo = mid
+        else:
+            hi = mid
+        if hi - lo <= 1e-9 * hi:
+            break
+    return 0.5 * (lo + hi)
+
+
+def detectable_effect(effect: dict, n, alpha: float = 0.05, power: float = 0.80):
+    """MDES for an effect spec at sample ``n``, as a structured dict or ``None``.
+
+    Returns ``{"metric": "r"|"d"|"d_z"|"f2", "value": float}`` — or ``None`` when
+    n is unknown, the design is exploratory, or n is below the minimum the
+    formula admits (so callers can render "표본수 미상"/"비적용" uniformly).
+    """
+    if n is None:
+        return None
+    etype = effect.get("type")
+    try:
+        if etype == "correlation":
+            return {"metric": "r", "value": mdes_correlation(n, alpha, power)}
+        if etype == "two_group":
+            alloc = effect.get("allocation", 0.5)
+            return {"metric": "d", "value": mdes_two_group(n, alpha, power, alloc)}
+        if etype == "paired":
+            return {"metric": "d_z", "value": mdes_paired(n, alpha, power)}
+        if etype in ("regression", "regression_change"):
+            if etype == "regression":
+                f2 = mdes_regression(n, int(effect.get("k", 1)), alpha, power)
+            else:
+                f2 = mdes_regression_change(
+                    n, effect["k_tested"], effect["k_control"], alpha, power
+                )
+            # An MDES this large means the design has essentially no residual df:
+            # only an implausible effect (R² > 0.9, i.e. f² > 9) would be
+            # detectable. Reporting a four-digit f² misleads, so we treat it as
+            # "not meaningfully estimable at this N" (-> None).
+            if f2 > 9.0:
+                return None
+            return {"metric": "f2", "value": f2}
+        if etype == "exploratory":
+            return None
+    except ValueError:
+        return None
+    raise ValueError(f"Unknown effect type: {etype!r}")
