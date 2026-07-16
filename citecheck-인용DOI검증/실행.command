@@ -4,16 +4,20 @@ cd "$(dirname "$0")"
 
 echo "=================================================="
 echo "  citecheck — 원고 인용/DOI를 Crossref로 검증"
-echo "  깨진 DOI · 메타데이터 불일치 · 철회 논문 탐지"
+echo "  깨진 DOI · 메타데이터 불일치 · 철회 논문 · 중복 DOI 탐지"
 echo "=================================================="
 echo
+echo "  ※ 인터넷 연결이 필요합니다 (Crossref/doi.org 조회)."
+echo
 echo "[사용법]"
-echo "  citecheck <참고문헌파일>          # .bib 또는 텍스트"
-echo "  citecheck refs.bib --json         # 기계용 JSON 출력"
-echo "  citecheck refs.bib --verbose      # 정상 항목까지 표시"
+echo "  python3 -m citecheck <참고문헌파일>       # .bib 또는 텍스트"
+echo "  python3 -m citecheck refs.bib --json      # 기계용 JSON 출력"
+echo "  python3 -m citecheck refs.bib --verbose   # 정상 항목까지 표시"
+echo "  python3 -m citecheck refs.bib --strict    # 경고도 실패로 처리"
 echo
 echo "--------------------------------------------------"
 echo "[예시] 동봉된 examples/sample.bib 로 지금 실행해봅니다:"
+echo "  (Crossref 조회로 몇 초 걸릴 수 있습니다)"
 echo "--------------------------------------------------"
 echo
 
@@ -27,8 +31,8 @@ fi
 echo
 echo "--------------------------------------------------"
 echo "[내 논문에 쓰려면]"
-echo "  위 'citecheck' 자리에 본인 .bib 경로를 넣으세요. 예:"
-echo "  citecheck ~/Downloads/02_프로젝트/논문_투고/BELL_Paper3_Sleep_7th_Domain/references.bib"
+echo "  위 명령의 examples/sample.bib 자리에 본인 .bib 경로를 넣으세요. 예:"
+echo "  python3 -m citecheck ~/path/to/references.bib"
 echo "--------------------------------------------------"
 echo
 read -p "엔터를 누르면 창이 닫힙니다..."
