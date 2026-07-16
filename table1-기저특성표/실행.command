@@ -1,0 +1,36 @@
+#!/bin/bash
+cd "$(dirname "$0")"
+
+echo "=================================================================="
+echo "  table1 — 기저 특성표(Table 1) 생성기"
+echo "=================================================================="
+echo "  임상 CSV와 '군(group) 열' 하나만 주면, 출판용 '표 1'을 자동 생성:"
+echo "   · 변수별 연속형/범주형 자동 판별 (평균±SD 또는 중앙값[IQR], n(%))"
+echo "   · 정규성·등분산 점검 후 알맞은 검정 자동 선택 (t/Welch/MWU/ANOVA/KW,"
+echo "     범주형은 카이제곱/Fisher)"
+echo "   · 두 군 표준화 평균차(SMD) + 결측 정리, Markdown/CSV/TSV/JSON 출력"
+echo ""
+echo "  내 데이터로 실행:"
+echo "    python3 -m table1.cli 내파일.csv --group 군열이름"
+echo "    python3 -m table1.cli 내파일.csv --group arm --format csv -o 표1.csv"
+echo "=================================================================="
+echo ""
+
+run() {
+  if command -v table1 >/dev/null 2>&1; then
+    table1 "$@"
+  else
+    python3 -m table1.cli "$@"
+  fi
+}
+
+echo "### 예제) SERENE(합성) 기저 특성 — device vs sham, 변수 자동 판별"
+echo "\$ table1 examples/serene_baseline.csv --group arm"
+echo ""
+run examples/serene_baseline.csv --group arm
+
+echo ""
+echo "### 같은 표를 CSV로 저장하려면:"
+echo "\$ table1 examples/serene_baseline.csv --group arm --format csv -o 표1.csv"
+echo ""
+read -p "엔터를 누르면 창이 닫힙니다..."

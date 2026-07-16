@@ -1,0 +1,178 @@
+"""Command-line interface for table1.
+
+Examples
+--------
+Auto-detect every variable, group by treatment arm:
+    table1 baseline.csv --group arm
+
+Pick specific variables and force a coded column to be categorical:
+    table1 baseline.csv --group arm --vars age,sex,isi,bmi --categorical sex
+
+Write a CSV you can paste into a manuscript:
+    table1 baseline.csv --group arm --format csv -o table1.csv
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from typing import List, Optional, Sequence
+
+from . import __version__
+from .build import Options, build_table1
+from .dataio import load_frame
+from .render import render
+
+
+def _split(arg: Optional[str]) -> List[str]:
+    if not arg:
+        return []
+    return [x.strip() for x in arg.split(",") if x.strip()]
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="table1",
+        description="임상 CSV → 출판용 '표 1'(기저 특성표). 변수별로 연속형/범주형을 "
+                    "자동 판별해 알맞은 요약과 검정을 고르고, 표준화 평균차(SMD)와 "
+                    "결측까지 정리해 Markdown/CSV/TSV/JSON으로 출력합니다.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p.add_argument("csv", help="입력 CSV 파일 경로")
+    p.add_argument("--group", "-g", required=True,
+                   help="그룹(군) 라벨이 담긴 열 이름 (예: arm, treatment)")
+    p.add_argument("--vars",
+                   help="요약할 변수 열들(쉼표 구분). 미지정 시 그룹 열을 뺀 전체")
+    p.add_argument("--continuous",
+                   help="연속형으로 강제할 열들(쉼표 구분)")
+    p.add_argument("--categorical",
+                   help="범주형으로 강제할 열들(쉼표 구분)")
+    p.add_argument("--cat-max-levels", type=int, default=2,
+                   help="수치형이라도 서로 다른 값이 이 개수 이하이면 범주형 취급 "
+                        "(기본 2 = 0/1 같은 이진 플래그)")
+    p.add_argument("--max-levels", type=int, default=20,
+                   help="자동 판별된 범주형의 고유값이 이보다 많으면 ID/자유텍스트로 "
+                        "보고 건너뜀 (기본 20)")
+    p.add_argument("--display", choices=["auto", "mean", "median", "both"],
+                   default="auto",
+                   help="연속형 표기: auto(정규성 따라)·mean·median·both (기본 auto)")
+    p.add_argument("--pct", choices=["col", "row"], default="col",
+                   help="범주형 %% 기준: col(그룹 내, 기본)·row(수준 내)")
+    p.add_argument("--alpha-norm", type=float, default=0.05,
+                   help="정규성/등분산 판정 유의수준 (기본 0.05)")
+    p.add_argument("--fisher", action="store_true",
+                   help="2x2 범주형에 항상 Fisher exact 사용")
+    p.add_argument("--missing-as-level", action="store_true",
+                   help="범주형 결측을 '(결측)' 수준으로 표에 표시(검정에서는 제외)")
+    p.add_argument("--no-overall", action="store_true",
+                   help="'전체' 열을 표시하지 않음")
+    p.add_argument("--no-pvalue", action="store_true",
+                   help="p값 열 숨김 (무작위배정 임상시험은 CONSORT 권고상 기저 "
+                        "p값 대신 SMD로 균형을 보고)")
+    p.add_argument("--range", dest="range", action="store_true",
+                   help="연속형 셀에 (최소–최대) 범위 추가")
+    p.add_argument("--lang", choices=["ko", "en"], default="ko",
+                   help="표 라벨 언어: ko(기본)·en(영문 저널 제출용)")
+    p.add_argument("--labels", nargs="*", metavar="COL=이름", default=None,
+                   help="변수 표시 이름/단위 지정 (예: --labels rmssd_ms='RMSSD (ms)' "
+                        "ahi='AHI (events/h)')")
+    p.add_argument("--decimals", type=int, default=1,
+                   help="연속형 통계 소수 자릿수 (기본 1, 음수 불가)")
+    p.add_argument("--format", "-f", choices=["md", "csv", "tsv", "json"],
+                   default="md", help="출력 형식 (기본 md)")
+    p.add_argument("--delimiter",
+                   help="입력 CSV 구분자(미지정 시 자동 감지)")
+    p.add_argument("-o", "--out", help="출력 파일 경로(미지정 시 화면 출력)")
+    p.add_argument("--version", action="version",
+                   version=f"table1 {__version__}")
+    return p
+
+
+def _parse_labels(items: Optional[Sequence[str]]) -> dict:
+    """Parse ``COL=display name`` pairs into a mapping."""
+    out: dict = {}
+    for item in items or []:
+        if "=" not in item:
+            raise ValueError(f"--labels 항목은 'COL=이름' 형식이어야 합니다: {item!r}")
+        key, val = item.split("=", 1)
+        key = key.strip()
+        if key:
+            out[key] = val.strip()
+    return out
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    args = _build_parser().parse_args(argv)
+    if args.decimals < 0:
+        print("입력 오류: --decimals 는 0 이상이어야 합니다.", file=sys.stderr)
+        return 2
+    if not 0.0 < args.alpha_norm < 1.0:
+        print("입력 오류: --alpha-norm 은 0과 1 사이여야 합니다 (예: 0.05).",
+              file=sys.stderr)
+        return 2
+    try:
+        labels = _parse_labels(args.labels)
+    except ValueError as exc:
+        print(f"입력 오류: {exc}", file=sys.stderr)
+        return 2
+    # Friendly delimiter aliases: a user typing --delimiter "\t" from a shell
+    # passes the two literal characters backslash+t, and "tab" is a natural way
+    # to ask for a tab. Map these before the strict one-character check.
+    delimiter = args.delimiter
+    if delimiter is not None:
+        delimiter = {"\\t": "\t", "tab": "\t", "TAB": "\t",
+                     "\\|": "|"}.get(delimiter, delimiter)
+    try:
+        frame = load_frame(args.csv, delimiter=delimiter)
+    except FileNotFoundError:
+        print(f"입력 오류: 파일을 찾을 수 없습니다: {args.csv}", file=sys.stderr)
+        return 2
+    except ValueError as exc:
+        print(f"입력 오류: {exc}", file=sys.stderr)
+        return 2
+
+    opt = Options(
+        group_col=args.group,
+        var_cols=_split(args.vars) or None,
+        continuous=_split(args.continuous),
+        categorical=_split(args.categorical),
+        cat_max_levels=args.cat_max_levels,
+        max_display_levels=args.max_levels,
+        display=args.display,
+        alpha_norm=args.alpha_norm,
+        force_fisher=args.fisher,
+        pct=args.pct,
+        missing_as_level=args.missing_as_level,
+        overall=not args.no_overall,
+        decimals=args.decimals,
+        show_pvalue=not args.no_pvalue,
+        show_range=args.range,
+        lang=args.lang,
+        labels=labels,
+    )
+    try:
+        table = build_table1(frame, opt)
+    except ValueError as exc:
+        print(f"분석 오류: {exc}", file=sys.stderr)
+        return 2
+
+    text = render(table, opt, fmt=args.format)
+    if args.out:
+        try:
+            with open(args.out, "w", encoding="utf-8") as fh:
+                fh.write(text + ("\n" if not text.endswith("\n") else ""))
+        except OSError as exc:
+            print(f"출력 오류: {exc}", file=sys.stderr)
+            return 2
+        print(f"저장했습니다: {args.out}  ({len(table.rows)}개 변수, "
+              f"{len(table.groups)}개 군)", file=sys.stderr)
+    else:
+        print(text)
+
+    if table.warnings and not args.out:
+        pass  # warnings already embedded in md/json; keep stdout clean for csv
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

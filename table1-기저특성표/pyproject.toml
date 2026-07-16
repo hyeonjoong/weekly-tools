@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "table1"
+version = "0.1.0"
+description = "임상 CSV → 출판용 '표 1'(기저 특성표) 생성기 — 변수별 연속/범주 자동 판별, 알맞은 검정, 표준화 평균차(SMD), 결측 정리 (표준 라이브러리만)"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "hyeonjoong", email = "hyeonjoongk@gmail.com" }]
+keywords = ["table 1", "baseline characteristics", "clinical trial",
+            "descriptive statistics", "standardized mean difference",
+            "chi-square", "fisher exact", "shapiro-wilk", "SMD"]
+
+# No third-party dependencies — distribution CDFs, Shapiro-Wilk, group tests,
+# chi-square / Fisher exact and SMD are all implemented in the standard library.
+dependencies = []
+
+[project.scripts]
+table1 = "table1.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["table1*"]
