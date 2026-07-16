@@ -85,9 +85,10 @@ def test_lookup_failure_is_warning_not_error():
 
 # --- retraction detection (real Crossref shapes) ----------------------------
 
-def test_retraction_via_update_by():
-    """A retracted *article* carries `update-by`, not type=retraction."""
-    msg = dict(GOOD, **{"update-by": [{"type": "retraction", "DOI": "10.1/notice"}]})
+def test_retraction_via_updated_by():
+    """A retracted *article* carries `updated-by` (NOT `update-by`, which is not
+    a Crossref field at all — see tests/test_retraction_real_shapes.py)."""
+    msg = dict(GOOD, **{"updated-by": [{"type": "retraction", "DOI": "10.1/notice"}]})
     ref = Reference(raw="", doi="10.1371/journal.pone.0312345")
     res = check_reference(ref, make_client({ref.doi: msg}))
     assert res.status == ERROR
@@ -95,11 +96,14 @@ def test_retraction_via_update_by():
     assert "10.1/notice" in finding.message  # notice DOI surfaced
 
 
-def test_retraction_via_update_to():
-    msg = dict(GOOD, **{"update-to": [{"type": "retraction"}]})
+def test_update_to_alone_is_not_a_retraction():
+    """`update-to` says "this record updates X" — it does not make the record
+    retracted. Elsevier deposits it symmetrically (on the retracted paper AND on
+    the notice), so it identifies neither side; only `updated-by` is trusted."""
+    msg = dict(GOOD, **{"update-to": [{"type": "retraction", "DOI": "10.1/orig"}]})
     ref = Reference(raw="", doi="10.1371/journal.pone.0312345")
     res = check_reference(ref, make_client({ref.doi: msg}))
-    assert res.status == ERROR
+    assert res.status == OK
 
 
 def test_retraction_via_relation_key():
@@ -248,13 +252,27 @@ def test_mailto_lands_in_user_agent():
 
 # --- retraction notice DOI fall-through -------------------------------------
 
-def test_retraction_notice_falls_through_to_doi_bearing_field():
+def test_retraction_notice_falls_through_to_the_doi_bearing_entry():
+    """Several `updated-by` entries; take the first retraction that has a DOI."""
     from citecheck.core import _retraction_notice
     msg = {
-        "update-by": [{"type": "retraction"}],  # matches but no DOI
-        "update-to": [{"type": "retraction", "DOI": "10.1/notice"}],
+        "updated-by": [
+            {"type": "retraction"},  # matches but no DOI
+            {"type": "retraction", "DOI": "10.1/notice"},
+        ]
     }
     assert _retraction_notice(msg) == "10.1/notice"
+
+
+def test_retraction_notice_never_reports_the_papers_own_doi():
+    """Regression: reading `update-to` as a fallback reported the retracted
+    paper's OWN doi as its "retraction notice" — Elsevier deposits both."""
+    from citecheck.core import _retraction_notice
+    msg = {
+        "updated-by": [{"type": "retraction"}],  # no DOI to offer
+        "update-to": [{"type": "retraction", "DOI": "10.1/its-own-paper"}],
+    }
+    assert _retraction_notice(msg) is None
 
 
 def test_retraction_notice_relation_narrowed():

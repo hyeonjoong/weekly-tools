@@ -5,6 +5,37 @@ independent panel of reviewers (correctness, edge cases, real-world usefulness,
 docs honesty, tests/security), then every material finding is fixed with a
 regression test added, and the suite is re-run to green.
 
+> ## ⚠️ Correction (2026-07-16, Rounds 4–5)
+>
+> **Rounds 1–3 below contain false claims, left in place as a record of how the
+> failure happened.** They repeatedly describe `citecheck` detecting retractions
+> via a Crossref Crossmark field called **`update-by`**. *Crossref has no such
+> field* — the real one is **`updated-by`**. Reading a key that never exists
+> silently disabled retraction detection entirely, and the tool reported
+> **`✓ Verified`** for Wakefield 1998 (whose own Crossref title begins
+> "RETRACTED:") through all three rounds.
+>
+> Round 3's "Verified holdings" section specifically certifies *"retraction
+> narrowing (Crossref `update-by`/`is-retracted-by`…)"* as independently
+> verified. It cannot have been: no live Crossref payload has that key. The
+> fixtures were built around the same invented name as the code, so ~180 tests
+> were green against a field the API never sends, and the docs were re-verified
+> "command-by-command" *against* the bug — with `update-by` dead, no correction
+> was detected, so the sample output matched the README and both were
+> consistently wrong.
+>
+> **Treat any "Verified holdings" claim in Rounds 1–3 as unproven.** They certify
+> what the fixtures were rigged to certify. Round 4 rebuilt the retraction
+> fixtures from live `api.crossref.org` payloads
+> (`tests/test_retraction_real_shapes.py`); that file, not this log, is the
+> trustworthy record.
+>
+> The lesson generalises beyond one typo: **a test whose fixture is written from
+> the same assumption as the code proves only that the assumption is
+> self-consistent.** Rounds 4–5 therefore verify fixtures against the live API,
+> and use mutation testing to check that tests actually fail when the code
+> breaks.
+
 ---
 
 ## 2026-07-16 — Round 1
@@ -33,6 +64,8 @@ clinical-researcher usefulness · docs honesty · test-quality/security).
   the retraction *notice* shape (`type == "retraction"`, `update-to`). A retracted
   article carries Crossmark `update-by`. Fixed: `_is_retracted` now checks
   `update-by`, `update-to`, and `is-retracted-by` relation keys, and the finding
+  <!-- FALSE (see Correction above): `update-by` is not a Crossref field. This
+  "fix" fixed nothing; retraction detection stayed dead until Round 4. -->
   surfaces the retraction-notice DOI. Docs now state the coverage caveat honestly.
   (`core.py`, `README.md`)
 - **Year comparison preferred `published-print`**, producing false "year
@@ -104,7 +137,7 @@ clinical-researcher usefulness · docs honesty · test-quality/security).
 - Added `tests/test_cli.py` (exit-code contract 0/1/2, `--json` shape, non-UTF-8
   handling, ANSI stripping, `--strict`, duplicate-DOI, malformed-entry reporting).
 - Extended `tests/test_core.py` and `tests/test_parsers.py`: retraction shapes
-  (`update-by`/`update-to`/relation), year-any-date, subtitle, diacritics,
+  (`update-by`/`update-to`/relation — FALSE, see Correction above), year-any-date, subtitle, diacritics,
   malformed-record parametrised no-crash, caching, DOI-URL/paren normalisation,
   `@string`/`@comment`, auto-detect, text-splitting.
 
@@ -154,6 +187,8 @@ introduced, plus real gaps.
   now cuts at `?`/`#`. (`parsers.py`)
 - **`normalize_doi_field` fallback returned junk** (`_clean_doi(value)`) for a
   field with no DOI core, so "not a doi" became a DOI. Now returns None. (`parsers.py`)
+- <!-- The premise is FALSE (see Correction above); the real bug was the
+  opposite — `update-to` made us report the paper's OWN doi as its notice. -->
 - **Retraction-notice DOI missed** when `update-by` matched on type but carried
   no DOI while `update-to` had it — `_retraction_notice` now falls through to the
   DOI-bearing field. (`core.py`)
@@ -375,7 +410,8 @@ offline.
 ### Verified holdings
 
 Across the panels: RIS/CSL/BibTeX/text parsing, DOI normalization (parens, URL,
-query strings), retraction narrowing (Crossref `update-by`/`is-retracted-by`;
+query strings), retraction narrowing (Crossref `update-by`/`is-retracted-by` —
+FALSE, never verifiable: see the Correction at the top of this file;
 PubMed "Retracted Publication" vs the notice), the journal matcher on ~15 real
 medical abbreviations (match) and genuinely-different journals (no match), all
 four report formats' sanitization + CSV formula-injection guard, the offline
@@ -384,3 +420,184 @@ and every regex linear at N≥200k. Docs (README / 사용법.md / 실행.command
 re-verified command-by-command against the code with the example files
 (`sample.bib`/`.ris`/`.json`) parsing correctly.
 
+
+---
+
+## 2026-07-16 — Rounds 4–5 (features + the retraction bug)
+
+**Panel:** 6 independent reviewers across two rounds (correctness ×2, edge
+cases, clinical-researcher usefulness, docs honesty, test-quality/security).
+Reviewers were given live network access and told to check assumptions against
+`api.crossref.org` rather than against this repo's fixtures — which is how the
+headline bug was finally caught.
+**Baseline:** 179 tests. **After:** 500 tests, offline, plus live end-to-end
+verification against real Crossref records.
+
+### 🔴 The headline bug: retraction detection never worked
+
+`citecheck` reported **`✓ Verified`** for **Wakefield 1998**
+(`10.1016/S0140-6736(97)11096-0`) — the most famous retraction in medicine —
+and for Mehra's retracted NEJM and Lancet COVID papers. The cause was a
+one-word typo with total consequences: the code read `update-by`; the Crossref
+field is `updated-by`. Every retraction fixture in the suite was built around
+the same invented name, so the tests were green and three hardening rounds
+certified it as working (see the Correction at the top of this file).
+
+Fixed, and verified live — all three now report `ERROR` with the correct notice
+DOI, and the retraction *notice* correctly stays citable:
+
+- `_is_retracted` now reads the real `updated-by`, and additionally detects the
+  publisher's **`RETRACTED:` title prefix** (Elsevier/Springer/Wiley/NEJM all
+  use it; it is often the *only* signal — Mehra's NEJM paper has no Crossmark
+  retraction at all, only an expression of concern plus the title marker).
+- `update-to` is now **deliberately not** consulted. It is not the clean
+  "this is the notice" marker Rounds 1–3 assumed: Elsevier deposits it
+  *symmetrically*, so the retracted Lancet paper carries `update-to` retractions
+  pointing at its own notices. `updated-by` classifies every real record we
+  checked correctly on its own.
+- The `RETRACTED:` prefix is stripped before title comparison, so a correctly
+  cited retracted paper no longer also reports a bogus title mismatch.
+- `tests/test_retraction_real_shapes.py` rebuilds the fixtures from **live
+  payloads**, including the awkward ones (a `"updated-by": null` notice; the
+  Lancet record with 7 `updated-by` entries and symmetric `update-to`).
+
+### 🔴 `--suggest-doi` recommended retracted papers (self-inflicted, round 5)
+
+Round 4's title-strip made a new bug worse than the one it fixed. `_suggest_doi`
+never checked retraction status, and `_search_network`'s `select` didn't even
+request `updated-by` — so for a DOI-less reference to Wakefield 1998 the tool
+emitted *"Crossref has a **100%-confident** match — **consider citing** DOI
+10.1016/s0140-6736(97)11096-0"*, at exit 0, with the `RETRACTED:` cue stripped
+out of the displayed title. Fixed: the search now requests the retraction
+fields, and a retracted match is an **error** that names the DOI and explicitly
+does not recommend it. This turns the flaw into a capability — citecheck can now
+catch a retracted source that was cited **without any DOI at all**.
+
+### Other correctness fixes
+
+- **`_retraction_notice` reported the paper's own DOI as its retraction notice.**
+  Sampling 400 live records, **185 of 186** publisher-deposited `updated-by`
+  entries self-reference. Self-references are now skipped; if no entry names a
+  different document we say nothing rather than point in a circle.
+- **`created` removed from `_crossref_years`.** It is Crossref's *deposit*
+  timestamp: Wakefield 1998 has `created: 2002`, so citing it as "2002" passed.
+- **`--suggest-doi` could confidently offer a wrong DOI.** `title={Editorial}`
+  scored 1.00 against thousands of works titled "Editorial". Added two more hard
+  rejects (author-surname disagreement; a title under 4 substantial words).
+- **`OverflowError` crashed the run on standards-valid JSON.** `1e400` decodes
+  to `float('inf')`; `int(inf)` raises `OverflowError`, which is neither
+  `TypeError` nor `ValueError` — and the reachable paths sit *outside* the
+  "one weird record must not abort the batch" guards.
+- **A prose reference list was misrouted to CSV, silently losing references.**
+  A line containing ", PubMed," normalised to a known PMID column alias. The
+  first reference was eaten as a header row and never checked; survivors lost
+  author/year/journal *and* the free-text swapped-DOI guard — checked *less* than
+  before, at exit 0. `looks_like_csv` now also requires a header that reads as
+  column names (a header never *contains* a DOI) and a rectangular shape.
+- **A text list containing an RIS block discarded the whole list** (`_ris_records`
+  drops everything before the first `TY`). RIS detection now requires the file
+  to *begin* as RIS.
+- **`@article(key, ...)` entries vanished** — valid BibTeX, dropped silently and
+  reported as 0 malformed. Now parsed, with parens counted only outside braces so
+  `title={Aspirin (low dose)}` doesn't truncate the entry.
+- **`--cache-ttl 1e308` overflowed to `inf`**, making entries immortal and
+  defeating the expiry invariant the cache is documented on. Now bounded.
+- **`socket.timeout` added to the retry tuple** — it only aliases `TimeoutError`
+  from Python 3.10, and `pyproject.toml` declares 3.9.
+- **Cache hits were miscounted**: "served from cache" was inferred from "made no
+  network call", crediting the cache for DOI-less references and claiming hits
+  against a cache file that did not exist.
+- **`--ignore lookup-failed` faked a clean pass.** It reported "1 ok, 0 warnings,
+  0 errors" and exit 0 on an offline run while the next line said "0 of 1
+  compared against a Crossref record". `lookup-failed` is now the one
+  non-ignorable code: every other code is a judgement the user is entitled to
+  make; that one is a fact about whether the run happened. The exit-3 guard also
+  now keys on the **code** rather than `message.startswith("Lookup failed")` —
+  rewording any of four f-strings would silently have turned every offline run
+  into exit 0.
+- **All-caps journal initialisms produced false "Journal mismatch" warnings.**
+  `_is_abbrev_of` structurally requires >= 2 abbreviation words, so "NEJM",
+  "JAMA", "BMJ", "PNAS", "JCO" — the way clinicians actually write these — could
+  never match. Found by running a realistic Covidence-style CSV export rather
+  than a fixture. Added `_is_initialism_of`, deliberately narrow: the token must
+  be all-caps *as written* (the case is the signal), and its letters must equal
+  the initials of the candidate's significant words exactly, so "Cancer" still
+  correctly mismatches "Cancer Research".
+
+### New capabilities (this is not only a bugfix round)
+
+- **Expression of concern / withdrawal / removal** (errors) and **correction /
+  erratum / corrigendum / addendum / clarification / new version** (warnings),
+  from the same `updated-by` data. The kind list and its severities were taken
+  from the **live `update-type` facet** — what Crossref actually emits, by
+  volume — not from the schema docs.
+- **Preprint → published version**: cited the medRxiv preprint but the
+  peer-reviewed paper is out? Its DOI is named. (Results change in review.)
+- **`--suggest-doi`**: find the DOI for a reference that cites none, via
+  Crossref's bibliographic index. Deliberately conservative; activates the
+  `_search` transport hook that had been dead code since the tool was written.
+- **`--cache` / `--cache-ttl`**: expiring on-disk lookup cache, so re-running
+  through a round of revisions is instant. Expiry is a **safety** property, not a
+  convenience one: an immortal cache would eventually report a stale clean pass.
+- **CSV/TSV input reached the CLI.** `parse_csv` existed and auto-detect used it,
+  but `--format`'s choices omitted `csv`, so it could not be forced and was
+  undocumented — a whole input format (the systematic-reviewer's Excel/Covidence
+  table) was half-wired for three rounds.
+- **Finding codes + `--ignore` + `--list-checks`, and severity-ordered output.**
+  `--strict` was documented as a submission gate but was unusable as one: every
+  real manuscript cites DOI-less books and guidelines, so it failed forever. Codes
+  are also emitted in the JSON report and a CSV `codes` column, so CI branches on
+  a stable identifier instead of regex-matching English prose.
+- **Honest `--pubmed` coverage.** On a PMID-less file it was a silent no-op with
+  byte-identical output; it now says so, and reports partial coverage.
+- **Honest summary line.** "N verified, M could not be verified" excluded hard
+  errors from *both* buckets, so the numbers didn't sum to the total.
+
+### Test-quality work
+
+The suite went from 179 to 500 tests, but the point is that they now *bite*:
+
+- **Fixtures are checked against the live API**, not against the code's
+  assumptions — the discipline whose absence caused the headline bug.
+- **Mutation testing** drove the new tests: 13 mutants that survived the old
+  suite (dropped `_sanitize` in the JSON/Markdown/CSV paths, the paren/brace
+  guard, the `@comment` filter, the update aliases, the notice self-reference
+  filter, the suggestion retraction check) are all killed now.
+- Two of my own new tests were **found to be tautological and rewritten**: one
+  asserted no raw `\x1b` in stdout, which `json.dumps` escapes to `\u001b`
+  either way (a consumer doing `jq -r` decodes it back to a live escape — so the
+  assertion had to be on the *parsed value*); another grepped a function's
+  source for "updated-by" and passed on the strength of the **comment** above the
+  select. Fixtures that didn't actually exercise their target (`@string` never
+  matches the entry regex; *balanced* inner parens cancel out) were replaced.
+- **The docs are now tested**: the README's example block is checked against the
+  real `sample.bib` (cite keys, totals, and that the buckets sum), every
+  `examples/` path named by any doc must exist, and `update-by` may never
+  reappear in the docs.
+- `examples/sample.bib` claimed to show a `✓` that it hadn't shown since PLoS
+  Medicine corrected Ioannidis 2005 in 2022 — the double-click demo never
+  displayed a verified reference. Added a genuinely clean entry (PRISMA 2009) and
+  kept Ioannidis as a live demo of the *new* correction check.
+
+### Verified against live Crossref (not fixtures)
+
+Wakefield 1998, Mehra NEJM 2020 and Mehra Lancet 2020 → `ERROR` with correct
+notice DOIs; the Wakefield retraction notice → `OK` (still citable); Ioannidis
+2005 → correction warning; PRISMA 2009 → clean `✓`; a Springer record whose
+`updated-by` self-references → retraction reported with no circular notice;
+`--suggest-doi` on a DOI-less Wakefield citation → `ERROR`, not a
+recommendation. Reviewers independently confirmed the PubMed esummary shapes,
+the `_UPDATE_KINDS` volumes, that the `--mailto` address reaches no report,
+cache file or error message, that the cache file is written `0600` via an atomic
+replace, and that the offline test guard covers `CrossrefClient.search`.
+
+### Known limitations (deliberate, not oversights)
+
+- Crossref/PubMed retraction coverage is genuinely incomplete; a clean result is
+  not a guarantee. Retraction Watch's CC0 dataset would close most of the gap but
+  costs a ~30 MB data file and a refresh policy, against the tool's
+  pure-stdlib/no-data-files design. Not taken.
+- Two records Crossref-wide carry the update types `retration`/`retracion`
+  (typos), which the `"retract"` substring match misses. Not worth fuzzy-matching.
+- 200 references still means 200 serial HTTPS round-trips. `--cache` makes the
+  *re-run* instant; the first run is unchanged.

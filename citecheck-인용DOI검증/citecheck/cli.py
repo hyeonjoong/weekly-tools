@@ -7,6 +7,7 @@ import csv
 import io
 import json
 import math
+import os
 import re
 import sys
 import time
@@ -14,8 +15,24 @@ from collections import Counter
 from typing import Optional
 
 from . import __version__
-from .core import CheckResult, CrossrefClient, ERROR, OK, PubMedClient, WARNING, check_reference
+from .core import (
+    CODES,
+    CheckResult,
+    CrossrefClient,
+    DiskCache,
+    ERROR,
+    OK,
+    PubMedClient,
+    WARNING,
+    check_reference,
+)
 from .parsers import count_malformed_entries, detect_format, parse_references
+
+DEFAULT_CACHE_PATH = os.path.join(
+    os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"),
+    "citecheck",
+    "lookups.json",
+)
 
 # Exit codes.
 EXIT_OK = 0
@@ -96,7 +113,13 @@ def _to_json(results: list[CheckResult]) -> str:
                 "journal": _sanitize(r.reference.journal) if r.reference.journal else None,
                 "status": r.status,
                 "findings": [
-                    {"severity": f.severity, "message": _sanitize(f.message)}
+                    # `code` is the stable, machine-readable identity of the
+                    # finding — CI should branch on it, never on the prose.
+                    {
+                        "severity": f.severity,
+                        "code": f.code,
+                        "message": _sanitize(f.message),
+                    }
                     for f in r.findings
                 ],
             }
@@ -117,9 +140,12 @@ def _to_csv(results: list[CheckResult]) -> str:
     """One row per reference — openable in Excel by a co-author."""
     buf = io.StringIO()
     writer = csv.writer(buf)
-    writer.writerow(["label", "doi", "pmid", "journal", "status", "findings"])
+    writer.writerow(["label", "doi", "pmid", "journal", "status", "codes", "findings"])
     for r in results:
         messages = " | ".join(f.message.replace("\n", " ").strip() for f in r.findings)
+        # A codes column lets a co-author filter/pivot the sheet without reading
+        # every prose message.
+        codes = " ".join(dict.fromkeys(f.code for f in r.findings if f.code))
         writer.writerow(
             [
                 _csv_safe(r.reference.label()),
@@ -127,6 +153,7 @@ def _to_csv(results: list[CheckResult]) -> str:
                 _csv_safe(r.reference.pmid or ""),
                 _csv_safe(r.reference.journal or ""),
                 r.status,
+                _csv_safe(codes),
                 _csv_safe(messages),
             ]
         )
@@ -167,7 +194,12 @@ def _flag_duplicate_dois(results: list[CheckResult]) -> None:
     dups = {doi for doi, n in counts.items() if n > 1}
     for r in results:
         if r.reference.doi in dups:
-            r.add(WARNING, f"Duplicate DOI — cited by {counts[r.reference.doi]} references: {r.reference.doi}")
+            r.add(
+                WARNING,
+                f"Duplicate DOI — cited by {counts[r.reference.doi]} references: "
+                f"{r.reference.doi}",
+                "duplicate-doi",
+            )
 
 
 def _flag_duplicate_pmids(results: list[CheckResult]) -> None:
@@ -178,7 +210,82 @@ def _flag_duplicate_pmids(results: list[CheckResult]) -> None:
     for r in results:
         pmid = r.reference.pmid
         if pmid in dups and not any("Duplicate DOI" in f.message for f in r.findings):
-            r.add(WARNING, f"Duplicate PMID — cited by {counts[pmid]} references: {pmid}")
+            r.add(
+                WARNING, f"Duplicate PMID — cited by {counts[pmid]} references: {pmid}",
+                "duplicate-pmid",
+            )
+
+
+# `lookup-failed` is deliberately NOT ignorable. It does not mean "a citation is
+# wrong"; it means **we could not check**, and the tool's headline promise is
+# that a network outage can never be mistaken for a clean pass:
+#
+#   $ citecheck refs.bib --ignore lookup-failed     # offline
+#     checked 1 references: 1 ok, 0 warnings, 0 errors      <- a lie
+#     (0 of 1 compared against a Crossref record)           <- contradicting it
+#   exit 0
+#
+# It is an attractive nuisance precisely because it looks like noise to silence:
+# a user who hides it once gets false clean passes forever after. Every other
+# code is a judgement call the user is entitled to make; this one is a fact about
+# whether the run happened.
+NON_IGNORABLE = {"lookup-failed"}
+
+
+def _parse_ignore(raw: str) -> tuple[set, list, list]:
+    """Split an --ignore value into (usable codes, unknown tokens, refused codes).
+
+    Unrecognised codes are returned rather than dropped so the caller can fail
+    loudly: a typo'd `--ignore no-doi,retracton` must never quietly fail to
+    suppress what the user asked for — nor quietly suppress a retraction.
+    """
+    wanted = [tok.strip().lower() for tok in raw.replace(" ", ",").split(",") if tok.strip()]
+    known = {tok for tok in wanted if tok in CODES}
+    unknown = [tok for tok in wanted if tok not in CODES]
+    refused = sorted(known & NON_IGNORABLE)
+    return known - NON_IGNORABLE, unknown, refused
+
+
+def _apply_ignores(results: list[CheckResult], ignored: set) -> int:
+    """Drop ignored findings in place. Returns how many were removed."""
+    if not ignored:
+        return 0
+    removed = 0
+    for r in results:
+        keep = [f for f in r.findings if f.code not in ignored]
+        removed += len(r.findings) - len(keep)
+        r.findings = keep
+    return removed
+
+
+_SEVERITY_ORDER = {ERROR: 0, WARNING: 1, OK: 2}
+
+
+def _by_severity(results: list[CheckResult]) -> list[CheckResult]:
+    """Errors first, then warnings, then verified — input order within each.
+
+    On a 200-reference manuscript the one retraction is otherwise buried among
+    60 "No DOI found" lines, with identical visual weight. Python's sort is
+    stable, so the reference list's own order survives inside each group.
+    """
+    return sorted(results, key=lambda r: _SEVERITY_ORDER.get(r.status, 3))
+
+
+def _print_checks() -> None:
+    print("Finding codes (use with --ignore):\n")
+    width = max(len(c) for c in CODES)
+    for code, meaning in sorted(CODES.items()):
+        note = "  [cannot be ignored]" if code in NON_IGNORABLE else ""
+        print(f"  {code.ljust(width)}  {meaning}{note}")
+
+
+def _network_calls(client, pubmed) -> int:
+    """Total lookups the clients have sent to their transport so far.
+
+    Used only to tell a cache hit from a real call, so the inter-request delay is
+    charged only when we actually went out to Crossref/PubMed.
+    """
+    return getattr(client, "remote_calls", 0) + getattr(pubmed, "remote_calls", 0)
 
 
 def _nonneg_float(value: str) -> float:
@@ -188,24 +295,43 @@ def _nonneg_float(value: str) -> float:
     return f
 
 
+# Ten years. A TTL beyond this is indistinguishable from "never expire", which
+# defeats the whole point of expiry (catching a newly-retracted reference).
+# Bounding it here also stops `--cache-ttl 1e308` from overflowing to `inf` once
+# multiplied into seconds, which silently made every entry immortal.
+MAX_CACHE_TTL_DAYS = 3650.0
+
+
+def _cache_ttl_days(value: str) -> float:
+    f = _nonneg_float(value)
+    if f > MAX_CACHE_TTL_DAYS:
+        raise argparse.ArgumentTypeError(
+            f"must be <= {MAX_CACHE_TTL_DAYS:g} days — a longer cache could hide "
+            f"a retraction indefinitely"
+        )
+    return f
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="citecheck",
         description="Verify manuscript citations against Crossref: catch broken DOIs, "
-        "metadata mismatches, and retractions. Requires internet access to Crossref.",
+        "metadata mismatches, retractions and expressions of concern, and preprints "
+        "that now have a published version. Requires internet access to Crossref.",
     )
     p.add_argument(
         "input",
         nargs="?",
         default="-",
-        help="Input file (.bib / .ris / .json / text). '-' for stdin.",
+        help="Input file (.bib / .ris / .json / .csv / text). '-' for stdin.",
     )
     p.add_argument(
         "--format",
-        choices=["auto", "bibtex", "ris", "csljson", "text"],
+        choices=["auto", "bibtex", "ris", "csljson", "csv", "text"],
         default="auto",
         help="Input format: bibtex, ris (EndNote/Zotero), csljson (Zotero/pandoc), "
-        "text, or auto-detect (default).",
+        "csv (Excel/Sheets/Covidence reference table, also TSV), text, or "
+        "auto-detect (default).",
     )
     p.add_argument(
         "--report",
@@ -234,10 +360,46 @@ def build_parser() -> argparse.ArgumentParser:
         "Requires internet access to eutils.ncbi.nlm.nih.gov.",
     )
     p.add_argument(
+        "--suggest-doi",
+        action="store_true",
+        help="For references with no DOI, search Crossref by title/author/year "
+        "and report the DOI of a confident match, so you can add it.",
+    )
+    p.add_argument(
+        "--cache",
+        nargs="?",
+        const=DEFAULT_CACHE_PATH,
+        metavar="PATH",
+        help=f"Cache Crossref/PubMed lookups on disk so re-running over the same "
+        f"manuscript is instant. Bare --cache uses {DEFAULT_CACHE_PATH}.",
+    )
+    p.add_argument(
+        "--cache-ttl",
+        type=_cache_ttl_days,
+        default=7.0,
+        metavar="DAYS",
+        help="Days a cached lookup stays valid (default: 7). Entries expire so a "
+        "newly-retracted reference cannot hide behind a stale cache.",
+    )
+    p.add_argument(
         "--delay",
         type=_nonneg_float,
         default=0.2,
         help="Seconds to wait between Crossref calls (default: 0.2).",
+    )
+    p.add_argument(
+        "--ignore",
+        metavar="CHECK[,CHECK...]",
+        default="",
+        help="Suppress findings by code, e.g. --ignore no-doi,correction. "
+        "Makes --strict usable as a submission gate: a real manuscript cites "
+        "books and guidelines that have no DOI, which would otherwise fail it "
+        "forever. Use --list-checks to see every code.",
+    )
+    p.add_argument(
+        "--list-checks",
+        action="store_true",
+        help="Print every finding code (for --ignore) with its meaning, and exit.",
     )
     p.add_argument(
         "--strict",
@@ -256,6 +418,27 @@ def run(
     pubmed: Optional[PubMedClient] = None,
 ) -> int:
     args = build_parser().parse_args(argv)
+
+    if args.list_checks:
+        _print_checks()
+        return EXIT_OK
+
+    ignored, unknown_ignores, refused_ignores = _parse_ignore(args.ignore)
+    if unknown_ignores:
+        print(
+            f"citecheck: unknown --ignore code{'' if len(unknown_ignores) == 1 else 's'}: "
+            f"{', '.join(unknown_ignores)}. Run --list-checks to see valid codes.",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
+    if refused_ignores:
+        print(
+            f"citecheck: {', '.join(refused_ignores)} cannot be ignored — it means "
+            f"a lookup did not happen, not that a citation is wrong. Hiding it "
+            f"would let an offline run report a clean pass.",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
 
     if args.input == "-":
         raw = sys.stdin.buffer.read()
@@ -298,22 +481,70 @@ def run(
                 file=sys.stderr,
             )
 
+    # The cache is only built for clients we create — an injected client (tests,
+    # or a library caller) brings its own caching policy and must not be
+    # second-guessed here.
+    cache = None
+    if args.cache and (client is None or (args.pubmed and pubmed is None)):
+        cache = DiskCache(args.cache, ttl_seconds=args.cache_ttl * 24 * 3600)
+
     if client is None:
-        client = CrossrefClient(mailto=args.mailto)
+        client = CrossrefClient(mailto=args.mailto, cache=cache)
     # A PubMed client is created only when --pubmed is set (or one is injected
     # for tests); otherwise the PMID cross-check is skipped entirely.
     if pubmed is None and args.pubmed:
-        pubmed = PubMedClient(mailto=args.mailto)
+        pubmed = PubMedClient(mailto=args.mailto, cache=cache)
     use_color = sys.stdout.isatty() and not args.no_color
+
+    # --pubmed only acts on references that carry a PMID. On a file with none it
+    # is a silent no-op, and the user — who asked for PubMed-grade retraction
+    # coverage — gets byte-identical output and no hint that nothing happened.
+    # Say so plainly rather than let the flag imply coverage it did not provide.
+    if args.pubmed:
+        with_pmid = sum(1 for r in refs if r.pmid)
+        if not with_pmid:
+            print(
+                f"citecheck: warning: --pubmed had no effect — none of the "
+                f"{len(refs)} references carry a PMID, so nothing was "
+                f"cross-checked against PubMed.",
+                file=sys.stderr,
+            )
+        elif with_pmid < len(refs):
+            print(
+                f"citecheck: note: --pubmed cross-checked {with_pmid} of "
+                f"{len(refs)} references (the rest carry no PMID).",
+                file=sys.stderr,
+            )
 
     results: list[CheckResult] = []
     for i, ref in enumerate(refs):
-        results.append(check_reference(ref, client, pubmed=pubmed))
-        if args.delay and i < len(refs) - 1:
+        before = _network_calls(client, pubmed)
+        results.append(
+            check_reference(ref, client, pubmed=pubmed, suggest_missing=args.suggest_doi)
+        )
+        hit_network = _network_calls(client, pubmed) > before
+        # Only pause when we actually called out — a cache hit costs Crossref
+        # nothing, so rate-limiting it would just make a cached run slow for no
+        # reason (the whole point of the cache).
+        if args.delay and hit_network and i < len(refs) - 1:
             time.sleep(args.delay)
+
+    if cache is not None and not cache.save():
+        print(
+            f"citecheck: note: could not write the cache at {args.cache} — "
+            f"results are unaffected.",
+            file=sys.stderr,
+        )
 
     _flag_duplicate_dois(results)
     _flag_duplicate_pmids(results)
+    # Applied after every check has run, so --ignore only silences the *report*
+    # — it never skips a lookup, and so can never change what else was found.
+    n_ignored = _apply_ignores(results, ignored)
+
+    # Errors first: on a long reference list the one retraction must not be
+    # buried among the routine warnings.
+    results = _by_severity(results)
 
     report = "json" if args.json else args.report
     if report == "json":
@@ -326,16 +557,29 @@ def run(
         for r in results:
             _print_result(r, use_color, args.verbose)
         _print_summary(results, use_color)
+        if n_ignored:
+            print(
+                f"  ({n_ignored} finding{'' if n_ignored == 1 else 's'} hidden by "
+                f"--ignore {','.join(sorted(ignored))})"
+            )
+        if cache is not None and cache.hits:
+            print(
+                f"  ({cache.hits} lookup{'' if cache.hits == 1 else 's'} served "
+                f"from the cache at {args.cache}; entries expire after "
+                f"{args.cache_ttl:g} days)"
+            )
 
     has_error = any(r.status == ERROR for r in results)
     has_warning = any(r.status == WARNING for r in results)
     # A lookup failure (typically offline) means we could not actually verify —
     # never let that read as a clean pass in a CI gate.
-    lookup_failed = any(
-        f.message.startswith("Lookup failed")
-        for r in results
-        for f in r.findings
-    )
+    #
+    # Keyed on the CODE, not on the message text. Matching `startswith("Lookup
+    # failed")` made this headline safety property depend on the exact English
+    # wording of four separate f-strings: rephrasing any one of them to "Could
+    # not reach Crossref" would silently turn every offline run into exit 0.
+    # That is the class of bug the codes exist to retire.
+    lookup_failed = any(f.code == "lookup-failed" for r in results for f in r.findings)
     if has_error or (args.strict and has_warning):
         return EXIT_PROBLEM
     if lookup_failed:
@@ -347,16 +591,21 @@ def _print_summary(results: list[CheckResult], use_color: bool) -> None:
     n_err = sum(r.status == ERROR for r in results)
     n_warn = sum(r.status == WARNING for r in results)
     n_ok = sum(r.status == OK for r in results)
-    # "Verified" = we retrieved and compared a Crossref record (even if it then
-    # raised a warning). "Unverifiable" = no record to compare against and not a
-    # hard error (no DOI, lookup failed, or resolves-but-not-in-Crossref).
-    n_verified = sum(1 for r in results if r.crossref is not None)
-    n_unverifiable = sum(1 for r in results if r.crossref is None and r.status != ERROR)
+    # Two disjoint buckets that add up to len(results): either we retrieved a
+    # Crossref record and compared against it, or we did not. The previous
+    # wording ("N verified, M could not be verified") silently excluded
+    # hard-error references from both, so the two numbers did not sum to the
+    # total and the reader was left to wonder where the rest went.
+    n_checked = sum(1 for r in results if r.crossref is not None)
+    n_not_checked = len(results) - n_checked
     print()
     summary = f"checked {len(results)} references: {n_ok} ok, {n_warn} warnings, {n_err} errors"
     sev = ERROR if n_err else (WARNING if n_warn else OK)
     print(_color(summary, sev, use_color))
-    print(f"  ({n_verified} verified against Crossref, {n_unverifiable} could not be verified)")
+    print(
+        f"  ({n_checked} of {len(results)} compared against a Crossref record; "
+        f"{n_not_checked} could not be — no DOI, broken DOI, or not in Crossref)"
+    )
 
 
 def main() -> None:  # console-script entry point
