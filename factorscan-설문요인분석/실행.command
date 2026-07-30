@@ -24,4 +24,4 @@ echo "  python3 -m factorscan.cli 내설문.csv --config 내설정.json"
 echo "  python3 -m factorscan.cli 내설문.csv --items Q1,Q2,Q3 --id-col ID"
 echo "자세한 사용법은 사용법.md / README.md 참고."
 echo
-read -p "엔터를 누르면 창이 닫힙니다..."
+read -p "엔터를 누르면 창이 닫힙니다..." || true

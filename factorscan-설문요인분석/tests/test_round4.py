@@ -436,7 +436,9 @@ def test_scores_out_cli_honors_reverse_and_ids(tmp_path, capsys):
     text = out.read_bytes().decode("utf-8-sig")
     rows = list(csv.reader(io.StringIO(text)))
     assert rows[0][0] == "ID"
-    assert rows[0][1].startswith("F1_sum") and rows[0][2].startswith("F2_sum")
+    # 가설 구조(config의 structure)가 있으면 열 이름에 하위척도명이 붙는다.
+    assert rows[0][1].startswith("F1") and "_sum" in rows[0][1]
+    assert rows[0][2].startswith("F2") and "_sum" in rows[0][2]
     # 결측제거 표본(77명) + 헤더
     assert len(rows) == 1 + 77
     assert "하위척도 점수를 저장" in capsys.readouterr().err
