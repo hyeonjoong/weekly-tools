@@ -20,7 +20,7 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass, field
 from itertools import combinations
-from math import comb, erf, exp, lgamma, sqrt
+from math import comb, erf, exp, lgamma, log2, sqrt
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from .records import Article
@@ -41,14 +41,61 @@ CHECK_TAGS = frozenset({
     "Follow-Up Studies", "Reproducibility of Results", "Time Factors",
 })
 
+# 연구 *주제* 가 아니라 **방법론·연구설계·통계** 를 가리키는 MeSH descriptor.
+# 실제 PubMed 코퍼스를 돌려 보면 이들이 상위 주제를 절반 가까이 차지하고, 서로 짝지어져
+# "Randomized Controlled Trials as Topic × Surveys and Questionnaires" 같은 무의미한
+# '공백'을 최상위로 밀어올린다. 체크 태그와 같은 이유로 기본 제외한다.
+# (`... as Topic` 으로 끝나는 descriptor 는 정의상 방법론 표제어라 접미사 규칙으로도 잡는다.)
+METHOD_TAGS = frozenset({
+    "Treatment Outcome", "Research Design", "Sensitivity and Specificity",
+    "Predictive Value of Tests", "Severity of Illness Index", "Pilot Projects",
+    "Double-Blind Method", "Single-Blind Method", "Random Allocation",
+    "Sample Size", "Data Interpretation, Statistical", "Logistic Models",
+    "Regression Analysis", "Multivariate Analysis", "Analysis of Variance",
+    "Odds Ratio", "Risk Assessment", "Risk Factors",
+    "Surveys and Questionnaires", "Questionnaires",
+    "Longitudinal Studies", "Cohort Studies", "Case-Control Studies",
+    "Feasibility Studies", "Patient Selection", "Sample Size",
+    "Databases, Factual", "Reproducibility of Results",
+})
+_AS_TOPIC_SUFFIX = " as Topic"
+
+
+def is_non_topical(term: str) -> bool:
+    """그 MeSH descriptor 가 '연구 주제'가 아니라 색인·방법론 표제어인가."""
+    return (
+        term in CHECK_TAGS
+        or term in METHOD_TAGS
+        or term.endswith(_AS_TOPIC_SUFFIX)
+    )
+
 
 def strip_check_tags(articles: Sequence["Article"]) -> List["Article"]:
-    """각 논문의 분석용 주제(mesh)에서 체크 태그를 제거한 새 리스트."""
+    """각 논문의 분석용 주제(mesh)에서 색인용 체크 태그·방법론 표제어를 제거한 새 리스트."""
     from dataclasses import replace
 
     out: List[Article] = []
     for a in articles:
-        filtered = [t for t in a.mesh if t not in CHECK_TAGS]
+        filtered = [t for t in a.mesh if not is_non_topical(t)]
+        out.append(replace(a, mesh=filtered) if len(filtered) != len(a.mesh) else a)
+    return out
+
+
+def drop_terms(articles: Sequence["Article"], terms: Sequence[str]) -> List["Article"]:
+    """지정한 주제어를 분석에서 제외한 새 리스트(대소문자 무시).
+
+    검색어 자체가 거의 모든 논문에 붙는 경우(예: 'sleep' 을 검색하면 MeSH 'Sleep' 이
+    90% 논문에 등장)가 흔하다. 그런 주제는 상위 K 를 차지하면서 자명한 조합만 만들어
+    공백 목록을 희석하므로, 연구자가 직접 빼고 다시 볼 수 있어야 한다.
+    """
+    from dataclasses import replace
+
+    drop = {t.strip().lower() for t in terms if t and t.strip()}
+    if not drop:
+        return list(articles)
+    out: List[Article] = []
+    for a in articles:
+        filtered = [t for t in a.mesh if t.lower() not in drop]
         out.append(replace(a, mesh=filtered) if len(filtered) != len(a.mesh) else a)
     return out
 
@@ -116,7 +163,9 @@ def hypergeom_lower_tail(N: int, K: int, n: int, k: int) -> float:
     피하려, 확률을 log 공간(math.lgamma)에서 합산한다. 표본이 작을 땐(<=60) 정확한
     정수 comb 로 계산해 부동소수 오차 없이 정확값을 준다.
     """
-    if N <= 0 or K < 0 or n < 0 or K > N or n > N:
+    if K < 0 or n < 0:
+        raise ValueError(f"음수 개수는 허용되지 않습니다: K={K}, n={n}")
+    if N <= 0 or K > N or n > N:
         return 1.0
     if k < 0:
         return 0.0
@@ -156,6 +205,10 @@ def fisher_exact_two_sided(a: int, b: int, c: int, d: int) -> float:
     부상/쇠퇴 주제의 '최근 vs 초기' 등장 여부가 우연 이상인지 판단하는 데 쓴다.
     관측 표의 확률 이하인 모든 표의 확률을 합산(표준 양측 정의). 순수 표준 라이브러리.
     """
+    if min(a, b, c, d) < 0:
+        # 음수 칸은 호출부의 계산 실수(예: 잘못된 나머지 집단 크기)를 뜻한다.
+        # 조용히 0.0(=최대 유의)을 돌려주면 그 버그가 '아주 유의한 발견'으로 둔갑한다.
+        raise ValueError(f"2×2 표에 음수 칸이 있습니다: [[{a},{b}],[{c},{d}]]")
     N = a + b + c + d
     K = a + c          # 그 주제를 단 총 편수
     n = a + b          # 최근 구간 편수
@@ -295,6 +348,7 @@ class TermTrend:
     recent_share: float
     delta: float  # recent_share - early_share
     p_value: Optional[float] = None  # Fisher 정확검정(최근vs초기 등장) 양측 p — 표시행에만 채움
+    q_value: Optional[float] = None  # 표시한 행들에 BH-FDR 를 적용한 q
 
 
 def split_point(articles: Sequence[Article]) -> Optional[int]:
@@ -383,10 +437,97 @@ class GapPair:
     count_b: int
     p_value: float  # 초기하 하단꼬리 P(X<=observed): 작을수록 유의한 공백
     q_value: float = 1.0  # 다중검정(BH-FDR) 보정 후 q-value
+    deficit: float = 0.0   # 기대−관측 = '있었어야 하는데 없는 논문 편수'(연구자 단위 효과크기)
+    jaccard: float = 0.0   # |A∩B| / |A∪B| — 공동출현의 절대적 겹침 정도
+    cosine: float = 0.0    # Ochiai/코사인 = obs / sqrt(cA·cB) — 공어(co-word) 분석 표준
+    npmi: float = 0.0      # 정규화 점별상호정보량 ∈ [-1,1]; obs=0 이면 -1(완전 배타)
+    observed_early: int = 0    # 초기 구간의 동시등장 편수
+    observed_recent: int = 0   # 최근 구간의 동시등장 편수
+    gap_trend: str = "unknown"  # 'closing'(메워지는 중) | 'widening' | 'stable' | 'unknown'
     pmids_a: List[str] = field(default_factory=list)      # A만 다룬 대표 논문(검증용)
     pmids_b: List[str] = field(default_factory=list)      # B만 다룬 대표 논문
     pmids_both: List[str] = field(default_factory=list)   # 둘 다 다룬 논문(observed>0일 때)
     bridges: List = field(default_factory=list)           # Swanson ABC 가교: [[C, A&C수, C&B수], ...]
+
+
+def _pair_metrics(n: int, ca: int, cb: int, observed: int) -> Tuple[float, float, float]:
+    """(jaccard, cosine/Ochiai, npmi) — 공어(co-word) 분석의 표준 연관 지표 3종.
+
+    lift 하나만 보면 '기대'가 아주 작을 때 값이 요동친다(예: 기대 2.0, 관측 0 → lift 0).
+    서로 다른 정규화를 쓰는 지표를 함께 보면 그 공백이 규모의 문제인지 배타성의
+    문제인지 구분할 수 있다.
+
+    - Jaccard = obs / (cA + cB − obs): 합집합 대비 겹침. 규모에 둔감.
+    - Ochiai(cosine) = obs / sqrt(cA·cB): 문헌계량 공어분석의 표준 유사도.
+    - nPMI = PMI / (−log2 p(A,B)) ∈ [−1, 1]. obs=0 이면 정의상 −1(완전 배타),
+      독립이면 0, 항상 함께 나오면 +1. lift 의 로그를 정보량으로 정규화한 값이다.
+    """
+    union = ca + cb - observed
+    jaccard = observed / union if union > 0 else 0.0
+    cosine = observed / sqrt(ca * cb) if ca > 0 and cb > 0 else 0.0
+    if n <= 0 or ca <= 0 or cb <= 0:
+        npmi = 0.0
+    elif observed <= 0:
+        npmi = -1.0
+    else:
+        p_ab = observed / n
+        p_a = ca / n
+        p_b = cb / n
+        denom = -log2(p_ab)
+        npmi = 1.0 if denom <= 0 else (log2(p_ab / (p_a * p_b)) / denom)
+        npmi = max(-1.0, min(1.0, npmi))
+    return jaccard, cosine, npmi
+
+
+# 이 편수 미만의 동시등장으로는 '메워지는 중/벌어지는 중'을 말할 수 없다.
+# (실측에서 1편짜리 차이가 그대로 '↗ 메워짐' 으로 찍혀 후보를 잘못 탈락시켰다.)
+GAP_TREND_MIN_OBS = 3
+
+
+def _classify_gap_trend(
+    obs_early: int,
+    obs_recent: int,
+    n_early: int,
+    n_recent: int,
+    observed: Optional[int] = None,
+) -> str:
+    """공백의 시간 추이를 판정.
+
+    반환값:
+      - `'empty'`      : 두 구간 모두 동시등장 0편 = **완전 공백**(가장 강한 신호).
+      - `'closing'`    : 최근 구간의 동시등장 *비율* 이 더 높다(남들이 들어오는 중).
+      - `'widening'`   : 최근 구간의 비율이 더 낮다(여전히 비어 있음).
+      - `'stable'`     : 비율이 같다.
+      - `'unknown'`    : 판단 불가 — 한쪽 구간이 비었거나, 동시등장이 너무 적거나
+                         (`GAP_TREND_MIN_OBS` 미만), 연도 미상 논문이 많아 구간에
+                         배정된 편수가 전체 동시등장보다 적을 때.
+
+    두 구간의 동시등장을 **구간 논문 수로 정규화해** 비교한다. 정규화하지 않으면
+    최근 구간에 논문이 많다는 이유만으로 전부 'closing' 으로 보인다.
+
+    실무적 의미: 이미 메워지는 중인 공백은 남이 먼저 들어간 자리라 선점 가치가 낮고,
+    벌어지는(또는 완전히 빈) 공백은 여전히 비어 있다는 뜻이다.
+    """
+    dated = obs_early + obs_recent
+    if observed is not None and observed > 0 and dated < observed:
+        # 연도 미상 논문이 동시등장에 섞여 있다 — 구간 비교는 표본의 일부만 본 것이라
+        # 방향을 단언하면 안 된다.
+        return "unknown"
+    if dated == 0:
+        # '한 번도 함께 나온 적이 없다'는 **시간과 무관한** 사실이다. 구간이 하나뿐인
+        # 코퍼스(전부 같은 해)라고 해서 이 가장 강한 신호를 '판단불가'로 감추면 안 된다.
+        return "empty"
+    if n_early <= 0 or n_recent <= 0:
+        return "unknown"
+    if dated < GAP_TREND_MIN_OBS:
+        return "unknown"
+    r_early = obs_early / n_early
+    r_recent = obs_recent / n_recent
+    if r_recent > r_early:
+        return "closing"
+    if r_recent < r_early:
+        return "widening"
+    return "stable"
 
 
 def _cooccurrence(
@@ -413,43 +554,124 @@ def _enrich_gap(
     b: str,
     n_examples: int = 3,
     bridge_top_n: int = 3,
-) -> None:
-    """(내부) 한 gap 쌍에 대해 대표 PMID 와 Swanson ABC 가교 주제 C 를 계산.
+    split: Optional[int] = None,
+    freq: Optional[Counter] = None,
+):
+    """(내부) 한 gap 쌍에 대해 대표 PMID·Swanson ABC 가교 주제 C·시간 추이를 계산.
 
     가교(bridge): A 와 함께 자주 나오고(A&C), B 와도 자주 나오지만(C&B), A–B 자체는
     드문 제3의 주제 C. "A는 C를 통해 B와 연결된다"는 기전 서사를 만들어, 리뷰어에게
-    '왜 이 주제인가'를 설명할 근거가 된다. 강도 = min(A&C 편수, C&B 편수).
-    반환은 없고 (pmids_a, pmids_b, pmids_both, bridges) 튜플을 준다.
+    '왜 이 주제인가'를 설명할 근거가 된다. 순위는 `_rank_bridges`(lift 곱) 참고.
+
+    반환: (pmids_a, pmids_b, pmids_both, bridges, obs_early, obs_recent).
+    `split` 이 주어지면 동시등장 편수를 초기/최근으로 나눠 세어 공백이 메워지는
+    중인지 판정할 재료를 만든다(연도 미상 논문은 어느 구간에도 넣지 않는다).
     """
     pa: List[str] = []
     pb: List[str] = []
     both: List[str] = []
     ac: Counter = Counter()
     cb: Counter = Counter()
+    obs_early = 0
+    obs_recent = 0
+    if freq is None:
+        freq = _mesh_freq(articles)
+    n_total = len(articles)
     for art in articles:
         ms = set(art.mesh)
         has_a = a in ms
         has_b = b in ms
-        if has_a and has_b and len(both) < n_examples:
-            both.append(art.pmid)
+        if has_a and has_b:
+            if len(both) < n_examples:
+                both.append(art.pmid)
+            if split is not None and art.year is not None:
+                if art.year < split:
+                    obs_early += 1
+                else:
+                    obs_recent += 1
         elif has_a and not has_b and len(pa) < n_examples:
             pa.append(art.pmid)
         elif has_b and not has_a and len(pb) < n_examples:
             pb.append(art.pmid)
-        if has_a:
-            for c in ms:
-                if c != a and c != b:
-                    ac[c] += 1
-        if has_b:
-            for c in ms:
-                if c != a and c != b:
-                    cb[c] += 1
-    bridges = []
+        if bridge_top_n:
+            if has_a:
+                for c in ms:
+                    if c != a and c != b:
+                        ac[c] += 1
+            if has_b:
+                for c in ms:
+                    if c != a and c != b:
+                        cb[c] += 1
+    bridges = _rank_bridges(ac, cb, freq, n_total, bridge_top_n)
+    return pa, pb, both, bridges, obs_early, obs_recent
+
+
+# 가교 후보에서 뺄 '거의 모든 논문에 붙는' 주제의 유병률 상한(코퍼스의 80%). 대부분의
+# 논문에 달린 주제(보통 검색어 자체)는 무엇과도 함께 나오므로 가교로서 정보가 0이다.
+# 임계를 낮게 잡으면 좁은 분야에서 핵심 개념이 정당한 가교인데도 사라지므로, 아래 lift
+# 기반 점수에 실질적 벌점을 맡기고 여기서는 '사실상 보편적인' 주제만 잘라낸다.
+BRIDGE_MAX_PREVALENCE = 0.8
+BRIDGE_MIN_SUPPORT = 2  # A&C, C&B 각각 최소 이만큼은 있어야 서사를 세울 수 있다
+
+
+def _rank_bridges(
+    ac: Counter, cb: Counter, freq: Counter, n_total: int, top_n: int
+) -> List[list]:
+    """Swanson ABC 가교 주제 C 를 **빈도가 아니라 연관 강도**로 순위 매긴다.
+
+    이전에는 `min(A&C, C&B)` 원시 편수로 정렬해, 코퍼스에서 가장 흔한 주제(대개
+    검색어 자체)가 항상 1위였다 — "A와 B는 당신이 검색한 그 단어를 통해 연결됩니다"
+    라는 무의미한 서사가 나왔다. 이제 두 변의 **lift** 곱으로 매긴다:
+
+        score = lift(A,C) × lift(C,B),  lift(X,C) = 관측(X&C) / (cX·cC/N)
+
+    흔한 C 는 기대값이 커서 자동으로 벌점을 받고, A·B 둘 다와 *특이적으로* 엮이는
+    C 가 올라온다. 유병률이 `BRIDGE_MAX_PREVALENCE`(80%)를 넘는 주제와 지지도가
+    `BRIDGE_MIN_SUPPORT` 미만인 후보는 제외한다.
+    """
+    if top_n <= 0 or n_total <= 0:
+        return []
+    scored = []
     for c in set(ac) & set(cb):
-        strength = min(ac[c], cb[c])
-        bridges.append((strength, ac[c] + cb[c], c, ac[c], cb[c]))
-    bridges.sort(key=lambda x: (-x[0], -x[1], x[2]))
-    return pa, pb, both, [[c, x_ac, x_cb] for _, _, c, x_ac, x_cb in bridges[:bridge_top_n]]
+        n_ac, n_cb = ac[c], cb[c]
+        if n_ac < BRIDGE_MIN_SUPPORT or n_cb < BRIDGE_MIN_SUPPORT:
+            continue
+        c_count = freq.get(c, 0)
+        if c_count <= 0 or c_count / n_total > BRIDGE_MAX_PREVALENCE:
+            continue
+        # lift 의 공통 인수(cA, cB)는 후보 간 상수라 순위에 영향이 없어 생략하고,
+        # C 쪽 기대값만 나눠 준다: (n_ac/c_count) * (n_cb/c_count) * N².
+        score = (n_ac * n_cb) / (c_count * c_count)
+        scored.append((-score, -min(n_ac, n_cb), c, n_ac, n_cb))
+    scored.sort()
+    return [[c, n_ac, n_cb] for _, _, c, n_ac, n_cb in scored[:top_n]]
+
+
+# --gap-sort 로 고를 수 있는 정렬 키. 값이 작을수록(=튜플이 앞설수록) 위에 온다.
+GAP_SORTS: Tuple[str, ...] = ("lift", "deficit", "q", "expected", "npmi")
+
+
+def sort_gaps(gaps: List[GapPair], key: str = "deficit") -> List[GapPair]:
+    """공백 목록을 지정한 기준으로 정렬(동률은 항상 결정론적으로 깨뜨린다).
+
+    - `lift`     : 미개척 정도(관측/기대) 오름차순 — '얼마나 안 엮였나'.
+    - `deficit`  : 기대−관측(편수) 내림차순 — '몇 편이 비어 있나'. **기본값.** 기대가
+                   큰(=문헌이 두꺼워 근거가 탄탄한) 공백을 위로 올리므로, 실제 착수
+                   후보를 고를 땐 lift 보다 이쪽이 실용적이다.
+    - `q`        : BH-FDR q 오름차순 — 통계적으로 가장 견고한 순.
+    - `expected` : 기대 동시등장 내림차순 — 분야 규모 순.
+    - `npmi`     : 정규화 상호정보량 오름차순 — 가장 배타적인 조합 순.
+    """
+    if key not in GAP_SORTS:
+        raise ValueError(f"알 수 없는 정렬 기준: {key!r} (가능: {', '.join(GAP_SORTS)})")
+    keyfuncs = {
+        "lift": lambda g: (g.lift, -g.expected, g.term_a, g.term_b),
+        "deficit": lambda g: (-g.deficit, g.lift, g.term_a, g.term_b),
+        "q": lambda g: (g.q_value, g.lift, -g.expected, g.term_a, g.term_b),
+        "expected": lambda g: (-g.expected, g.lift, g.term_a, g.term_b),
+        "npmi": lambda g: (g.npmi, -g.expected, g.term_a, g.term_b),
+    }
+    return sorted(gaps, key=keyfuncs[key])
 
 
 def gap_pairs(
@@ -459,6 +681,7 @@ def gap_pairs(
     max_lift: float = 0.5,
     n_examples: int = 3,
     bridge_top_n: int = 3,
+    sort: str = "deficit",
 ) -> List[GapPair]:
     """빈출 상위 top_k 주제쌍 중 '저조 조합'을 lift 오름차순으로 반환.
 
@@ -472,9 +695,16 @@ def gap_pairs(
       '충분히 만날 만한데도 안 만난' 조합만 공백으로 본다.
     - max_lift: 이 값 이하인 조합만 반환.
     """
-    n = len(articles)
+    # 분모(N)는 **주제어를 하나라도 가진 논문 수**여야 한다.
+    # MeSH 가 아직 안 붙은 논문(실제 PubMed 조회에서 30~40%가 흔하다)은 구조적으로
+    # 어떤 주제쌍도 가질 수 없으므로, 이를 분모에 넣으면 기대값이 낮아지고 lift 가
+    # 부풀려져 **진짜 공백이 가려진다**. 실측 예: N=299(전체) 대비 N=193(주제 보유)에서
+    # 같은 쌍의 p 가 0.069 → 0.012 로 바뀌어 결론이 뒤집혔다.
+    topical = [a for a in articles if a.mesh]
+    n = len(topical)
     if n == 0:
         return []
+    articles = topical
 
     freq = _mesh_freq(articles)
     top_terms = [t for t, _ in _ranked(freq)[:top_k]]  # 결정론적 상위 선택
@@ -491,25 +721,69 @@ def gap_pairs(
         observed = pair_obs.get(key, 0)
         lift = observed / expected if expected > 0 else 0.0
         p = hypergeom_lower_tail(n, ca, cb, observed)
-        candidates.append(GapPair(a_term, b_term, observed, expected, lift, ca, cb, p))
+        jac, cos, npmi = _pair_metrics(n, ca, cb, observed)
+        candidates.append(
+            GapPair(
+                a_term, b_term, observed, expected, lift, ca, cb, p,
+                deficit=expected - observed, jaccard=jac, cosine=cos, npmi=npmi,
+            )
+        )
 
     # 2) 검정한 후보 전체에 BH-FDR 를 적용해 q-value 를 채운다(필터 전에!).
     qs = benjamini_hochberg([g.p_value for g in candidates])
     for g, q in zip(candidates, qs):
         g.q_value = q
 
-    # 3) lift 임계 통과분만 남겨 lift 오름차순(놓친 정도 큰 순)으로.
-    out = [g for g in candidates if g.lift <= max_lift]
-    out.sort(key=lambda g: (g.lift, -g.expected, g.term_a, g.term_b))
+    # 3) lift 임계 통과분만 남겨 요청한 기준으로 정렬.
+    out = sort_gaps([g for g in candidates if g.lift <= max_lift], sort)
 
-    # 4) 살아남은 소수의 공백에만 대표 PMID·가교 주제를 채운다(비용은 작다).
-    if n_examples or bridge_top_n:
-        for g in out:
-            pa, pb, both, bridges = _enrich_gap(
-                articles, g.term_a, g.term_b, n_examples=n_examples, bridge_top_n=bridge_top_n
-            )
-            g.pmids_a, g.pmids_b, g.pmids_both, g.bridges = pa, pb, both, bridges
+    # 4) 살아남은 소수의 공백에만 대표 PMID·가교 주제·시간 추이를 채운다(비용은 작다).
+    split = split_point(articles)
+    n_early = sum(1 for a in articles if a.year is not None and split is not None and a.year < split)
+    n_recent = sum(1 for a in articles if a.year is not None and split is not None and a.year >= split)
+    for g in out:
+        pa, pb, both, bridges, oe, orc = _enrich_gap(
+            articles, g.term_a, g.term_b, n_examples=n_examples,
+            bridge_top_n=bridge_top_n, split=split, freq=freq,
+        )
+        g.pmids_a, g.pmids_b, g.pmids_both, g.bridges = pa, pb, both, bridges
+        g.observed_early, g.observed_recent = oe, orc
+        g.gap_trend = _classify_gap_trend(oe, orc, n_early, n_recent, observed=g.observed)
     return out
+
+
+def gap_candidate_terms(articles: Sequence[Article], top_k: int) -> List[str]:
+    """공백 탐색이 실제로 사용할 상위 주제 목록.
+
+    리포트의 '주요 주제'(--top-mesh)와 공백 탐색 대상(--gap-top-k)은 개수가 다르다.
+    무엇이 후보였는지 밝히지 않으면, 목록에 보이는 주제가 왜 공백표에 한 번도 안
+    나오는지 사용자가 알 길이 없다.
+    """
+    if top_k <= 0:
+        return []
+    topical = [a for a in articles if a.mesh]
+    return [t for t, _ in _ranked(_mesh_freq(topical))[:top_k]]
+
+
+def count_gap_tests(articles: Sequence[Article], top_k: int, min_expected: float) -> int:
+    """실제로 수행되는 공백 검정의 개수 m (= BH-FDR 의 분모).
+
+    검정 수가 많을수록 q 는 나빠지므로, m 을 밝혀야 "왜 유의한 후보가 없는지"를
+    사용자가 이해하고 `--gap-top-k` 를 조정할 수 있다.
+    (주의: `q ≥ p × m` 같은 하한은 **성립하지 않는다** — BH 는
+    `q_(i) = min_{j≥i}(m·p_(j)/j)` 이라 q 가 p×m 보다 작을 수 있다.)
+    """
+    topical = [a for a in articles if a.mesh]
+    n = len(topical)
+    if n == 0 or top_k <= 0:
+        return 0
+    freq = _mesh_freq(topical)
+    top_terms = [t for t, _ in _ranked(freq)[:top_k]]
+    return sum(
+        1
+        for a_term, b_term in combinations(top_terms, 2)
+        if freq[a_term] * freq[b_term] / n >= min_expected
+    )
 
 
 def growth_summary(counts: Dict[int, int], split: Optional[int] = None) -> Dict[str, float]:
@@ -519,7 +793,14 @@ def growth_summary(counts: Dict[int, int], split: Optional[int] = None) -> Dict[
     두 구간 정의가 어긋나지 않도록). 미지정 시 (최소연도+최대연도+1)//2.
     """
     if not counts:
-        return {"total": 0, "recent_share": 0.0, "ratio": 0.0, "split": None, "cagr": None}
+        # 정상 경로와 **같은 키 집합**을 돌려준다(JSON 소비자가 모양이 바뀌지 않도록).
+        return {
+            "total": 0, "early_total": 0, "recent_total": 0,
+            "early_years": 0, "recent_years": 0,
+            "early_per_year": 0.0, "recent_per_year": 0.0,
+            "recent_share": 0.0, "ratio": 0.0, "ratio_per_year": 0.0,
+            "split": None, "cagr": None, "theil_sen": None,
+        }
     years = sorted(counts)
     if split is None:
         split = (years[0] + years[-1] + 1) // 2
@@ -527,15 +808,55 @@ def growth_summary(counts: Dict[int, int], split: Optional[int] = None) -> Dict[
     recent_total = sum(v for y, v in counts.items() if y >= split)
     total = early_total + recent_total
     ratio = (recent_total / early_total) if early_total else float("inf")
+
+    # 두 구간의 **햇수가 다를 수 있다**(예: 2016–2026, split 2021 → 초기 5년 / 최근 6년).
+    # 그때 총량 비(2.56배)는 창 길이 차이를 성장으로 착각하게 만든다. 연평균 편수로
+    # 정규화한 비(2.13배)를 함께 보고해, 리포트가 둘을 구분해 쓸 수 있게 한다.
+    lo, hi = years[0], years[-1]
+    early_years = max(0, min(split, hi + 1) - lo)
+    recent_years = max(0, hi + 1 - max(split, lo))
+    early_py = (early_total / early_years) if early_years else 0.0
+    recent_py = (recent_total / recent_years) if recent_years else 0.0
+    ratio_py = (recent_py / early_py) if early_py else float("inf")
     return {
         "total": total,
         "early_total": early_total,
         "recent_total": recent_total,
+        "early_years": early_years,
+        "recent_years": recent_years,
+        "early_per_year": early_py,
+        "recent_per_year": recent_py,
         "recent_share": recent_total / total if total else 0.0,
         "ratio": ratio,
+        "ratio_per_year": ratio_py,
         "split": split,
         "cagr": _cagr(counts),
+        "theil_sen": theil_sen([v for _, v in yearly_series_dense(counts)]),
     }
+
+
+def theil_sen(values: Sequence[float]) -> Optional[float]:
+    """Theil–Sen 기울기 = 모든 점쌍 기울기의 중앙값(단위: 편/년).
+
+    CAGR 은 구간 **양끝 한 해**로만 계산해, 첫해가 검색 날짜필터에 잘리거나 마지막
+    해가 아직 진행 중이면(항상 그렇다) 완전히 엉뚱한 값을 낸다 — 실측에서 평평한
+    분야가 '연평균 −17%' 로 보고됐다. Theil–Sen 은 관측치의 절반이 오염돼도 견디는
+    로버스트 추정량이고, Mann–Kendall 과 같은 순위 기반 계열이라 함께 읽기 좋다.
+    """
+    x = list(values)
+    n = len(x)
+    if n < 3:
+        return None
+    slopes = [
+        (x[j] - x[i]) / (j - i)
+        for i in range(n - 1)
+        for j in range(i + 1, n)
+    ]
+    slopes.sort()
+    m = len(slopes)
+    if m % 2:
+        return slopes[m // 2]
+    return 0.5 * (slopes[m // 2 - 1] + slopes[m // 2])
 
 
 def _cagr(counts: Dict[int, int]) -> Optional[float]:
@@ -603,13 +924,27 @@ _TYPE_TO_TIER: Dict[str, str] = {
 }
 
 
-def evidence_tier(pub_types: Sequence[str]) -> str:
-    """PublicationType 목록 → 대표 근거 tier(가장 높은 하나). 해당 없으면 'other'.
+# NLM 은 코호트·환자대조·후향 연구를 PublicationType 이 아니라 **MeSH** 로 색인한다.
+# 그래서 PublicationType 만 보면 실제 관찰연구의 대부분이 '설계 미상'으로 빠진다.
+# PublicationType 에 설계 신호가 없을 때만 이 MeSH 를 보조 신호로 쓴다.
+OBSERVATIONAL_MESH = frozenset({
+    "Cohort Studies", "Retrospective Studies", "Prospective Studies",
+    "Case-Control Studies", "Cross-Sectional Studies", "Longitudinal Studies",
+    "Follow-Up Studies",
+})
+
+
+def evidence_tier(pub_types: Sequence[str], mesh: Sequence[str] = ()) -> str:
+    """PublicationType(+보조로 MeSH) → 대표 근거 tier(가장 높은 하나). 미상이면 'other'.
 
     'Journal Article'·'English Abstract'·'Research Support, ...' 처럼 연구 설계가
-    아닌 태그만 달린 논문은 'other'. 타입이 아예 없으면(다른 서지 포맷에서 흔함)
-    역시 'other' 지만, 호출부는 `pub_types` 가 빈 논문을 **분석에서 제외**해야 한다
-    (설계 미상과 '설계가 other' 는 다른 것 — evidence_profile 참고).
+    아닌 태그만 달린 논문은 설계 **미상**이다. PubMed 레코드는 사실상 전부
+    'Journal Article' 을 달고 있으므로, "pub_types 가 비었는가"로 미상을 판정하면
+    커버리지가 항상 100%로 나오는 함정에 빠진다 — 반드시 이 함수가 'other' 를
+    돌려주는지로 판정해야 한다(evidence_profile 참고).
+
+    `mesh` 를 주면, PublicationType 에 설계 신호가 없을 때에 한해 코호트/후향/환자대조
+    같은 **연구설계 MeSH** 를 관찰연구 신호로 인정한다(NLM 색인 관행 보정).
     """
     best: Optional[str] = None
     for pt in pub_types:
@@ -618,7 +953,16 @@ def evidence_tier(pub_types: Sequence[str]) -> str:
             continue
         if best is None or _TIER_RANK[tier] < _TIER_RANK[best]:
             best = tier
+    if best is None and mesh:
+        for term in mesh:
+            if term in OBSERVATIONAL_MESH:
+                return "observational"
     return best or "other"
+
+
+def article_tier(article: "Article") -> str:
+    """한 논문의 근거 tier(설계 MeSH 보조 신호 포함)."""
+    return evidence_tier(article.pub_types, article.mesh)
 
 
 def tier_label(tier: str) -> str:
@@ -626,25 +970,29 @@ def tier_label(tier: str) -> str:
     return _TIER_LABEL.get(tier, tier)
 
 
-def evidence_profile(articles: Sequence[Article]) -> Dict:
+def evidence_profile(articles: Sequence[Article], tiers: Optional[Sequence[str]] = None) -> Dict:
     """코퍼스의 연구 설계 구성(근거 지형).
 
-    **설계 미상 논문은 분모에서 뺀다.** PublicationType 이 없는 논문(RIS 등 일부
-    서지 포맷, 혹은 아직 색인 전)을 'other' 로 세면 "이 분야엔 RCT 가 없다"는
-    잘못된 결론이 나온다. 그래서 `n_typed`(설계 정보를 가진 논문 수)를 분모로 쓰고
-    `coverage` 로 그 비율을 함께 보고해, 리포트가 커버리지를 밝히도록 한다.
+    **설계 미상 논문은 분모에서 뺀다.** 여기서 '미상'은 `evidence_tier()` 가 'other'
+    를 돌려주는 논문이다 — PubMed 레코드는 사실상 전부 'Journal Article' 을 달고
+    있으므로 "PublicationType 이 비었는가"로 판정하면 커버리지가 언제나 100%로 나오고
+    설계 미상 논문이 조용히 분모에 섞인다(그리고 개입연구 비율이 희석된다).
+
+    `tiers` 로 논문별 tier 를 미리 계산해 넘길 수 있다(체크 태그를 떼기 *전* 의
+    MeSH 로 설계 신호를 읽어야 하는 리포트 경로용).
 
     반환 dict:
-      n_articles, n_typed, coverage,
-      tiers: [{tier, label, count, share}] — EVIDENCE_TIERS 순서 + 'other',
+      n_articles, n_typed, n_unknown, coverage,
+      tiers: [{tier, label, count, share}] — EVIDENCE_TIERS 순서(설계 미상은 제외),
       n_interventional, interventional_share
     """
     n = len(articles)
-    typed = [a for a in articles if a.pub_types]
-    n_typed = len(typed)
-    counts: Counter = Counter(evidence_tier(a.pub_types) for a in typed)
-    order = [t for t, _, _ in EVIDENCE_TIERS] + ["other"]
-    tiers = [
+    if tiers is None:
+        tiers = [article_tier(a) for a in articles]
+    counts: Counter = Counter(t for t in tiers if t != "other")
+    n_typed = sum(counts.values())
+    order = [t for t, _, _ in EVIDENCE_TIERS]
+    rows = [
         {
             "tier": t,
             "label": tier_label(t),
@@ -653,12 +1001,17 @@ def evidence_profile(articles: Sequence[Article]) -> Dict:
         }
         for t in order
     ]
-    n_int = sum(counts.get(t, 0) for t in INTERVENTIONAL_TIERS)
+    # 개입연구 편수는 대표 tier 가 아니라 설계 태그의 '존재 여부'로 센다
+    # (Meta-Analysis + RCT 가 함께 달린 논문을 놓치지 않기 위해).
+    n_int = sum(
+        1 for a, t in zip(articles, tiers) if t != "other" and is_interventional(a)
+    )
     return {
         "n_articles": n,
         "n_typed": n_typed,
+        "n_unknown": n - n_typed,
         "coverage": (n_typed / n) if n else 0.0,
-        "tiers": tiers,
+        "tiers": rows,
         "n_interventional": n_int,
         "interventional_share": (n_int / n_typed) if n_typed else 0.0,
     }
@@ -680,10 +1033,24 @@ class TopicEvidence:
     tier_counts: Dict[str, int] = field(default_factory=dict)
 
 
+# 개입(interventional) 판정에 쓰는 PublicationType. **대표 tier 가 아니라 '존재 여부'**
+# 로 본다: 'Meta-Analysis' + 'Randomized Controlled Trial' 이 함께 달린 논문은 대표
+# tier 가 systematic_review 로 잡히지만, 그 논문은 분명 무작위배정 시험이다.
+_INTERVENTIONAL_TYPES = frozenset(
+    pt for tier, _, types in EVIDENCE_TIERS if tier in INTERVENTIONAL_TIERS for pt in types
+)
+
+
+def is_interventional(article: "Article") -> bool:
+    """이 논문이 개입(중재)연구인가 — 설계 태그 '존재 여부'로 판정."""
+    return any(pt.strip() in _INTERVENTIONAL_TYPES for pt in article.pub_types)
+
+
 def topic_evidence(
     articles: Sequence[Article],
     top_k: int = 12,
     min_articles: int = 3,
+    tiers: Optional[Sequence[str]] = None,
 ) -> List[TopicEvidence]:
     """빈출 상위 top_k 주제별 개입연구(RCT·임상시험) 밀도 — 낮은 순 정렬.
 
@@ -697,11 +1064,21 @@ def topic_evidence(
     - min_articles: 이 편수 미만인 주제는 통계가 무의미하므로 제외.
     - 정렬: share 오름차순(개입연구가 가장 비어 있는 주제 우선), 동률이면 편수 많은 순.
     """
-    typed = [a for a in articles if a.pub_types]
-    if not typed or top_k <= 0:
+    if tiers is None:
+        tiers = [article_tier(a) for a in articles]
+    # 설계가 확인된(tier != 'other') **그리고** 주제어를 가진 논문만 대상.
+    # - 설계 미상을 포함하면 '색인 안 됨'이 '시험 없음'으로 둔갑한다.
+    # - 주제어가 없는 논문은 어떤 주제에도 속할 수 없으므로 '나머지' 집단에만 들어가
+    #   비교군을 조용히 희석시킨다.
+    pairs = [
+        (a, t) for a, t in zip(articles, tiers) if t != "other" and a.mesh
+    ]
+    if not pairs or top_k <= 0:
         return []
+    typed = [a for a, _ in pairs]
+    typed_tiers = [t for _, t in pairs]
 
-    is_int = [evidence_tier(a.pub_types) in INTERVENTIONAL_TIERS for a in typed]
+    is_int = [is_interventional(a) for a in typed]
     total_int = sum(is_int)
     n_typed = len(typed)
 
@@ -712,8 +1089,7 @@ def topic_evidence(
     n_by_term: Counter = Counter()
     int_by_term: Counter = Counter()
     tiers_by_term: Dict[str, Counter] = {t: Counter() for t in top_terms}
-    for art, interventional in zip(typed, is_int):
-        tier = evidence_tier(art.pub_types)
+    for art, interventional, tier in zip(typed, is_int, typed_tiers):
         for t in set(art.mesh) & term_set:
             n_by_term[t] += 1
             tiers_by_term[t][tier] += 1

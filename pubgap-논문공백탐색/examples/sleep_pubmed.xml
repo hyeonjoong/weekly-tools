@@ -21,6 +21,11 @@
         <Abstract>
           <AbstractText>Synthetic abstract for the bundled pubgap example.</AbstractText>
         </Abstract>
+        <PublicationTypeList>
+          <PublicationType UI="D00000">Journal Article</PublicationType>
+          <PublicationType UI="D00001">Randomized Controlled Trial</PublicationType>
+          <PublicationType UI="D00002">Clinical Trial</PublicationType>
+        </PublicationTypeList>
       </Article>
       <MeshHeadingList>
         <MeshHeading>
@@ -53,6 +58,10 @@
         <Abstract>
           <AbstractText>Synthetic abstract for the bundled pubgap example.</AbstractText>
         </Abstract>
+        <PublicationTypeList>
+          <PublicationType UI="D00000">Journal Article</PublicationType>
+          <PublicationType UI="D00001">Observational Study</PublicationType>
+        </PublicationTypeList>
       </Article>
       <MeshHeadingList>
         <MeshHeading>
@@ -85,6 +94,10 @@
         <Abstract>
           <AbstractText>Synthetic abstract for the bundled pubgap example.</AbstractText>
         </Abstract>
+        <PublicationTypeList>
+          <PublicationType UI="D00000">Journal Article</PublicationType>
+          <PublicationType UI="D00001">Observational Study</PublicationType>
+        </PublicationTypeList>
       </Article>
       <MeshHeadingList>
         <MeshHeading>
@@ -117,6 +130,11 @@
         <Abstract>
           <AbstractText>Synthetic abstract for the bundled pubgap example.</AbstractText>
         </Abstract>
+        <PublicationTypeList>
+          <PublicationType UI="D00000">Journal Article</PublicationType>
+          <PublicationType UI="D00001">Randomized Controlled Trial</PublicationType>
+          <PublicationType UI="D00002">Clinical Trial</PublicationType>
+        </PublicationTypeList>
       </Article>
       <MeshHeadingList>
         <MeshHeading>
@@ -149,6 +167,10 @@
         <Abstract>
           <AbstractText>Synthetic abstract for the bundled pubgap example.</AbstractText>
         </Abstract>
+        <PublicationTypeList>
+          <PublicationType UI="D00000">Journal Article</PublicationType>
+          <PublicationType UI="D00001">Observational Study</PublicationType>
+        </PublicationTypeList>
       </Article>
       <MeshHeadingList>
         <MeshHeading>
@@ -181,6 +203,10 @@
         <Abstract>
           <AbstractText>Synthetic abstract for the bundled pubgap example.</AbstractText>
         </Abstract>
+        <PublicationTypeList>
+          <PublicationType UI="D00000">Journal Article</PublicationType>
+          <PublicationType UI="D00001">Clinical Trial</PublicationType>
+        </PublicationTypeList>
       </Article>
       <MeshHeadingList>
         <MeshHeading>
@@ -213,6 +239,10 @@
         <Abstract>
           <AbstractText>Synthetic abstract for the bundled pubgap example.</AbstractText>
         </Abstract>
+        <PublicationTypeList>
+          <PublicationType UI="D00000">Journal Article</PublicationType>
+          <PublicationType UI="D00001">Observational Study</PublicationType>
+        </PublicationTypeList>
       </Article>
       <MeshHeadingList>
         <MeshHeading>
@@ -245,6 +275,10 @@
         <Abstract>
           <AbstractText>Synthetic abstract for the bundled pubgap example.</AbstractText>
         </Abstract>
+        <PublicationTypeList>
+          <PublicationType UI="D00000">Journal Article</PublicationType>
+          <PublicationType UI="D00001">Validation Study</PublicationType>
+        </PublicationTypeList>
       </Article>
       <MeshHeadingList>
         <MeshHeading>
@@ -277,6 +311,10 @@
         <Abstract>
           <AbstractText>Synthetic abstract for the bundled pubgap example.</AbstractText>
         </Abstract>
+        <PublicationTypeList>
+          <PublicationType UI="D00000">Journal Article</PublicationType>
+          <PublicationType UI="D00001">Case Reports</PublicationType>
+        </PublicationTypeList>
       </Article>
       <MeshHeadingList>
         <MeshHeading>
@@ -306,6 +344,11 @@
         <Abstract>
           <AbstractText>Synthetic abstract for the bundled pubgap example.</AbstractText>
         </Abstract>
+        <PublicationTypeList>
+          <PublicationType UI="D00000">Journal Article</PublicationType>
+          <PublicationType UI="D00001">Randomized Controlled Trial</PublicationType>
+          <PublicationType UI="D00002">Clinical Trial</PublicationType>
+        </PublicationTypeList>
       </Article>
       <MeshHeadingList>
         <MeshHeading>
@@ -338,6 +381,10 @@
         <Abstract>
           <AbstractText>Synthetic abstract for the bundled pubgap example.</AbstractText>
         </Abstract>
+        <PublicationTypeList>
+          <PublicationType UI="D00000">Journal Article</PublicationType>
+          <PublicationType UI="D00001">Observational Study</PublicationType>
+        </PublicationTypeList>
       </Article>
       <MeshHeadingList>
         <MeshHeading>
@@ -370,6 +417,10 @@
         <Abstract>
           <AbstractText>Synthetic abstract for the bundled pubgap example.</AbstractText>
         </Abstract>
+        <PublicationTypeList>
+          <PublicationType UI="D00000">Journal Article</PublicationType>
+          <PublicationType UI="D00001">Observational Study</PublicationType>
+        </PublicationTypeList>
       </Article>
       <MeshHeadingList>
         <MeshHeading>
@@ -402,6 +453,11 @@
         <Abstract>
           <AbstractText>Synthetic abstract for the bundled pubgap example.</AbstractText>
         </Abstract>
+        <PublicationTypeList>
+          <PublicationType UI="D00000">Journal Article</PublicationType>
+          <PublicationType UI="D00001">Randomized Controlled Trial</PublicationType>
+          <PublicationType UI="D00002">Clinical Trial</PublicationType>
+        </PublicationTypeList>
       </Article>
       <MeshHeadingList>
         <MeshHeading>
@@ -434,6 +490,10 @@
         <Abstract>
           <AbstractText>Synthetic abstract for the bundled pubgap example.</AbstractText>
         </Abstract>
+        <PublicationTypeList>
+          <PublicationType UI="D00000">Journal Article</PublicationType>
+          <PublicationType UI="D00001">Observational Study</PublicationType>
+        </PublicationTypeList>
       </Article>
       <MeshHeadingList>
         <MeshHeading>
@@ -466,6 +526,10 @@
         <Abstract>
           <AbstractText>Synthetic abstract for the bundled pubgap example.</AbstractText>
         </Abstract>
+        <PublicationTypeList>
+          <PublicationType UI="D00000">Journal Article</PublicationType>
+          <PublicationType UI="D00001">Clinical Trial</PublicationType>
+        </PublicationTypeList>
       </Article>
       <MeshHeadingList>
         <MeshHeading>
@@ -498,6 +562,10 @@
         <Abstract>
           <AbstractText>Synthetic abstract for the bundled pubgap example.</AbstractText>
         </Abstract>
+        <PublicationTypeList>
+          <PublicationType UI="D00000">Journal Article</PublicationType>
+          <PublicationType UI="D00001">Validation Study</PublicationType>
+        </PublicationTypeList>
       </Article>
       <MeshHeadingList>
         <MeshHeading>
@@ -530,6 +598,11 @@
         <Abstract>
           <AbstractText>Synthetic abstract for the bundled pubgap example.</AbstractText>
         </Abstract>
+        <PublicationTypeList>
+          <PublicationType UI="D00000">Journal Article</PublicationType>
+          <PublicationType UI="D00001">Randomized Controlled Trial</PublicationType>
+          <PublicationType UI="D00002">Clinical Trial</PublicationType>
+        </PublicationTypeList>
       </Article>
       <MeshHeadingList>
         <MeshHeading>
@@ -562,6 +635,10 @@
         <Abstract>
           <AbstractText>Synthetic abstract for the bundled pubgap example.</AbstractText>
         </Abstract>
+        <PublicationTypeList>
+          <PublicationType UI="D00000">Journal Article</PublicationType>
+          <PublicationType UI="D00001">Review</PublicationType>
+        </PublicationTypeList>
       </Article>
       <MeshHeadingList>
         <MeshHeading>

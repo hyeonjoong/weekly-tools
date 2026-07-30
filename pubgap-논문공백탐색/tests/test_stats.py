@@ -245,6 +245,28 @@ def test_hypergeom_large_matches_exact_small_scaling():
     assert abs(hypergeom_lower_tail(4000, 200, 300, min(200, 300)) - 1.0) < 1e-9
 
 
+def test_hypergeom_log_path_matches_exact_rational():
+    """N>60 의 log 경로를 **값으로** 고정한다.
+
+    회귀 배경: 예전 테스트는 단조성과 '꼬리 끝=1.0'(그 값은 조기반환이라 합산 루프를
+    타지도 않는다)만 봤다. 그래서 log 경로 합산의 off-by-one 을 scipy 가 설치된
+    환경에서만 잡을 수 있었다 — scipy 는 이 패키지의 의존성이 아니다.
+    """
+    from fractions import Fraction
+    from math import comb
+
+    def exact(N, K, n, k):
+        lo = max(0, n - (N - K))
+        return Fraction(
+            sum(comb(K, i) * comb(N - K, n - i) for i in range(lo, k + 1)), comb(N, n)
+        )
+
+    for N, K, n, k in [(61, 30, 20, 4), (100, 50, 40, 15), (200, 30, 80, 5),
+                       (777, 111, 222, 20), (2000, 500, 400, 90)]:
+        got = hypergeom_lower_tail(N, K, n, k)
+        assert got == pytest.approx(float(exact(N, K, n, k)), rel=1e-9, abs=1e-13)
+
+
 def test_hypergeom_small_still_exact_integer_path():
     # 작은 N(<=60)은 정확 정수 경로 — 손계산값과 정확히 일치.
     assert abs(hypergeom_lower_tail(18, 8, 6, 0) - 210 / 18564) < 1e-12

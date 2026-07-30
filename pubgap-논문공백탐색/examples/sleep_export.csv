@@ -1,0 +1,22 @@
+﻿Records exported from a citation manager (synthetic pubgap example)
+
+PubMed ID,Title,Source title,Publication Year,MeSH Terms,Author Keywords,Document Type
+30000001,Slow breathing and heart rate variability in healthy adults,Sleep Med,2015,Respiration; Heart Rate; Autonomic Nervous System,,Randomized Controlled Trial; Clinical Trial
+30000002,EEG slow-wave activity in patients with insomnia,J Sleep Res,2016,Electroencephalography; Sleep; Sleep Initiation and Maintenance Disorders,,Observational Study
+30000003,Respiratory rate monitoring during sleep,Chest,2016,Respiration; Sleep; Respiratory Rate,,Observational Study
+30000004,Parasympathetic activation via paced breathing,Psychophysiology,2017.0,Respiration; Parasympathetic Nervous System; Heart Rate,,Randomized Controlled Trial; Clinical Trial
+30000005,Cortical arousal and EEG markers of fragmented sleep,Sleep,2017,Electroencephalography; Sleep; Arousal,,Observational Study
+30000006,Heart rate variability biofeedback for stress,Front Neurosci,2018,"Heart Rate; Biofeedback, Psychology; Autonomic Nervous System",,Clinical Trial
+
+30000007,Insomnia severity and autonomic function,J Clin Sleep Med,2018,Sleep Initiation and Maintenance Disorders; Autonomic Nervous System; Heart Rate,,Observational Study
+30000008,Non-contact respiration sensing during sleep,Sleep Med,Mar-2019,"Respiration; Monitoring, Physiologic; Sleep",,Validation Study
+30000009,EEG spectral power during relaxation,Psychophysiology,2019,Electroencephalography; Relaxation,,Case Reports
+30000010,Respiratory sinus arrhythmia and vagal tone,Front Physiol,2020,Respiration; Heart Rate; Parasympathetic Nervous System,,Randomized Controlled Trial; Clinical Trial
+30000011,Slow-wave sleep and memory consolidation,Sleep,2020,Sleep; Electroencephalography; Memory,,Observational Study
+30000012,Acoustic stimulation of slow oscillations during sleep,J Sleep Res,2021,Electroencephalography; Sleep; Acoustic Stimulation,,Observational Study
+30000013,Biofeedback for insomnia: a randomized trial,Front Neurosci,2021,"Biofeedback, Psychology; Sleep Initiation and Maintenance Disorders; Heart Rate",,Randomized Controlled Trial; Clinical Trial
+30000014,Wearable HRV monitoring across the night,Sleep Med,2022,"Heart Rate; Sleep; Monitoring, Physiologic",,Observational Study
+30000015,Paced breathing and parasympathetic tone,Psychophysiology,2022,Respiration; Parasympathetic Nervous System; Autonomic Nervous System,,Clinical Trial
+30000016,Non-contact monitoring of respiration and heart rate,Front Physiol,2023,"Respiration; Heart Rate; Monitoring, Physiologic",,Validation Study
+30000017,Biofeedback-assisted breathing for sleep onset,J Clin Sleep Med,2023,"Biofeedback, Psychology; Respiration; Sleep",,Randomized Controlled Trial; Clinical Trial
+30000018,Acoustic enhancement of slow-wave sleep and its autonomic effect,Sleep,2024,Electroencephalography; Sleep; Acoustic Stimulation; Autonomic Nervous System,,Review

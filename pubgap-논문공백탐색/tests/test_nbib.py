@@ -215,10 +215,19 @@ def test_xml_normal_doctype_still_parses():
     assert len(arts) == 1 and arts[0].pmid == "1"
 
 
-def test_decode_bytes_replacement_fallback():
-    # utf-8/latin-1 로도 못 읽는 바이트는 replace 로 죽지 않고 통과.
-    # (latin-1 은 모든 바이트를 매핑하므로, 실제로는 latin-1 경로가 먼저 성공한다 —
-    #  여기서는 함수가 예외 없이 문자열을 돌려주는 것만 보증.)
-    raw = bytes([0xFF, 0xFE, 0x00, 0x41])
-    text = decode_bytes(raw)
-    assert isinstance(text, str)
+def test_decode_bytes_encoding_ladder():
+    """인코딩 판별 사다리를 각 단계별로 값까지 확인한다.
+
+    회귀 배경: 예전 테스트는 `isinstance(text, str)` 만 봐서 사실상 아무것도
+    검증하지 않았고, UTF-16 이 latin-1 로 잘못 읽히는 실제 버그를 놓쳤다.
+    """
+    # 1) UTF-8 (BOM 포함/미포함)
+    assert decode_bytes("수면 연구".encode("utf-8")) == "수면 연구"
+    assert decode_bytes(b"\xef\xbb\xbf" + "수면".encode("utf-8")) == "수면"
+    # 2) UTF-16 은 BOM 으로 먼저 잡아야 한다(latin-1 이 삼키기 전에).
+    assert decode_bytes("Sleep A".encode("utf-16")) == "Sleep A"
+    assert decode_bytes("Sleep B".encode("utf-16-be")) != "S\x00l\x00"
+    # 3) latin-1 전용 바이트(UTF-8 로는 불가) — 손실 없이 매핑된다.
+    assert decode_bytes(b"caf\xe9") == "café"
+    # 4) 어떤 바이트열이 와도 예외 없이 str 을 돌려준다.
+    assert isinstance(decode_bytes(bytes(range(256))), str)

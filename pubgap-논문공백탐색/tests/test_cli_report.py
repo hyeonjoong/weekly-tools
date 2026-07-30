@@ -29,10 +29,16 @@ def test_build_report_on_example():
     # 상위 공백은 EEG × (Heart Rate / Respiration) — 설계상 lift 0
     gaps = rep["gaps"]
     assert gaps, "공백이 검출되어야 한다"
-    top_terms = {gaps[0]["term_a"], gaps[0]["term_b"]}
+    # 기본 정렬은 deficit(기대−관측 편수) 내림차순.
+    assert [g["deficit"] for g in gaps] == sorted(
+        (g["deficit"] for g in gaps), reverse=True
+    )
+    # lift 로 정렬하면 설계상 lift=0 인 EEG × (Heart Rate / Respiration) 이 맨 위.
+    by_lift = build_report(arts, "example", gap_sort="lift")["gaps"]
+    top_terms = {by_lift[0]["term_a"], by_lift[0]["term_b"]}
     assert "Electroencephalography" in top_terms
-    assert gaps[0]["observed"] == 0
-    assert gaps[0]["lift"] == 0.0
+    assert by_lift[0]["observed"] == 0
+    assert by_lift[0]["lift"] == 0.0
 
 
 def test_render_markdown_contains_sections():
@@ -106,7 +112,7 @@ def test_cli_fetch_failure_exit_code_3(monkeypatch, capsys):
     def boom(*a, **k):
         raise RuntimeError("PubMed 오류: throttled")
 
-    monkeypatch.setattr(fetch_mod, "fetch_articles_xml", boom)
+    monkeypatch.setattr(fetch_mod, "fetch_articles", boom)
     rc = main(["some query"])
     assert rc == 3
     assert "가져오지 못했습니다" in capsys.readouterr().err
@@ -117,9 +123,13 @@ def test_cli_network_path_is_isolated(monkeypatch, capsys):
     import pubgap.fetch as fetch_mod
 
     def fake_fetch(*a, **k):
-        return EXAMPLE.read_text(encoding="utf-8")
+        return fetch_mod.FetchResult(
+            xml_text=EXAMPLE.read_text(encoding="utf-8"),
+            total_available=18,
+            n_fetched=18,
+        )
 
-    monkeypatch.setattr(fetch_mod, "fetch_articles_xml", fake_fetch)
+    monkeypatch.setattr(fetch_mod, "fetch_articles", fake_fetch)
     rc = main(["sleep breathing"])
     assert rc == 0
     assert "리포트" in capsys.readouterr().out
@@ -149,8 +159,12 @@ def test_render_csv_structure():
     csv_text = render_csv(build_report(load_example(), "example"))
     lines = csv_text.lstrip("﻿").splitlines()
     assert lines[0] == (
-        "term_a,term_b,observed,expected,lift,count_a,count_b,p_value,q_value,"
-        "pmids_a,pmids_b,pmids_both,bridges"
+        "term_a,term_b,observed,expected,deficit,lift,jaccard,cosine,npmi,"
+        "count_a,count_b,p_value,q_value,"
+        "observed_early,observed_recent,gap_trend,"
+        "pmids_a,pmids_b,pmids_both,bridges,"
+        "pubmed_url_mesh,pubmed_url_text,"
+        "verdict,pubmed_observed,pubmed_lift"
     )
     # 예시에는 공백이 최소 1개 이상
     assert len(lines) >= 2
@@ -173,19 +187,36 @@ def test_cli_format_json_equivalent_to_flag(capsys):
 
 
 def test_cli_gap_max_q_filters(capsys):
-    # 아주 엄격한 q 임계 → 공백 표가 줄거나 사라져도 rc 0
-    rc = main(["--from-file", str(EXAMPLE), "--gap-max-q", "0.0", "--format", "csv"])
-    assert rc == 0
+    # 기준선: 필터 없이는 공백이 존재한다.
+    assert main(["--from-file", str(EXAMPLE), "--format", "csv"]) == 0
+    before = len(capsys.readouterr().out.lstrip("﻿").splitlines())
+    assert before >= 2
+
+    # 아주 엄격한 q 임계 → 실제로 행이 사라져야 한다(헤더만 남음).
+    assert main(["--from-file", str(EXAMPLE), "--gap-max-q", "0.0", "--format", "csv"]) == 0
     lines = capsys.readouterr().out.lstrip("﻿").splitlines()
     assert lines[0].startswith("term_a")  # 헤더는 항상 존재
+    assert len(lines) == 1, "q<=0.0 을 만족하는 공백은 없어야 한다"
+
+    # 느슨한 임계는 원래 개수를 유지한다.
+    assert main(["--from-file", str(EXAMPLE), "--gap-max-q", "1.0", "--format", "csv"]) == 0
+    assert len(capsys.readouterr().out.lstrip("﻿").splitlines()) == before
 
 
-def test_cli_major_topics_only_runs(capsys):
-    # 예시 데이터는 major 표기가 없어 주제가 비지만, 크래시 없이 처리되어야 함
-    rc = main(["--from-file", str(EXAMPLE), "--major-topics-only"])
-    # major 가 전무 → mesh 공백 → 유효 결과 없음(rc 1) 또는 리포트(rc 0) 모두 허용,
-    # 핵심은 예외로 죽지 않는 것.
-    assert rc in (0, 1)
+def test_cli_major_topics_only_on_corpus_without_major_topics(capsys):
+    """예시 XML 에는 별표(major)가 없다 → 주제가 비고, 그 사실을 사용자에게 알려야 한다.
+
+    회귀 배경: 예전 테스트는 `rc in (0, 1)` 로 두 결과를 모두 허용해, 어느 쪽이
+    일어나든 통과하는 사실상의 스모크 테스트였다.
+    """
+    rc = main(["--from-file", str(EXAMPLE), "--major-topics-only", "--format", "json"])
+    assert rc == 0
+    cap = capsys.readouterr()
+    assert "대표(별표) MeSH 주제가 하나도 없어" in cap.err
+    data = json.loads(cap.out)
+    assert data["n_articles"] == 18      # 논문은 그대로
+    assert data["top_mesh"] == []        # 주제만 비었다
+    assert data["gaps"] == []
 
 
 def test_cli_major_topics_only_restricts_topics(tmp_path, capsys):
@@ -305,9 +336,15 @@ def test_markdown_shows_bridge_and_pmids():
         arts.append(Article(f"a{i}", 2020, "J", "t", ["Sleep", "Autonomic"]))
     for i in range(8):
         arts.append(Article(f"b{i}", 2020, "J", "t", ["Inflammation", "Autonomic"]))
+    # 가교 후보는 '거의 모든 논문에 붙은' 주제여선 안 되므로(정보량 0), Autonomic 이
+    # 없는 논문을 섞어 유병률을 임계 아래로 내린다.
+    for i in range(6):
+        arts.append(Article(f"c{i}", 2020, "J", "t", ["Sleep"]))
+    for i in range(6):
+        arts.append(Article(f"d{i}", 2020, "J", "t", ["Inflammation"]))
     md = render_markdown(build_report(arts, "x", gap_min_expected=1.0, gap_max_lift=1.0))
     assert "가교(Swanson ABC)" in md
-    assert "대표 PMID" in md
+    assert "대표 논문 ID" in md
 
 
 def test_two_year_corpus_suppresses_cagr_line(tmp_path, capsys):
@@ -320,4 +357,4 @@ def test_two_year_corpus_suppresses_cagr_line(tmp_path, capsys):
     rc = main(["--from-file", str(f)])
     assert rc == 0
     out = capsys.readouterr().out
-    assert "연평균" not in out  # 2개 연도(연도<3) → CAGR 표시 안 함
+    assert "Theil–Sen" not in out  # 2개 연도(연도<3) → 추세 기울기 표시 안 함
