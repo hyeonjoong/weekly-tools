@@ -10,37 +10,20 @@ from __future__ import annotations
 import json
 import math
 
+from . import __version__
+from .korean import has_final_consonant, josa as _josa
+
 __all__ = ["render_text", "render_markdown", "render_json", "protocol_sentences"]
+
+_has_final_consonant = has_final_consonant   # 하위 호환 별칭
 
 _BAR = "─" * 74
 
-#: 숫자를 한국어로 읽었을 때 종성이 있는지 (을/를, 이/가 선택용)
-_DIGIT_HAS_FINAL = {"0": False, "1": True, "2": False, "3": True, "4": False,
-                    "5": False, "6": True, "7": True, "8": True, "9": False}
-
-
-def _has_final_consonant(text: str) -> bool:
-    """마지막 글자에 종성이 있는가 (조사 선택용)."""
-    for ch in reversed(str(text)):
-        if ch.isspace() or ch in "()[]{}<>\"'`,.":
-            continue
-        if ch == "%":
-            return False                      # '퍼센트' → 종성 없음
-        if ch in _DIGIT_HAS_FINAL:
-            return _DIGIT_HAS_FINAL[ch]
-        code = ord(ch)
-        if 0xAC00 <= code <= 0xD7A3:          # 한글 음절
-            return (code - 0xAC00) % 28 != 0
-        if ch.isalpha():                      # 영문은 자주 쓰는 관례를 따른다
-            return ch.lower() in "bcdfghjklmnpqrstvwxz"
-        return False
-    return False
-
-
-def _josa(text: str, with_final: str, without_final: str) -> str:
-    """text에 알맞은 조사를 붙여 준다 (예: _josa('0.208', '을', '를'))."""
-    return f"{text}{with_final if _has_final_consonant(text) else without_final}"
-
+#: 배분 딕셔너리 키 → 사람이 읽는 이름 (내부 키가 화면에 새어 나가지 않게)
+_ALLOC_LABELS = {
+    "n1": "1군", "n2": "2군", "n": "전체", "n_per_group": "군당",
+    "n_per_sequence": "순서당", "total": "총",
+}
 
 def _article(phrase: str, capital: bool = True) -> str:
     """영문 검정명에 알맞은 관사를 붙인다 (복수형·고유 절차명은 The/생략)."""
@@ -49,8 +32,11 @@ def _article(phrase: str, capital: bool = True) -> str:
         return (("A " if capital else "a ") + phrase)
     if lowered.startswith(("TOST", "ANCOVA")):
         art = "An" if lowered[0] in "AEIOU" else "The"
-    elif lowered.split(" ")[0].endswith("s") and not lowered.startswith("z-"):
-        art = ""          # 복수형 앞에는 관사를 쓰지 않는다
+    elif (lowered.split(" ")[0].endswith("s") and not lowered.startswith("z-")
+          and "-" not in lowered.split(" ")[0]):
+        # 복수형 앞에는 관사를 쓰지 않는다. 단 "repeated-measures ANCOVA"처럼
+        # 하이픈으로 묶인 **수식어**는 복수형이 아니므로 관사가 필요하다.
+        art = ""
     else:
         art = "An" if lowered[0].lower() in "aeiou" else "A"
     if not art:
@@ -84,6 +70,9 @@ def _fmt_num(x: float, digits: int = 4) -> str:
 
 def _alloc_line(alloc: dict) -> str:
     """배분 딕셔너리를 사람이 읽는 한 줄로."""
+    if "n_per_sequence" in alloc:
+        n = alloc["n_per_sequence"]
+        return f"순서당 {n:,}명 (AB {n:,} + BA {n:,}) = 총 {alloc['total']:,}명"
     if "n_per_group" in alloc:
         return (f"군당 {alloc['n_per_group']:,}명 × {alloc['k']}군 "
                 f"= 총 {alloc['total']:,}명")
@@ -96,6 +85,9 @@ def _alloc_line(alloc: dict) -> str:
 
 def _alloc_line_en(alloc: dict) -> str:
     """배분 딕셔너리를 영문 한 줄로 (프로토콜 영문 문장용)."""
+    if "n_per_sequence" in alloc:
+        return (f"{alloc['n_per_sequence']:,} participants per sequence "
+                f"({alloc['total']:,} in total)")
     if "n_per_group" in alloc:
         return (f"{alloc['n_per_group']:,} participants per group across "
                 f"{alloc['k']} groups ({alloc['total']:,} in total)")
@@ -165,21 +157,80 @@ def protocol_sentences(plan: dict) -> dict:
                      f"(SD {_fmt_num(effect['sd'], 3)}, assumed true difference "
                      f"{_fmt_num(effect['assumed_diff'], 3)})")
         verb_kr, verb_en = "동등성을 입증하려면", "to demonstrate"
+    elif design["key"] == "noninf_prop":
+        effect_kr = (
+            f"대조군 반응률 {_fmt_num(effect['p1'], 3)}·중재군 "
+            f"{_fmt_num(effect['p2'], 3)} 조건에서 비열등성 마진(위험차) "
+            + _josa(_fmt_num(effect["margin_raw"], 3), "을", "를"))
+        effect_en = (f"a non-inferiority margin of {_fmt_num(effect['margin_raw'], 3)} "
+                     f"on the risk difference (control {_fmt_num(effect['p1'], 3)}, "
+                     f"treatment {_fmt_num(effect['p2'], 3)})")
+        verb_kr, verb_en = "배제하려면", "to exclude"
+    elif design["key"] == "equiv_prop":
+        effect_kr = (f"대조군 반응률 {_fmt_num(effect['p1'], 3)}·중재군 "
+                     f"{_fmt_num(effect['p2'], 3)} 조건에서 위험차 마진 "
+                     f"±{_fmt_num(effect['margin_raw'], 3)} 안에서")
+        effect_en = (f"equivalence within a risk-difference margin of "
+                     f"±{_fmt_num(effect['margin_raw'], 3)} "
+                     f"(control {_fmt_num(effect['p1'], 3)}, treatment "
+                     f"{_fmt_num(effect['p2'], 3)})")
+        verb_kr, verb_en = "동등성을 입증하려면", "to demonstrate"
     elif design["key"] == "prop2":
         effect_kr = _josa(f"반응률 차이 {_fmt_num(effect['value'], 3)}", "을", "를")
         effect_en = (f"a difference in response rates of "
                      f"{_fmt_num(abs(effect['value']), 3)}")
+    elif design["key"] == "prop1":
+        effect_kr = _josa(
+            f"성능목표치 {_fmt_num(effect['p0'], 3)} 대비 반응률 "
+            f"{_fmt_num(effect['p1'], 3)}", "을", "를")
+        effect_en = (f"a response rate of {_fmt_num(effect['p1'], 3)} against a "
+                     f"performance goal of {_fmt_num(effect['p0'], 3)}")
+    elif design["key"] == "crossover":
+        effect_kr = _josa(
+            f"처치 간 차이 {_fmt_num(effect['diff'], 3)}(개인 내 SD "
+            f"{_fmt_num(effect['sd_within'], 3)}, 표준화 "
+            f"{_fmt_num(effect['value'], 3)})", "을", "를")
+        effect_en = (f"a treatment difference of {_fmt_num(effect['diff'], 3)}, i.e. "
+                     f"{_fmt_num(effect['value'], 3)} within-subject standard "
+                     f"deviations (sigma_w = {_fmt_num(effect['sd_within'], 3)})")
+    elif design["key"] == "survival":
+        effect_kr = _josa(f"위험비 {_fmt_num(effect['value'], 3)}", "을", "를")
+        effect_en = f"a hazard ratio of {_fmt_num(effect['value'], 3)}"
+    elif design["key"] == "mcnemar":
+        effect_kr = _josa(f"불일치 오즈비 {_fmt_num(effect['value'], 3)}", "을", "를")
+        effect_en = (f"a discordant odds ratio of {_fmt_num(effect['value'], 3)} "
+                     f"(discordant pairs {effect['discordant']:.1%})")
     else:
         # 군 순서에 따라 부호가 바뀌므로 문장에서는 절댓값으로 쓴다
         effect_en = (f"{effect.get('name_en', effect['name'])} = "
                      f"{_fmt_num(abs(effect['value']), 3)}")
-        if effect.get("analysis") in ("ancova", "change"):
+        if design["key"] == "ttest2" and effect.get("analysis") in ("ancova", "change"):
             effect_en += (f" with a baseline correlation of {effect['baseline_r']:g} "
                           f"(design factor {effect['design_factor']:.3f})")
             effect_kr = _josa(
                 f"{effect['name']} = {_fmt_num(effect['value'], 3)}"
                 f"(기저값 상관 r = {effect['baseline_r']:g}, 설계배율 "
                 f"{effect['design_factor']:.3f})", "을", "를")
+        elif design["key"] == "repeated":
+            post_n = effect["post_measurements"]
+            base_n = effect["baseline_measurements"]
+            target = ("at the final visit" if effect.get("estimand") == "last"
+                      else "averaged over the post-baseline visits")
+            def _meas(count: int) -> str:
+                return f"{count} measurement" + ("" if count == 1 else "s")
+
+            effect_en = (
+                f"a standardised difference of {_fmt_num(abs(effect['value']), 3)} "
+                f"(on the SD of a single measurement) {target}, with "
+                f"{_meas(post_n)} after baseline and {_meas(base_n)} at baseline, "
+                f"at a within-subject correlation of {effect['rho']:g} "
+                f"(variance factor {effect['design_factor']:.3f})")
+            effect_kr = _josa(
+                f"{effect['name']} = {_fmt_num(effect['value'], 3)}"
+                f"({'마지막 방문' if effect.get('estimand') == 'last' else '사후 평균'} "
+                f"기준, 사후 {effect['post_measurements']}회·사전 "
+                f"{effect['baseline_measurements']}회 측정, 측정 간 상관 ρ = "
+                f"{effect['rho']:g}, 분산 배율 {effect['design_factor']:.3f})", "을", "를")
 
     if plan["direction"] == "solve_n":
         analysis = _alloc_line(plan["analysis"]["allocation"])
@@ -200,9 +251,18 @@ def protocol_sentences(plan: dict) -> dict:
             en += (f" Allowing for {reason}, "
                    f"{_alloc_line_en(plan['enrollment']['allocation'])} will be enrolled.")
     else:
+        # 설계마다 '무엇을 할 검정력인가'가 다르다. 예전에는 조사만 떼어 붙여
+        # "…마진 ±5 안에서 가정 하에 54.5%이다" 같은 비문이 나왔다.
+        # 조사를 떼었다 붙이면 종성 판정이 다시 필요하다 (예전에는 '을'을 하드코딩해
+        # "0.5을 검출할"이 나왔다). _josa로 다시 붙인다.
+        stem = effect_kr[:-1] if effect_kr.endswith(("을", "를")) else effect_kr
+        goal_kr = {
+            "검출하려면": _josa(stem, "을", "를") + " 검출할",
+            "배제하려면": _josa(stem, "을", "를") + " 배제할",
+            "동등성을 입증하려면": f"{effect_kr} 동등성을 입증할",
+        }[verb_kr]
         kr = (f"확보 가능한 표본이 {_alloc_line(plan['given']['allocation'])}일 때, "
-              f"{design['test_kr']}, {alpha_kr} 조건에서의 검정력은 "
-              f"{effect_kr.rstrip('을를')} 가정 하에 "
+              f"{design['test_kr']}, {alpha_kr} 조건에서 {goal_kr} 검정력은 "
               f"{_fmt_power(plan['achieved_power'])}이다.")
         en = (f"With {_alloc_line_en(plan['given']['allocation'])}, "
               f"{_article(design['test_en'], capital=False)} at {alpha_en} provides "
@@ -213,15 +273,95 @@ def protocol_sentences(plan: dict) -> dict:
                    "필요하다.")
             en += (f" Reaching {plan['target_power']:.0%} power would require "
                    f"{_alloc_line_en(plan['needed']['allocation'])}.")
+    if design["key"] == "survival":
+        kr, en = _append_survival_assumptions(plan, effect, kr, en)
+    seq = plan.get("sequential")
+    if seq:
+        marks = ", ".join(f"{row['information']:.0%}" for row in seq["looks_detail"][:-1])
+        kr += (f" 정보량의 {marks} 시점에 중간분석을 하며, "
+               f"{seq['spending_kr']} α 소비함수로 전체 1종오류율을 "
+               + _josa(f"{seq['alpha']:.4g}", "으로", "로") + " 유지한다(경계 Z = "
+               + ", ".join(f"{row['bound_z']:.3f}" for row in seq["looks_detail"])
+               + f"). 이 표본수는 고정설계의 {seq['inflation']:.3f}배이며, 조기중단 시 "
+               + ("추적기간이" if seq.get("information_label", "누적 N") != "누적 N"
+                  else "필요한 표본수가")
+               + f" 최대치의 {seq['expected_fraction_h1']:.0%} 수준으로 줄어든다.")
+        interim_en = ("An interim analysis is planned after" if seq["interim"] == 1
+                      else "Interim analyses are planned after")
+        en += (f" {interim_en} {marks} of the information, using "
+               f"{seq['spending_en']} to preserve an overall type I error rate of "
+               f"{seq['alpha']:.4g} (efficacy boundaries Z = "
+               + ", ".join(f"{row['bound_z']:.3f}" for row in seq["looks_detail"])
+               + f"); the maximum sample size is {seq['inflation']:.3f} times that of the "
+               f"corresponding fixed design.")
     return {"kr": kr, "en": en}
 
 
+def _append_survival_assumptions(plan: dict, effect: dict, kr: str, en: str):
+    """생존분석 문장에 **사건 수와 생존 모형 가정**을 덧붙인다.
+
+    "군당 198명"만 적힌 문장은 심사에서 통과하지 못한다. 그 숫자를 만든 것은
+    중앙생존·등록기간·추적기간이고, 검정력을 결정하는 것은 사건 수이기 때문이다.
+    """
+    alloc = (plan.get("analysis") or {}).get("allocation") or {}
+    n1, n2 = alloc.get("n1"), alloc.get("n2")
+    if not (n1 and n2):
+        return kr, en
+    events = n1 * effect["prob_event_control"] + n2 * effect["prob_event_treatment"]
+    kr += f" 이 표본수는 약 {events:.0f}건의 사건을 전제로 한다"
+    en += f" This assumes approximately {events:.0f} events"
+    median = effect.get("median_control")
+    if median is not None:
+        unit_kr = plan["design"].get("time_unit", "개월")
+        accrual = effect.get("accrual", 0.0)
+        followup = effect.get("followup", 0.0)
+        kr += (f" (대조군 중앙생존 {median:g}{unit_kr}의 지수 생존모형, 등록 "
+               f"{accrual:g}{unit_kr} + 추가 추적 {followup:g}{unit_kr})")
+        en += (f" (exponential control survival with a median of {median:g}, "
+               f"{accrual:g} of uniform accrual and {followup:g} of additional "
+               f"follow-up, in the same time units)")
+    else:
+        kr += (f" (대조군 사건률 {effect['prob_event_control']:.1%}, 중재군 "
+               f"{effect['prob_event_treatment']:.1%} 가정)")
+        en += (f" (assuming an event probability of "
+               f"{effect['prob_event_control']:.1%} in the control arm and "
+               f"{effect['prob_event_treatment']:.1%} in the treatment arm)")
+    return kr + ".", en + "."
+
+
 def _precision_sentences(plan: dict) -> dict:
+    if plan.get("given_n"):
+        return _precision_sentences_given_n(plan)
     target = plan["target"]
     # 신뢰수준은 --alpha에서 유도한다 (예전에는 95%로 하드코딩돼, --alpha를 바꾸면
     # 프로토콜에 붙일 문장이 실제 계산과 다른 신뢰수준을 주장했다)
     level = f"{(1.0 - target['alpha']) * 100:g}%"
-    if plan["design_key"] == "icc":
+    if plan["design_key"] == "diag":
+        kr = (f"민감도 {target['sens']:g}·특이도 {target['spec']:g}, 유병률 "
+              f"{target['prevalence']:g}인 집단에서 민감도와 특이도를 각각 "
+              f"{level} 신뢰구간 반폭 ±{target['half_width']:g} 이내로 추정하려면 "
+              f"{plan['n']:,}명을 등록해야 한다 (질환자 약 {plan['n_disease']:.0f}명, "
+              f"예상 반폭 민감도 ±{plan['achieved_half_width']:.3g}, 특이도 "
+              f"±{plan['achieved_half_width_spec']:.3g}).")
+        en = (f"To estimate a sensitivity of {target['sens']:g} and a specificity of "
+              f"{target['spec']:g} to within a {level} CI half-width of "
+              f"±{target['half_width']:g} at a prevalence of {target['prevalence']:g}, "
+              f"{plan['n']:,} participants must be enrolled "
+              f"(about {plan['n_disease']:.0f} with the target condition; "
+              f"Buderer 1996).")
+    elif plan["design_key"] == "kappa":
+        lo, hi = plan["expected_ci"]
+        kr = ("두 평가자의 이분형 판정 일치도가 κ = "
+              + _josa(f"{target['kappa']:g}(관심 범주 유병률 "
+                      f"{target['prevalence']:g})", "이라고", "라고") + " 할 때, "
+              f"{level} 신뢰구간 폭을 {target['width']:g} 이내로 추정하려면 "
+              f"{plan['n']:,}명이 필요하다 (예상 폭 {plan['achieved_width']:.4g}, "
+              f"예상 구간 [{lo:.3f}, {hi:.3f}]).")
+        en = (f"To estimate a kappa of {target['kappa']:g} between two raters "
+              f"(prevalence {target['prevalence']:g}) to within a {level} CI width of "
+              f"{target['width']:g}, {plan['n']:,} subjects are required "
+              f"(expected width {plan['achieved_width']:.4g}; Fleiss 1969).")
+    elif plan["design_key"] == "icc":
         kr = (f"예상 ICC {target['icc']:g}, 측정 {target['raters']}회 조건에서 "
               f"{level} 신뢰구간 폭을 {target['width']:g} 이내로 추정하려면 "
               f"{plan['n']:,}명이 필요하다 (총 측정 {plan['total_measurements']:,}회, "
@@ -231,7 +371,8 @@ def _precision_sentences(plan: dict) -> dict:
               f"{plan['n']:,} subjects are required "
               f"(expected width {plan['achieved_width']:.4g}; Bonett 2002).")
     else:
-        kr = (f"두 방법 차이의 표준편차를 {target['sd_diff']:g}로 가정할 때, Bland–Altman "
+        kr = ("두 방법 차이의 표준편차를 "
+              + _josa(f"{target['sd_diff']:g}", "으로", "로") + " 가정할 때, Bland–Altman "
               f"일치한계(LoA)의 {level} 신뢰구간 반폭을 {target['half_width']:g} 이내로 "
               f"추정하려면 {plan['n']:,}명이 필요하다 "
               f"(예상 반폭 {plan['achieved_half_width']:.4g}, "
@@ -240,6 +381,61 @@ def _precision_sentences(plan: dict) -> dict:
               f"{plan['n']:,} subjects give a {level} CI half-width of "
               f"{plan['achieved_half_width']:.4g} for each limit of agreement "
               f"(Bland & Altman 1999).")
+    return {"kr": kr, "en": en}
+
+
+def _precision_sentences_given_n(plan: dict) -> dict:
+    """--n(확보 가능한 인원)을 준 경우의 문장 — "필요하다"가 아니라 "얻는다".
+
+    예전에는 정방향 문장을 그대로 써서 "20명이 필요하다 (예상 폭 0.32)"처럼
+    **자기 문장 안에서 모순되는** 주장을 만들었다. 목표를 못 맞추는 인원인데도
+    "목표 폭 0.15 이내로 추정하려면 20명이 필요하다"고 적혀 나갔다.
+    """
+    target = plan["target"]
+    level = f"{(1.0 - target['alpha']) * 100:g}%"
+    n = plan["n"]
+    key = plan["design_key"]
+    if key == "icc":
+        got, goal, unit = plan["achieved_width"], target["width"], "폭"
+        kr_head = (f"확보 가능한 대상자가 {n:,}명일 때, 예상 ICC {target['icc']:g}·측정 "
+                   f"{target['raters']}회 조건에서 {level} 신뢰구간 폭은 약 {got:.4g}로 "
+                   "추정된다")
+        en = (f"With {n:,} subjects, an ICC of {target['icc']:g} measured "
+              f"{target['raters']} times is estimated to within a {level} CI width of "
+              f"about {got:.4g} (Bonett 2002).")
+    elif key == "kappa":
+        got, goal, unit = plan["achieved_width"], target["width"], "폭"
+        lo, hi = plan["expected_ci"]
+        kr_head = (f"확보 가능한 대상자가 {n:,}명일 때, κ = {target['kappa']:g}"
+                   f"(유병률 {target['prevalence']:g}) 조건에서 {level} 신뢰구간은 약 "
+                   f"[{lo:.3f}, {hi:.3f}](폭 {got:.4g})로 추정된다")
+        en = (f"With {n:,} subjects, a kappa of {target['kappa']:g} is estimated to "
+              f"within a {level} CI width of about {got:.4g} (Fleiss 1969).")
+    elif key == "loa":
+        got, goal, unit = plan["achieved_half_width"], target["half_width"], "반폭"
+        kr_head = (f"확보 가능한 대상자가 {n:,}명일 때, 차이의 표준편차를 "
+                   + _josa(f"{target['sd_diff']:g}", "으로", "로")
+                   + f" 가정하면 Bland–Altman 일치한계의 {level} 신뢰구간 반폭은 약 "
+                   f"{got:.4g}로 추정된다")
+        en = (f"With {n:,} subjects and an SD of the between-method differences of "
+              f"{target['sd_diff']:g}, each limit of agreement is estimated to within a "
+              f"{level} CI half-width of about {got:.4g} (Bland & Altman 1999).")
+    else:      # diag
+        got, goal, unit = plan["achieved_half_width"], target["half_width"], "반폭"
+        kr_head = (f"확보 가능한 대상자가 {n:,}명일 때(질환자 약 "
+                   f"{plan['n_disease']:.0f}명), 민감도의 {level} 신뢰구간 반폭은 약 "
+                   f"±{got:.4g}, 특이도는 ±{plan['achieved_half_width_spec']:.4g}로 "
+                   "추정된다")
+        en = (f"With {n:,} participants (about {plan['n_disease']:.0f} with the target "
+              f"condition), sensitivity is estimated to within a {level} CI half-width "
+              f"of about ±{got:.4g} and specificity ±"
+              f"{plan['achieved_half_width_spec']:.4g} (Buderer 1996).")
+    meets = got <= goal + 1e-12
+    kr = kr_head + (f" — 목표 {unit} {goal:g}을 충족한다." if meets
+                    else f" — 목표 {unit} {goal:g}에는 **미치지 못한다**.")
+    en += ("" if meets else
+           f" This does not meet the target {'width' if unit == '폭' else 'half-width'} "
+           f"of {goal:g}.")
     return {"kr": kr, "en": en}
 
 
@@ -259,12 +455,66 @@ def _pad(text: str, width: int, align: str = "<") -> str:
     return text + " " * gap
 
 
+def _sequential_text(plan: dict) -> list[str]:
+    """중간분석 경계표 — 각 시점의 임계값·명목 유의수준·누적 α·조기중단 확률."""
+    seq = plan["sequential"]
+    lines = ["", f"■ 중간분석 경계 ({seq['spending_kr']} α 소비함수, "
+                 f"총 {seq['looks']}회 분석)"]
+    info_label = seq.get("information_label", "누적 N")
+    show_n = info_label != "누적 N"
+    header = ("  " + _pad("시점", 8) + _pad("정보비율", 11, ">")
+              + _pad(info_label, 14, ">") + _pad("Z 경계", 9, ">")
+              + _pad("명목 p", 11, ">") + _pad("누적 α", 9, ">")
+              + _pad("중단확률", 9, ">"))
+    lines.append(header)
+    lines.append("  " + "-" * 68)
+    for row in seq["looks_detail"]:
+        name = "최종" if row["is_final"] else f"중간 {row['look']}"
+        amount = row.get("information_amount") if show_n else row.get("n_total")
+        lines.append(
+            "  " + _pad(name, 8)
+            + _pad(f"{row['information']:.3f}", 11, ">")
+            + _pad(f"{amount:,}" if amount else "-", 14, ">")
+            + _pad(f"{row['bound_z']:.4f}", 9, ">")
+            + _pad(f"{row['nominal_p']:.5f}", 11, ">")
+            + _pad(f"{row['cumulative_alpha']:.4f}", 9, ">")
+            + _pad(f"{row['stop_prob_h1']:.1%}", 9, ">"))
+    lines.append("  (중단확률 = 대립가설이 참일 때 그 시점에서 유의성에 도달할 확률)")
+    if show_n:
+        lines.append(f"  ※ 중간분석 시점은 달력 날짜나 등록 인원이 아니라 "
+                     f"**{info_label}**로 프로토콜에 적으세요 — 그 시점에는 이미 "
+                     "대부분이 등록을 마친 뒤입니다.")
+    if seq.get("expected_n_h1"):
+        if show_n:
+            # 생존분석: 조기중단이 아껴 주는 것은 인원이 아니라 추적기간이다
+            total_info = seq.get("information_total") or 0
+            lines.append(
+                f"  기대 {info_label}: 효과가 있으면 "
+                f"{seq['expected_fraction_h1'] * total_info:.0f}"
+                f"{seq.get('information_unit', '')}, 없으면 "
+                f"{seq['expected_fraction_h0'] * total_info:.0f}"
+                f"{seq.get('information_unit', '')} "
+                f"(최대 {total_info:.0f}{seq.get('information_unit', '')})")
+            lines.append("  ※ 조기중단이 아껴 주는 것은 **등록 인원이 아니라 추적기간**입니다 "
+                         "— 모집 목표는 최대 표본수 그대로 잡으세요.")
+        else:
+            lines.append(f"  기대 표본수: 효과가 있으면 {seq['expected_n_h1']:.0f}명, "
+                         f"없으면 {seq['expected_n_h0']:.0f}명 "
+                         f"(최대 {plan['analysis']['allocation'].get('total'):,}명)")
+    if plan.get("fixed_design"):
+        fixed_total = plan["fixed_design"]["allocation"].get("total")
+        lines.append(f"  고정설계(중간분석 없음)라면 {fixed_total:,}명 "
+                     f"→ 팽창계수 ×{seq['inflation']:.4f}")
+    return lines
+
+
 def _sensitivity_text(sens: dict) -> list[str]:
     lines = ["", "■ 민감도 분석 (가정이 틀렸을 때 표본수가 어떻게 변하는가)"]
     if sens["kind"] == "n_by_power_and_effect":
         first, cell_w = 14, 16
-        header = "  " + _pad("목표 검정력", first) + "".join(
-            _pad("효과×" + format(c, "g"), cell_w, ">") for c in sens["cols"])
+        labels = sens.get("col_labels") or [f"×{c:g}" for c in sens["cols"]]
+        header = "  " + _pad(sens.get("col_label", "효과크기 가정"), first) + "".join(
+            _pad(text, cell_w, ">") for text in labels)
         lines.append(header)
         lines.append("  " + "-" * (first + cell_w * len(sens["cols"])))
         for power, row in zip(sens["rows"], sens["cells"]):
@@ -272,10 +522,15 @@ def _sensitivity_text(sens: dict) -> list[str]:
             for cell in row:
                 if cell is None:
                     cells.append(_pad("계산 불가", cell_w, ">"))
+                elif cell.get("single_arm"):
+                    cells.append(_pad(f"{cell['unit']:,}", cell_w, ">"))
                 else:
                     cells.append(_pad(f"{cell['unit']:,}/총{cell['total']:,}", cell_w, ">"))
             lines.append("  " + _pad(_fmt_power(power), first) + "".join(cells))
-        lines.append("  (표기: 단위당 n / 총 N — 분석 대상 기준)")
+        single = all(c is None or c.get("single_arm")
+                     for row in sens["cells"] for c in row)
+        lines.append("  (표기: " + ("필요 n" if single else "단위당 n / 총 N")
+                     + " — 분석 대상 기준. 열 머리의 숫자는 그 배율에서의 실제 가정값)")
     else:
         lines.append("  " + _pad("표본수 배율", 14) + _pad("단위 n", 10, ">")
                      + _pad("총 N", 10, ">") + _pad("검정력", 12, ">"))
@@ -337,26 +592,38 @@ def render_text(plan: dict, width: int = 74) -> str:
     enroll = plan["enrollment"]["allocation"]
     if plan["direction"] == "solve_n" and enroll != plan["analysis"]["allocation"]:
         adjs = plan["adjustments"]
+        # 설계효과는 이미 '분석 표본수' 줄에서 반영됐다. 여기 붙이면 두 번 곱한 것처럼
+        # 읽히므로, 이 줄에는 분석 → 모집 사이에 실제로 일어난 일만 적는다.
         detail = []
-        if adjs["design_effect"] != 1.0:
-            detail.append(f"설계효과 ×{adjs['design_effect']:.3f}")
         if adjs["dropout"]:
             detail.append(f"탈락 {adjs['dropout']:.0%}")
+        if plan["enrollment"].get("before_cluster_rounding"):
+            detail.append("군집 단위 올림")
         out.append(f"▶ 모집 표본수        : {_alloc_line(enroll)}"
                    + (f"  ({', '.join(detail)})" if detail else ""))
+    for label, value in plan.get("design_lines", ()):
+        out.append("  " + _pad(str(label), 19) + ": " + str(value))
     if plan["enrollment"].get("clusters"):
         clusters = plan["enrollment"]["clusters"]
-        pretty = ", ".join(f"{k}: {v:,}개" for k, v in clusters.items())
+        pretty = ", ".join(f"{_ALLOC_LABELS.get(k, k)} {v:,}개"
+                           for k, v in clusters.items())
         out.append(f"  군집 수            : {pretty}"
                    f" (군집당 {plan['enrollment']['cluster_size']}명"
                    + (" — 위 모집 인원은 군집 단위로 올린 값)"
                       if plan["enrollment"].get("before_cluster_rounding") else ")"))
 
-    sentences = protocol_sentences(plan)
+    if plan.get("sequential"):
+        out.extend(_sequential_text(plan))
+
     out.append("")
-    out.append("■ 프로토콜용 문장 (그대로 붙여 쓰세요)")
-    out.append("  [KR] " + _wrap(sentences["kr"], width - 8, "        "))
-    out.append("  [EN] " + _wrap(sentences["en"], width - 8, "        "))
+    if plan.get("suppress_protocol_sentence"):
+        out.append("■ 프로토콜용 문장 — 만들지 않았습니다")
+        out.append("  " + _wrap(plan["suppress_protocol_sentence"], width - 4, "  "))
+    else:
+        sentences = protocol_sentences(plan)
+        out.append("■ 프로토콜용 문장 (그대로 붙여 쓰세요)")
+        out.append("  [KR] " + _wrap(sentences["kr"], width - 8, "        "))
+        out.append("  [EN] " + _wrap(sentences["en"], width - 8, "        "))
 
     if plan.get("sensitivity"):
         out.extend(_sensitivity_text(plan["sensitivity"]))
@@ -371,28 +638,79 @@ def render_text(plan: dict, width: int = 74) -> str:
         out.append("■ 근거 문헌")
         for ref in plan["references"]:
             out.append("  - " + _wrap(ref, width - 6, "    "))
+    out.extend(_provenance_lines(plan, width))
     out.append(_BAR[:width])
     return "\n".join(out)
+
+
+def _provenance_lines(plan: dict, width: int = 74) -> list[str]:
+    """이 결과를 만든 명령·버전·시각 (SAP 부록에 그대로 들어간다)."""
+    prov = plan.get("provenance")
+    if not prov:
+        return []
+    lines = ["",
+             "■ 재현 정보 (이 줄까지 함께 붙여 두면 그대로 재현됩니다)",
+             "  " + _wrap(f"{prov['tool']} {prov['version']} · {prov['generated']}",
+                          width - 4, "  "),
+             "  $ " + _wrap(prov["command"], width - 6, "     ")]
+    if prov.get("paths_shortened"):
+        lines.append("  (경로는 파일 이름만 남겼습니다 — 폴더 이름에 연구·대상자 정보가 "
+                     "들어가는 일이 흔하기 때문입니다. 다시 돌릴 때는 파일이 있는 "
+                     "폴더에서 실행하거나 경로를 붙이세요)")
+    return lines
 
 
 def _render_precision_text(plan: dict, width: int = 74) -> str:
     out = [_BAR[:width], f" powerplan — {plan['name_kr']}  [{plan['design_key']}]",
            _BAR[:width]]
     target = plan["target"]
-    if plan["design_key"] == "icc":
+    if plan["design_key"] == "diag":
+        out.append(f" 예상 민감도  : {target['sens']:g}")
+        out.append(f" 예상 특이도  : {target['spec']:g}")
+        out.append(f" 유병률       : {target['prevalence']:g}")
+        out.append(f" 목표 반폭    : ±{target['half_width']:g} "
+                   f"(신뢰수준 {1 - target['alpha']:.0%})")
+        out.append("")
+        head = "▶ 필요한 대상자 수   : " if not plan.get("given_n") else "▶ 주어진 대상자 수   : "
+        out.append(f"{head}{plan['n']:,}명")
+        out.append(f"  질환자 / 비질환자  : 약 {plan['n_disease']:.0f}명 / "
+                   f"{plan['n_healthy']:.0f}명  (제약이 되는 쪽: {plan['binding']})")
+        out.append(f"  예상 반폭          : 민감도 ±{plan['achieved_half_width']:.4g} · "
+                   f"특이도 ±{plan['achieved_half_width_spec']:.4g}")
+        out.append(f"  사례-대조 설계라면 : 질환자 {math.ceil(plan['required_disease']):,}명 + "
+                   f"비질환자 {math.ceil(plan['required_healthy']):,}명이면 충분합니다")
+    elif plan["design_key"] == "kappa":
+        out.append(f" 예상 κ       : {target['kappa']:g}")
+        out.append(f" 유병률 π     : {target['prevalence']:g} (관심 범주의 비율)")
+        out.append(f" 목표 CI 폭   : {target['width']:g} "
+                   f"(±{target['width'] / 2:g}, 신뢰수준 {1 - target['alpha']:.0%})")
+        out.append("")
+        head = ("▶ 주어진 대상자 수   : " if plan.get("given_n")
+                else "▶ 필요한 대상자 수   : ")
+        out.append(f"{head}{plan['n']:,}명")
+        out.append(f"  예상 CI 폭         : {plan['achieved_width']:.4f}")
+        lo, hi = plan["expected_ci"]
+        out.append(f"  예상 신뢰구간      : [{lo:.4f}, {hi:.4f}]")
+        out.append(f"  기대 '있음' 판정   : 약 {plan['expected_positive']:.0f}명")
+    elif plan["design_key"] == "icc":
         out.append(f" 예상 ICC     : {target['icc']:g}")
         out.append(f" 측정 횟수 k  : {target['raters']}")
         out.append(f" 목표 CI 폭   : {target['width']:g} (신뢰수준 {1 - target['alpha']:.0%})")
         out.append("")
-        out.append(f"▶ 필요한 대상자 수   : {plan['n']:,}명 "
-                   f"(총 측정 {plan['total_measurements']:,}회)")
+        head = ("▶ 주어진 대상자 수   : " if plan.get("given_n")
+                else "▶ 필요한 대상자 수   : ")
+        out.append(f"{head}{plan['n']:,}명 (총 측정 {plan['total_measurements']:,}회)")
         out.append(f"  예상 CI 폭         : {plan['achieved_width']:.4f}")
     else:
         out.append(f" 차이의 SD    : {target['sd_diff']:g}")
+        ratio = plan["ratio_to_sd"]
+        ratio_txt = (f"차이 SD의 {ratio:.2f}배, " if math.isfinite(ratio) else "")
         out.append(f" 목표 반폭    : {target['half_width']:g} "
-                   f"(차이 SD의 {plan['ratio_to_sd']:.2f}배, 신뢰수준 {1 - target['alpha']:.0%})")
+                   f"({ratio_txt}신뢰수준 {1 - target['alpha']:.0%})")
         out.append("")
-        out.append(f"▶ 필요한 대상자 수   : {plan['n']:,}명")
+        head = ("▶ 주어진 대상자 수   : " if plan.get("given_n")
+                else "▶ 필요한 대상자 수   : ")
+        out.append(f"{head}{plan['n']:,}명")
         out.append(f"  예상 LoA CI 반폭   : {plan['achieved_half_width']:.4g}")
         lo, hi = plan["expected_loa"]
         out.append(f"  예상 LoA           : {lo:.4g} ~ {hi:.4g} (bias = 0 가정)")
@@ -409,6 +727,7 @@ def _render_precision_text(plan: dict, width: int = 74) -> str:
     out.append("■ 근거 문헌")
     for ref in plan["references"]:
         out.append("  - " + _wrap(ref, width - 6, "    "))
+    out.extend(_provenance_lines(plan, width))
     out.append(_BAR[:width])
     return "\n".join(out)
 
@@ -440,7 +759,24 @@ def render_markdown(plan: dict) -> str:
     if plan.get("kind") == "precision":
         target = plan["target"]
         rows = [("설계", plan["name_kr"]), ]
-        if plan["design_key"] == "icc":
+        if plan["design_key"] == "diag":
+            rows += [("예상 민감도/특이도", f"{target['sens']:g} / {target['spec']:g}"),
+                     ("유병률", f"{target['prevalence']:g}"),
+                     ("목표 반폭", f"±{target['half_width']:g}"),
+                     ("**필요 대상자**", f"**{plan['n']:,}명**"),
+                     ("질환자 / 비질환자",
+                      f"{plan['n_disease']:.0f}명 / {plan['n_healthy']:.0f}명"),
+                     ("예상 반폭",
+                      f"민감도 ±{plan['achieved_half_width']:.4g} · "
+                      f"특이도 ±{plan['achieved_half_width_spec']:.4g}")]
+        elif plan["design_key"] == "kappa":
+            lo, hi = plan["expected_ci"]
+            rows += [("예상 κ", f"{target['kappa']:g}"),
+                     ("유병률 π", f"{target['prevalence']:g}"),
+                     ("목표 CI 폭", f"{target['width']:g}"),
+                     ("**필요 대상자**", f"**{plan['n']:,}명**"),
+                     ("예상 CI", f"[{lo:.3f}, {hi:.3f}] (폭 {plan['achieved_width']:.4g})")]
+        elif plan["design_key"] == "icc":
             rows += [("예상 ICC", f"{target['icc']:g}"),
                      ("측정 횟수 k", str(target["raters"])),
                      ("목표 CI 폭", f"{target['width']:g}"),
@@ -476,6 +812,8 @@ def render_markdown(plan: dict) -> str:
             if plan.get("needed"):
                 rows.append(("목표 달성 필요 표본수",
                              _alloc_line(plan["needed"]["allocation"])))
+        rows += [(str(label), str(value))
+                 for label, value in plan.get("design_lines", ())]
     pilot = plan.get("pilot")
     if pilot:
         obs = pilot["observed"]
@@ -505,16 +843,49 @@ def render_markdown(plan: dict) -> str:
                             "다시 계산하세요"))
     lines = ["| 항목 | 값 |", "|---|---|"]
     lines += [f"| {_md_cell(k)} | {_md_cell(v)} |" for k, v in rows]
-    sentences = protocol_sentences(plan)
-    lines += ["", "**프로토콜 문장 (KR)**", "", f"> {sentences['kr']}", "",
-              "**Protocol sentence (EN)**", "", f"> {sentences['en']}"]
+    if plan.get("suppress_protocol_sentence"):
+        lines += ["", "**프로토콜 문장 — 만들지 않았습니다**", "",
+                  f"> ⚠ {plan['suppress_protocol_sentence']}"]
+    else:
+        sentences = protocol_sentences(plan)
+        lines += ["", "**프로토콜 문장 (KR)**", "", f"> {sentences['kr']}", "",
+                  "**Protocol sentence (EN)**", "", f"> {sentences['en']}"]
+    if plan.get("sequential"):
+        seq = plan["sequential"]
+        info_label = seq.get("information_label", "누적 N")
+        lines += ["", f"**중간분석 경계 ({seq['spending_kr']}, 총 {seq['looks']}회)**", "",
+                  f"| 시점 | 정보비율 | {info_label} | Z 경계 | 명목 p | "
+                  "누적 α | 중단확률(H1) |",
+                  "|---|---|---|---|---|---|---|"]
+        for row in seq["looks_detail"]:
+            name = "최종" if row["is_final"] else f"중간 {row['look']}"
+            amount = row.get("information_amount") or row.get("n_total") or 0
+            lines.append(
+                f"| {name} | {row['information']:.3f} | {amount:,} | "
+                f"{row['bound_z']:.4f} | {row['nominal_p']:.5f} | "
+                f"{row['cumulative_alpha']:.4f} | {row['stop_prob_h1']:.1%} |")
+        if seq.get("information_label", "누적 N") != "누적 N":
+            total_info = seq.get("information_total") or 0
+            unit = seq.get("information_unit", "")
+            lines += ["", f"기대 {seq['information_label']}: 효과가 있으면 "
+                          f"{seq['expected_fraction_h1'] * total_info:.0f}{unit}, "
+                          f"없으면 {seq['expected_fraction_h0'] * total_info:.0f}{unit} "
+                          f"(팽창계수 ×{seq['inflation']:.4f}). 조기중단이 아껴 주는 것은 "
+                          "등록 인원이 아니라 추적기간입니다."]
+        elif seq.get("expected_n_h1"):
+            lines += ["", f"기대 표본수: 효과가 있으면 {seq['expected_n_h1']:.0f}명, "
+                          f"없으면 {seq['expected_n_h0']:.0f}명 "
+                          f"(팽창계수 ×{seq['inflation']:.4f})"]
     if plan.get("sensitivity") and plan["sensitivity"]["kind"] == "n_by_power_and_effect":
         sens = plan["sensitivity"]
         lines += ["", "**민감도 분석 (분석 표본수: 단위당 n / 총 N)**", ""]
-        lines.append("| 목표 검정력 | " + " | ".join(f"효과×{c:g}" for c in sens["cols"]) + " |")
+        labels = sens.get("col_labels") or [f"×{c:g}" for c in sens["cols"]]
+        lines.append("| 목표 검정력 | " + " | ".join(_md_cell(t) for t in labels) + " |")
         lines.append("|---" * (len(sens["cols"]) + 1) + "|")
         for power, row in zip(sens["rows"], sens["cells"]):
-            cells = ["계산 불가" if c is None else f"{c['unit']:,} / {c['total']:,}" for c in row]
+            cells = ["계산 불가" if c is None
+                     else (f"{c['unit']:,}" if c.get("single_arm")
+                           else f"{c['unit']:,} / {c['total']:,}") for c in row]
             lines.append(f"| {_fmt_power(power)} | " + " | ".join(cells) + " |")
     if plan.get("notes"):
         lines += ["", "**가정과 한계**", ""]
@@ -522,6 +893,15 @@ def render_markdown(plan: dict) -> str:
     if plan.get("references"):
         lines += ["", "**근거 문헌**", ""]
         lines += [f"- {r}" for r in plan["references"]]
+    prov = plan.get("provenance")
+    if prov:
+        # 명령에 백틱이 들어와도 표·코드 스팬이 깨지지 않게 펜스 블록을 쓴다
+        fence = "```"
+        while fence in prov["command"]:
+            fence += "`"
+        lines += ["", "**재현 정보**", "",
+                  f"- {prov['tool']} {prov['version']} · {prov['generated']}",
+                  "", fence, prov["command"].replace("\n", " "), fence]
     return "\n".join(lines)
 
 
@@ -540,5 +920,6 @@ def _finite_only(value):
 def render_json(plan: dict) -> str:
     """재현 가능한 전체 파라미터 (다른 스크립트에서 파싱용)."""
     payload = dict(plan)
-    payload["sentences"] = protocol_sentences(plan)
+    if not plan.get("suppress_protocol_sentence"):
+        payload["sentences"] = protocol_sentences(plan)
     return json.dumps(_finite_only(payload), ensure_ascii=False, indent=2, allow_nan=False)

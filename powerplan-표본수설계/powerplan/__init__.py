@@ -4,7 +4,8 @@
 
 - :func:`powerplan.solve.make_plan` — 설계 + 목표 → 프로토콜용 계획
 - :mod:`powerplan.designs`          — 설계별 검정력 (비중심 t/F 정확계산)
-- :mod:`powerplan.precision`        — ICC·Bland–Altman 정밀도 기준 표본수
+- :mod:`powerplan.precision`        — ICC·Bland–Altman·kappa 정밀도 기준 표본수
+- :mod:`powerplan.sequential`       — 중간분석(군차별설계) 경계·표본수 팽창계수
 - :mod:`powerplan.pilot`            — 사전연구 CSV → 효과크기 → 표본수
 """
 
