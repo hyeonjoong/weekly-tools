@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "powerplan"
+version = "0.1.0"
+description = "임상연구 표본수·검정력 설계 계산기 — 평균·ANOVA는 비중심 t/F 정확계산(비율·상관은 근사), 기저값 보정(ANCOVA)·탈락·군집·다중비교, 사전연구 CSV→효과크기, 프로토콜 문장 자동생성 (표준 라이브러리만)"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "hyeonjoong", email = "hyeonjoongk@gmail.com" }]
+keywords = ["sample size", "statistical power", "ANCOVA", "design effect", "clinical trial", "protocol",
+            "noncentral t", "noncentral F", "non-inferiority", "equivalence", "TOST",
+            "ICC", "Bland-Altman", "limits of agreement", "cluster randomization",
+            "design effect", "effect size", "Cohen's d", "pilot study", "G*Power"]
+classifiers = [
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Topic :: Scientific/Engineering :: Medical Science Apps.",
+]
+
+# 외부 의존성 없음 — 정규/베타 불완전적분, 중심·비중심 t/F 분포와 그 분위수를
+# 모두 표준 라이브러리(math)로 직접 구현했다. 프로토콜 쓰는 자리에서 바로 돌아야 하니까.
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+powerplan = "powerplan.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["powerplan*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
