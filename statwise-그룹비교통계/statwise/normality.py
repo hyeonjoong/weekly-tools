@@ -13,97 +13,9 @@ from __future__ import annotations
 import math
 from typing import List, Sequence, Tuple
 
-from .special import norm_cdf
+from .special import norm_cdf, norm_ppf
 
 __all__ = ["shapiro_wilk"]
-
-# Normal-order-statistic quantile via the Beasley-Springer-Moro / AS 241 rational
-# approximation (ppnd16). Accurate to ~1e-15, matching scipy's _ppnd.
-_A = [
-    3.3871328727963666080,
-    1.3314166789178437745e2,
-    1.9715909503065514427e3,
-    1.3731693765509461125e4,
-    4.5921953931549871457e4,
-    6.7265770927008700853e4,
-    3.3430575583588128105e4,
-    2.5090809287301226727e3,
-]
-_B = [
-    4.2313330701600911252e1,
-    6.8718700749205790830e2,
-    5.3941960214247511077e3,
-    2.1213794301586595867e4,
-    3.9307895800092710610e4,
-    2.8729085735721942674e4,
-    5.2264952788528545610e3,
-]
-_C = [
-    1.42343711074968357734,
-    4.63033784615654529590,
-    5.76949722146069140550,
-    3.64784832476320460504,
-    1.27045825245236838258,
-    2.41780725177450611770e-1,
-    2.27238449892691845833e-2,
-    7.74545014278341407640e-4,
-]
-_D = [
-    2.05319162663775882187,
-    1.67638483018380384940,
-    6.89767334985100004550e-1,
-    1.48103976427480074590e-1,
-    1.51986665636164571966e-2,
-    5.47593808499534494600e-4,
-    1.05075007164441684324e-9,
-]
-_E = [
-    6.65790464350110377720,
-    5.46378491116411436990,
-    1.78482653991729133580,
-    2.96560571828504891230e-1,
-    2.65321895265761230930e-2,
-    1.24266094738807843860e-3,
-    2.71155556874348757815e-5,
-    2.01033439929228813265e-7,
-]
-_F = [
-    5.99832206555887937690e-1,
-    1.36929880922735805310e-1,
-    1.48753612908506148525e-2,
-    7.86869131145613259100e-4,
-    1.84631831751005468180e-5,
-    1.42151175831644588870e-7,
-    2.04426310338993978564e-15,
-]
-
-
-def _ppnd(p: float) -> float:
-    """Inverse standard normal CDF (AS 241)."""
-    q = p - 0.5
-    if abs(q) <= 0.425:
-        r = 0.180625 - q * q
-        num = (((((((_A[7] * r + _A[6]) * r + _A[5]) * r + _A[4]) * r + _A[3]) * r
-                 + _A[2]) * r + _A[1]) * r + _A[0])
-        den = (((((((_B[6] * r + _B[5]) * r + _B[4]) * r + _B[3]) * r + _B[2]) * r
-                 + _B[1]) * r + _B[0]) * r + 1.0)
-        return q * num / den
-    r = p if q < 0 else 1.0 - p
-    r = math.sqrt(-math.log(r))
-    if r <= 5.0:
-        r -= 1.6
-        num = (((((((_C[7] * r + _C[6]) * r + _C[5]) * r + _C[4]) * r + _C[3]) * r
-                 + _C[2]) * r + _C[1]) * r + _C[0])
-        den = (((((((_D[6] * r + _D[5]) * r + _D[4]) * r + _D[3]) * r + _D[2]) * r
-                 + _D[1]) * r + _D[0]) * r + 1.0)
-    else:
-        r -= 5.0
-        num = (((((((_E[7] * r + _E[6]) * r + _E[5]) * r + _E[4]) * r + _E[3]) * r
-                 + _E[2]) * r + _E[1]) * r + _E[0])
-        den = (((((((_F[6] * r + _F[5]) * r + _F[4]) * r + _F[3]) * r + _F[2]) * r
-                 + _F[1]) * r + _F[0]) * r + 1.0)
-    val = num / den
-    return -val if q < 0 else val
 
 
 def _poly(coef: Sequence[float], x: float) -> float:
@@ -128,11 +40,21 @@ def shapiro_wilk(x: Sequence[float]) -> Tuple[float, float]:
     rng = xs[-1] - xs[0]
     if rng == 0.0:
         raise ValueError("all observations are identical (zero variance)")
+    # W is scale-invariant, so centre and rescale before any squaring. Working
+    # on the raw values overflowed above ~1e155 and underflowed to a zero
+    # denominator below ~1e-162, both of which escaped as a raw traceback on
+    # ordinary CSV input (large counts, tiny concentrations).
+    centre = xs[len(xs) // 2]
+    xs = [(v - centre) / rng for v in xs]
+    if xs[-1] - xs[0] <= 0.0:
+        raise ValueError(
+            "값의 크기 차이가 배정밀도로 표현되지 않아 정규성 검정을 "
+            "수행할 수 없습니다")
 
     # Lower-half expected normal order statistics (all negative). AS R94 uses
     # the antisymmetric weights, so only n2 = n // 2 of them are needed.
     n2 = n // 2
-    m = [_ppnd((i + 1 - 0.375) / (n + 0.25)) for i in range(n2)]
+    m = [norm_ppf((i + 1 - 0.375) / (n + 0.25)) for i in range(n2)]
     summ2 = 2.0 * sum(v * v for v in m)
     ssumm2 = math.sqrt(summ2)
     rsn = 1.0 / math.sqrt(n)

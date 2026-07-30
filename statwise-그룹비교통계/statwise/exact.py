@@ -20,7 +20,8 @@ with the observed statistic included in both tails.
 
 from __future__ import annotations
 
-from typing import List
+from functools import lru_cache
+from typing import List, Tuple
 
 __all__ = [
     "mannwhitney_u_pmf",
@@ -37,7 +38,8 @@ MWU_EXACT_MAX_N = 30          # applies to each group size
 SIGNED_RANK_EXACT_MAX_N = 50  # number of non-zero paired differences
 
 
-def mannwhitney_u_pmf(n1: int, n2: int) -> List[float]:
+@lru_cache(maxsize=512)
+def mannwhitney_u_pmf(n1: int, n2: int) -> Tuple[float, ...]:
     """Probability mass function of Mann-Whitney U for sizes ``n1``/``n2``.
 
     Returns a list ``pmf`` of length ``n1*n2 + 1`` where ``pmf[u] = P(U = u)``
@@ -54,7 +56,7 @@ def mannwhitney_u_pmf(n1: int, n2: int) -> List[float]:
     if n1 == 0 or n2 == 0:
         pmf = [0.0] * (max_u + 1)
         pmf[0] = 1.0
-        return pmf
+        return tuple(pmf)
 
     # prev_row[n] holds c(m-1, n, .) as a list over u for every n in 0..n2.
     # Base row m = 0: c(0, n, u) = 1 if u == 0 else 0.
@@ -79,7 +81,9 @@ def mannwhitney_u_pmf(n1: int, n2: int) -> List[float]:
 
     counts = prev_row[n2]
     total = sum(counts)
-    return [c / total for c in counts]
+    # A tuple, not a list: the result is memoized and must not be mutable, or a
+    # caller could corrupt the cached null distribution for every later pair.
+    return tuple(c / total for c in counts)
 
 
 def mannwhitney_exact_p(u: float, n1: int, n2: int) -> float:
@@ -92,7 +96,8 @@ def mannwhitney_exact_p(u: float, n1: int, n2: int) -> float:
     return min(1.0, 2.0 * min(cdf, sf))
 
 
-def signed_rank_pmf(n: int) -> List[float]:
+@lru_cache(maxsize=512)
+def signed_rank_pmf(n: int) -> Tuple[float, ...]:
     """PMF of the Wilcoxon signed-rank W+ statistic for ``n`` ranks (no ties).
 
     ``pmf[w] = P(W+ = w)`` for ``w`` in ``0 .. n(n+1)/2``.
@@ -109,7 +114,7 @@ def signed_rank_pmf(n: int) -> List[float]:
         for w in range(running_max, k - 1, -1):
             counts[w] += counts[w - k]
     total = 2.0 ** n
-    return [c / total for c in counts]
+    return tuple(c / total for c in counts)
 
 
 def signed_rank_exact_p(w: float, n: int) -> float:

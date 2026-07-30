@@ -45,8 +45,10 @@ def test_paired_t_zero_variance_diff():
     assert r.pvalue == 0.0
 
 
-def test_wilcoxon_exact_all_positive():
-    # all differences positive -> W=0; exact p (n=10) = 0.001953125
+def test_wilcoxon_all_positive_differences():
+    # all differences positive -> W=0. |diffs| has ties here, so the exact
+    # branch is *not* taken and the tie-corrected normal approximation is used
+    # (an exact p at n=10 would be 0.001953125).
     pre = [120, 135, 128, 140, 132, 125, 138, 145, 130, 133]
     post = [115, 128, 124, 130, 127, 120, 131, 138, 126, 129]
     r = paired.wilcoxon_signed_rank(pre, post)

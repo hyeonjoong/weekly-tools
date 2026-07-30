@@ -10,6 +10,7 @@ tie-corrected normal / chi-square asymptotic approximation).
 from __future__ import annotations
 
 import math
+import sys
 from dataclasses import dataclass
 from typing import List, Sequence
 
@@ -40,12 +41,25 @@ def mean(x: Sequence[float]) -> float:
 
 
 def variance(x: Sequence[float], ddof: int = 1) -> float:
-    """Sample variance with ``ddof`` delta degrees of freedom (default 1)."""
+    """Sample variance with ``ddof`` delta degrees of freedom (default 1).
+
+    Deviations are rescaled by the largest one before squaring, so the textbook
+    ``sum((v - m) ** 2)`` -- which overflows above ~1e154 -- no longer raises out
+    of the CLI. The rescaling does *not* rescue underflow: below ~1e-162 the
+    double-precision variance genuinely is 0, and it still returns 0 (the caller
+    then reports zero variance rather than crashing). ``fsum`` also keeps the sum
+    exact for long columns.
+    """
     n = len(x)
     if n - ddof <= 0:
         raise ValueError("not enough observations for the requested ddof")
     m = mean(x)
-    return sum((v - m) ** 2 for v in x) / (n - ddof)
+    dev = [v - m for v in x]
+    scale = max((abs(d) for d in dev), default=0.0)
+    if scale == 0.0:
+        return 0.0
+    ss = math.fsum((d / scale) ** 2 for d in dev)
+    return (ss / (n - ddof)) * scale * scale
 
 
 @dataclass
@@ -115,7 +129,10 @@ def students_t(a: Sequence[float], b: Sequence[float]) -> TTestResult:
     sp2 = ((n1 - 1) * v1 + (n2 - 1) * v2) / df
     se = math.sqrt(sp2 * (1.0 / n1 + 1.0 / n2))
     if se == 0.0:
-        raise ValueError("both groups have zero variance; Student's t is undefined")
+        raise ValueError(
+            "두 그룹 모두 분산이 0이라 t-검정을 정의할 수 없습니다 "
+            "(값이 모두 같거나, 크기가 너무 작아 분산이 배정밀도에서 "
+            "0으로 사라졌을 수 있습니다 — 단위를 키워 보세요).")
     t = (m1 - m2) / se
     return TTestResult(t, float(df), t_sf_two_sided(t, df), "student")
 
@@ -129,7 +146,10 @@ def welch_t(a: Sequence[float], b: Sequence[float]) -> TTestResult:
     se2_1, se2_2 = v1 / n1, v2 / n2
     se = math.sqrt(se2_1 + se2_2)
     if se == 0.0:
-        raise ValueError("both groups have zero variance; Welch's t is undefined")
+        raise ValueError(
+            "두 그룹 모두 분산이 0이라 Welch t-검정을 정의할 수 없습니다 "
+            "(값이 모두 같거나, 크기가 너무 작아 분산이 배정밀도에서 "
+            "0으로 사라졌을 수 있습니다 — 단위를 키워 보세요).")
     t = (m1 - m2) / se
     df = (se2_1 + se2_2) ** 2 / (
         se2_1 ** 2 / (n1 - 1) + se2_2 ** 2 / (n2 - 1)
@@ -226,14 +246,54 @@ def one_way_anova(groups: Sequence[Sequence[float]]) -> AnovaResult:
     k = len(groups)
     if n - k <= 0:
         raise ValueError("not enough observations for the within-group df")
-    grand = sum(sum(g) for g in groups) / n
-    ss_between = sum(len(g) * (mean(g) - grand) ** 2 for g in groups)
-    ss_within = sum(sum((v - mean(g)) ** 2 for v in g) for g in groups)
-    ss_total = ss_between + ss_within
+    grand = math.fsum(math.fsum(g) for g in groups) / n
+    # F is a ratio of mean squares, so a common rescaling of every observation
+    # leaves it unchanged. Rescaling by the largest deviation keeps the sums of
+    # squares inside double range for data around 1e300 (raw counts, ng/mL),
+    # which otherwise raised OverflowError straight out of the CLI.
+    spread = max((abs(v - grand) for g in groups for v in g), default=0.0)
+    if not math.isfinite(spread):
+        raise ValueError("group values are not finite")
+    unit = spread if spread > 0.0 else 1.0
+    scaled = [[(v - grand) / unit for v in g] for g in groups]
+    # Hoist the per-group mean: evaluating mean(g) inside the inner loop made
+    # this O(n^2) and turned a 200k-row file into a ~50-minute apparent hang.
+    means = [mean(g) for g in scaled]
+    ss_between = math.fsum(len(g) * m * m for g, m in zip(scaled, means))
+    ss_within = math.fsum(
+        math.fsum((v - m) ** 2 for v in g) for g, m in zip(scaled, means))
+    # F and eta-squared are ratios, so BOTH are formed from the scaled sums --
+    # restoring first and dividing after was a real regression: at unit ~1e-161
+    # the restored values become subnormal, lose their mantissa, and F came back
+    # as inf with p printed as <0.001 where the truth was F = 14.38, p = 1.9e-07.
+    scaled_b, scaled_w = ss_between, ss_within
+    scaled_total = scaled_b + scaled_w
+    # Restore to the caller's units only for the *reported* sums of squares, and
+    # only when every restored value (including their sum, which can overflow on
+    # its own) stays finite and normal.
+    factor = unit * unit
+    restored = None
+    if math.isfinite(factor) and factor > 0.0:
+        rb, rw = scaled_b * factor, scaled_w * factor
+        rt = rb + rw
+        # Require *normal* floats, not merely non-zero: a subnormal result has
+        # already lost most of its mantissa, which showed up as eta-squared
+        # drifting from 0.2915 to 0.3000 at a scale of 1e-162.
+        tiny = sys.float_info.min
+
+        def _usable(restored_v: float, scaled_v: float) -> bool:
+            if scaled_v == 0.0:
+                return restored_v == 0.0
+            return math.isfinite(restored_v) and restored_v >= tiny
+        if (_usable(rb, scaled_b) and _usable(rw, scaled_w)
+                and _usable(rt, scaled_total)):
+            restored = (rb, rw, rt)
+    ss_between, ss_within, ss_total = restored or (scaled_b, scaled_w,
+                                                   scaled_total)
     df_b = k - 1
     df_w = n - k
-    ms_b = ss_between / df_b
-    ms_w = ss_within / df_w
+    ms_b = scaled_b / df_b
+    ms_w = scaled_w / df_w
     if ms_w == 0:
         # No within-group variance. If groups also coincide (SS_between == 0)
         # the F ratio is 0/0 -> undefined; otherwise the separation is perfect.
@@ -322,7 +382,12 @@ def levene(groups: Sequence[Sequence[float]]) -> LeveneResult:
         mid = m // 2
         return s[mid] if m % 2 else (s[mid - 1] + s[mid]) / 2.0
 
-    z_groups = [[abs(v - _median(g)) for v in g] for g in groups]
+    # Same hoist as above: _median(g) sorts the whole group, so calling it once
+    # per element was O(n^2 log n) on the default analysis path.
+    z_groups = []
+    for g in groups:
+        med = _median(g)
+        z_groups.append([abs(v - med) for v in g])
     # Levene's statistic is an ANOVA F on the absolute deviations.
     res = one_way_anova(z_groups)
     return LeveneResult(res.statistic, res.df_between, res.df_within, res.pvalue)
