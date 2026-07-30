@@ -198,12 +198,22 @@ def test_hypergeom_clamps_out_of_range_k():
 
 
 def test_growth_summary_empty():
+    # 빈 입력도 정상 경로와 **같은 키 집합**을 돌려줘야 한다(JSON 소비자 보호).
+    assert set(growth_summary({})) == set(growth_summary({2020: 1, 2021: 2}))
     assert growth_summary({}) == {
         "total": 0,
+        "early_total": 0,
+        "recent_total": 0,
+        "early_years": 0,
+        "recent_years": 0,
+        "early_per_year": 0.0,
+        "recent_per_year": 0.0,
         "recent_share": 0.0,
         "ratio": 0.0,
+        "ratio_per_year": 0.0,
         "split": None,
         "cagr": None,
+        "theil_sen": None,
     }
 
 

@@ -111,6 +111,32 @@ def test_fetch_articles_xml_end_to_end():
 
     arts = parse_efetch_xml(xml)
     assert len(arts) == 2
-    # esearch 1 + efetch 1
+    # 구버전 호환 진입점은 최신순(recent) — esearch 1 + efetch 1
     assert sum("esearch" in u for u in http.urls) == 1
     assert sum("efetch" in u for u in http.urls) == 1
+
+
+def test_fetch_articles_stratified_queries_each_year():
+    """층화 표집은 연도마다 esearch 를 돌려 표본이 한 해로 붕괴하지 않게 한다."""
+    from pubgap.fetch import fetch_articles
+
+    http = FakeHttp()
+    res = fetch_articles(
+        "query", years=3, retmax=30, http_get=http, sample="stratified",
+        this_year=2026, sleep=0,
+    )
+    esearches = [u for u in http.urls if "esearch" in u]
+    assert len(esearches) >= 3
+    for year in (2024, 2025, 2026):
+        assert any(f"mindate=%s%%2F01%%2F01" % year in u for u in esearches), year
+    assert res.n_fetched >= 1
+    assert sum("efetch" in u for u in http.urls) == 1
+
+
+def test_fetch_articles_recent_makes_one_esearch():
+    from pubgap.fetch import fetch_articles
+
+    http = FakeHttp()
+    res = fetch_articles("query", years=3, http_get=http, sample="recent", sleep=0)
+    assert sum("esearch" in u for u in http.urls) == 1
+    assert res.total_available >= res.n_fetched
