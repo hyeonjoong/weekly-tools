@@ -1,20 +1,28 @@
 """전체 분석 오케스트레이션: 전처리된 데이터 -> 결과 딕셔너리."""
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence
 
 import numpy as np
 
 from . import efa, polychoric
-from .dataio import Prepared, listwise_bias_check, missing_report
+from .dataio import NA_STRINGS, Prepared, listwise_bias_check, missing_report
 
 # 진단 임계값(관례적 기준)
 MSA_POOR = 0.5          # 문항별 MSA 하한
-COMMUNALITY_LOW = 0.3   # 낮은 공통성
+# 낮은 공통성 기준 — 추출 방식에 따라 다르게 잡는다.
+# PCA는 관측분산 전체를 쓰므로 h²가 크게 나오지만, PAF/ML은 **공통분산만** 모형화해 같은
+# 자료에서도 h²가 체계적으로 낮다. 0.3을 그대로 적용하면 진적재 .50짜리(게재에 아무 문제
+# 없는) 문항까지 PAF/ML에서 대부분 '제거 검토'로 표시된다(모의자료 실측: 24문항 중 21개).
+COMMUNALITY_LOW = 0.3           # 주성분(PCA) 기준 — 전통적 관례
+COMMUNALITY_LOW_COMMON = 0.2    # 공통요인(PAF/ML) 기준
 ITEM_TOTAL_LOW = 0.3    # 낮은 문항-총점 상관
 DROP_PROP_WARN = 0.10   # listwise 삭제 비율 경고선(10%)
 ITEM_MISS_WARN = 0.05   # 문항별 결측 비율 경고선(5%)
 MCAR_D_WARN = 0.2       # listwise 편향 점검의 |Cohen's d| 경고선(작은 효과)
+ALPHA_GOOD = 0.70       # 척도 신뢰도 관례 기준(Nunnally)
+CONGRUENCE_EQUAL = 0.95     # Tucker φ: 사실상 동일한 요인
+CONGRUENCE_FAIR = 0.85      # Tucker φ: 상당히 유사(그 아래는 다른 요인)
 
 
 def _missing_diagnostics(prep: Prepared, names: List[str], result: Dict) -> None:
@@ -48,13 +56,18 @@ def _missing_diagnostics(prep: Prepared, names: List[str], result: Dict) -> None
         detail = ", ".join(f"{nm}({v*100:.0f}%)" for nm, v in high)
         result["notes"].append(f"결측률이 높은 문항({ITEM_MISS_WARN*100:.0f}% 이상): {detail}.")
 
-    biased = [b for b in rep["bias_check"] if abs(b["d"]) >= MCAR_D_WARN]
+    # 판정은 d의 크기가 아니라 **다중비교 보정 신뢰구간이 0을 배제하는가**로 한다.
+    # 고정 임계값(|d|≥0.2)은 완전 무작위 결측에서도 사실상 100% 발화했다(모의 실측).
+    biased = [b for b in rep["bias_check"] if b.get("flagged")]
     if biased:
-        detail = ", ".join(f"{b['item']}(d={b['d']:+.2f})" for b in biased)
+        detail = ", ".join(
+            f"{b['item']}(d={b['d']:+.2f}, 95% CI [{b['ci_lo']:+.2f}, {b['ci_hi']:+.2f}])"
+            for b in biased)
+        n_tested = biased[0].get("n_tested", len(rep["bias_check"]))
         result["notes"].append(
             f"결측 제거 편향 신호: 완전응답자와 삭제된 응답자의 응답 분포가 다릅니다 — {detail}. "
             f"결측이 무작위(MCAR)가 아닐 수 있어 요인구조가 특정 집단으로 치우쳤을 가능성이 "
-            f"있으니 결측 사유를 확인하세요.")
+            f"있으니 결측 사유를 확인하세요(문항 {n_tested}개를 검정하고 다중비교를 보정했습니다).")
 
 
 def _factorability_flags(kmo_overall: Optional[float], bartlett_p: Optional[float]) -> List[str]:
@@ -94,6 +107,18 @@ def _ml_fit_scan(r: np.ndarray, n: int, p: int,
 
 SKEW_WARN = 2.0             # |왜도| 한계(Curran, West & Finch 1996)
 KURT_WARN = 7.0             # |초과첨도| 한계
+# 한 열의 SD/범위가 나머지 문항 중앙값의 이 배수를 넘으면 '문항이 아닌 열'로 의심한다.
+# 1~5 리커트(SD≈1.2)에 섞인 나이(SD≈16)는 배수 13, 0~100 슬라이더도 8배 정도가 된다.
+SCALE_OUTLIER_RATIO = 4.0
+# 범위가 넓어도 이 정도 범주 수를 넘지 않으면 '문항'으로 본다(0~10 NRS = 11개).
+SCALE_OUTLIER_MIN_CATEGORIES = 15
+# 응답 범주 진단 임계값(efa 쪽 정의를 그대로 재사용).
+RARE_CATEGORY_PROP = efa.RARE_CATEGORY_PROP
+# ω와 α가 이만큼 벌어지면 역문항 미처리·이질 척도 혼입·배정 붕괴 중 하나다.
+OMEGA_ALPHA_GAP = 0.20
+# 백분위 신뢰구간을 인쇄하기 위한 최소 '성공' 재표본 수. 이보다 적으면 구간이
+# 오히려 좁고 확신에 차 보여(점추정을 벗어나기도 한다) 논문에 그대로 실릴 위험이 크다.
+BOOTSTRAP_MIN_OK = 50
 
 
 def _descriptive_diagnostics(x: np.ndarray, names: List[str], result: Dict,
@@ -117,6 +142,62 @@ def _descriptive_diagnostics(x: np.ndarray, names: List[str], result: Dict,
             f"적재량이 높아도 재검토하세요(기준은 균등응답 기대치에 맞춰 범주 수별로 조정)"
             + ("(척도범위 미지정: 관측 최솟값/최댓값 기준)." if scale_min is None else "."))
 
+    # 척도가 크게 다른 열(나이·BMI·방문차수·총점) 탐지.
+    # 임상 CSV에서 가장 흔한 사고다: 자동선택은 '숫자이고 상수가 아니면' 문항으로 삼키는데,
+    # SD가 10배 큰 공변량 하나가 하위척도 총점을 지배해 **멀쩡한 문항 전부를**
+    # '문항-총점 낮음'으로 뒤집어 놓고 α를 음수로 무너뜨린다. 원인은 문항이 아니라 그 열이다.
+    if len(desc) >= 3:
+        sds = np.array([d["sd"] for d in desc], dtype=float)
+        rngs = np.array([d["max"] - d["min"] for d in desc], dtype=float)
+        med_sd = float(np.median(sds))
+        med_rng = float(np.median(rngs))
+        med_cat = float(np.median([d["n_categories"] for d in desc]))
+        odd = []
+        for i, d in enumerate(desc):
+            wide = ((med_sd > 1e-12 and sds[i] >= SCALE_OUTLIER_RATIO * med_sd)
+                    or (med_rng > 1e-12 and rngs[i] >= SCALE_OUTLIER_RATIO * med_rng))
+            # 범위만 넓다고 문항이 아닌 건 아니다 — 이분문항 사이의 0~4 중증도 문항이나
+            # 리커트 사이의 0~100 VAS는 **정상적인 혼합 배터리**다. 공변량(나이·BMI·총점)을
+            # 가르는 진짜 표지는 '고유값 개수도 함께 많다'는 점이다.
+            many = (d["n_categories"] > SCALE_OUTLIER_MIN_CATEGORIES
+                    and (med_cat <= 1e-12 or d["n_categories"] >= SCALE_OUTLIER_RATIO * med_cat))
+            if wide and many:
+                odd.append((d["item"], d["min"], d["max"], d["sd"]))
+        if odd:
+            detail = ", ".join(f"{nm}(범위 {lo:g}~{hi:g}, SD {sd:.1f})" for nm, lo, hi, sd in odd)
+            result["warnings"].append(
+                f"다른 문항과 척도가 크게 다른 열이 있습니다: {detail} — 나머지 문항은 SD 중앙값 "
+                f"{med_sd:.2f}, 범위 중앙값 {med_rng:g}입니다. 문항이 아니라 공변량(나이·BMI·"
+                f"방문차수)이나 총점 열일 가능성이 큽니다 — 문항이 아니면 "
+                f"`--id-col {odd[0][0]}` 로 제외하고 다시 돌리세요. 그대로 두면 이 열이 "
+                f"하위척도 총점을 지배해 나머지 문항이 전부 '문항-총점 낮음'으로 잘못 표시됩니다.")
+
+    # 응답 범주 분포 — 죽은 범주(아무도 안 고른 선택지)는 요인분석이 절대 알려 주지 않는다.
+    cf = efa.category_frequencies(x, names, scale_min, scale_max)
+    result["category_frequencies"] = cf
+    if cf:
+        dead = [(r["item"], r["unused"]) for r in cf["items"] if r["unused"]]
+        rare = [(r["item"], r["rare"]) for r in cf["items"] if r["rare"]]
+        if dead and cf["declared_range"]:
+            # 척도 범위를 선언했을 때만 '아무도 안 고름'이 확실하다(선언이 없으면 관측
+            # 범주만 세우므로 빈 칸이 애초에 생기지 않는다).
+            detail = ", ".join(f"{nm}({', '.join(map(str, u))}번)" for nm, u in dead[:6])
+            result["notes"].append(
+                f"아무도 선택하지 않은 응답 범주가 있습니다: {detail}"
+                f"{' 외' if len(dead) > 6 else ''}. 그 문항은 사실상 더 짧은 척도로 작동하므로 "
+                f"범주를 합치거나(collapse) 문구를 다듬는 것을 검토하세요.")
+        if rare:
+            detail = ", ".join(f"{nm}({', '.join(map(str, u))}번)" for nm, u in rare[:6])
+            result["notes"].append(
+                f"선택률이 {RARE_CATEGORY_PROP*100:.0f}% 미만인 응답 범주: {detail}"
+                f"{' 외' if len(rare) > 6 else ''}. 응답자가 거의 쓰지 않는 선택지는 변별에 "
+                f"기여하지 못하니 범주 축소를 검토하세요.")
+        outside = [r["item"] for r in cf["items"] if r["outside_range"]]
+        if outside and cf["declared_range"]:
+            result["warnings"].append(
+                f"선언한 척도범위를 벗어난 응답이 있는 문항: {', '.join(outside[:8])}. "
+                f"--scale-min/--scale-max 설정이나 자료 입력을 확인하세요.")
+
     nonnormal = [d["item"] for d in desc
                  if abs(d["skew"]) > SKEW_WARN or abs(d["kurtosis"]) > KURT_WARN]
     if nonnormal and correlation == "pearson":
@@ -126,6 +207,448 @@ def _descriptive_diagnostics(x: np.ndarray, names: List[str], result: Dict,
             f"분포가 심하게 치우친 문항(|왜도|>{SKEW_WARN:g} 또는 |첨도|>{KURT_WARN:g}): "
             f"{', '.join(nonnormal)}. 피어슨 상관은 정규성에서 벗어난 순서형 응답의 상관을 "
             f"과소추정합니다 — {extra}순서형(리커트)이라면 --correlation polychoric 를 검토하세요.")
+
+
+# 집단별 재적합에 필요한 최소 응답자 수(이보다 작으면 상관행렬이 의미를 잃는다).
+GROUP_MIN_N = 20
+# 집단의 φ를 '판정'에 쓰기 위한 최소 문항당 응답자 수. 모의실험에서 동일 모집단으로부터
+# 뽑은 집단들도 문항당 1~2명 수준에서는 최소 φ가 .75~.83까지 떨어져 거의 100% '다름'으로
+# 오판됐고, 문항당 3명을 넘기면 오경보가 사라졌다. 그 경계를 그대로 쓴다.
+GROUP_RATIO_MIN = 3.0
+# 널 기준선(같은 모집단 무작위 분할) 반복 수. 200회면 5백분위가 충분히 안정적이고,
+# 피어슨 상관에서는 집단 3개 기준 0.3초 안팎이다.
+GROUP_NULL_REPS = 200
+# 집단 수가 이보다 많으면 범주형 그룹 변수가 아니라 연속형을 잘못 지정한 것으로 본다.
+GROUP_MAX_LEVELS = 12
+
+
+def _normalize_group_label(v) -> str:
+    """집단 라벨 하나를 정규화한다(제어문자 제거 · 공백 정리 · 결측 토큰 → "")."""
+    if v is None:
+        return ""
+    if isinstance(v, float) and not np.isfinite(v):
+        return ""
+    s = str(v)
+    # 줄바꿈·탭 등 제어문자는 공백으로 바꿔 표 정렬이 깨지지 않게 한다.
+    s = "".join(" " if (ch < " " or ch == "\x7f") else ch for ch in s)
+    s = " ".join(s.split())         # 연속 공백 축약 + 앞뒤 제거
+    if s.lower() in NA_STRINGS:
+        return ""
+    return s
+
+
+def _group_replicability(x: np.ndarray, names: List[str], labels: Sequence,
+                         k: int, reference: np.ndarray, extraction: str,
+                         rotation: str, correlation: str, result: Dict,
+                         groups: np.ndarray, seed: int = 42) -> None:
+    """집단(사이트·성별·투여군)별로 요인해를 다시 적합해 **구조가 재현되는지** 본다.
+
+    다기관 임상시험이나 성별·연령대가 섞인 표본에서 "전체 표본에서 나온 2요인 구조가
+    각 집단에서도 같은 구조인가"는 척도 논문의 필수 질문이다. 완전한 측정동일성 검정은
+    확인적 요인분석(CFA)의 영역이지만, 그 전에 **탐색 단계에서 반드시 하는 선별 검사**가
+    집단별 EFA + Tucker 일치계수(φ) 비교다(Lorenzo-Seva & ten Berge 2006).
+
+    각 집단에서 같은 k·같은 추출/회전으로 다시 적합한 뒤 전체 해에 직교 Procrustes로
+    정렬하고, 요인별 φ를 낸다. φ<.85인 요인은 그 집단에서 **다른 것을 재고 있다**는 뜻이라
+    집단을 합쳐 총점을 비교하면 안 된다는 실질적 경고가 된다.
+
+    문항→요인 배정은 전체 해로 고정해 집단별 α가 같은 하위척도를 재게 한다.
+    """
+    p = x.shape[1]
+    # 집단 라벨 정규화. 세 가지를 함께 처리한다:
+    #  (1) 제어문자(줄바꿈·탭)를 공백으로 — 엑셀에서 내보낸 자유기입 사이트명에 흔하고,
+    #      그대로 두면 보고서 표가 줄바꿈으로 깨진다.
+    #  (2) 앞뒤 공백 제거 — ' A '와 'A'는 같은 집단이다.
+    #  (3) 결측 토큰(NA·N/A·nan·none·null·.·-·missing)을 결측으로 — 같은 문자열이
+    #      문항 열에서는 결측인데 집단 열에서는 'NA라는 이름의 사이트'가 되어, 존재하지도
+    #      않는 집단끼리 φ·KMO·α를 계산하고 통합 경고까지 내던 사고를 막는다.
+    labels = np.asarray(
+        [_normalize_group_label(v) for v in labels], dtype=object)
+    if labels.shape[0] != x.shape[0]:
+        raise ValueError("집단 라벨 수가 응답자 수와 다릅니다.")
+
+    blank = int(np.sum(labels == ""))
+    valid = labels != ""
+    levels = sorted({str(v) for v in labels[valid]})
+    info: Dict = {"column": None, "n_blank": blank, "levels": levels,
+                  "n_levels": len(levels), "groups": [],
+                  "min_congruence": None, "pairwise": None}
+    result["group_replicability"] = info
+
+    if blank:
+        result["notes"].append(
+            f"집단 열의 값이 비어 있는 응답자 {blank}명은 집단별 비교에서 제외했습니다"
+            f"(전체 요인분석에는 그대로 포함됩니다).")
+    if len(levels) < 2:
+        result["warnings"].append(
+            f"집단별 비교 생략: 유효한 집단이 {len(levels)}개뿐입니다(2개 이상 필요).")
+        return
+    # 대소문자만 다른 집단값('여'/'여 '는 이미 strip으로 합쳐지지만 'F'/'f'는 남는다)은
+    # 임상 CSV의 전형적 입력 오류다. 말없이 두 집단으로 쪼개면 각 집단이 표본 부족으로
+    # 건너뛰어져 '비교 불가'가 되는데, 사용자는 왜인지 알 수 없다.
+    folded: Dict[str, List[str]] = {}
+    for lv in levels:
+        folded.setdefault(lv.casefold(), []).append(lv)
+    dup = [v for v in folded.values() if len(v) > 1]
+    if dup:
+        detail = "; ".join(" / ".join(v) for v in dup)
+        result["warnings"].append(
+            f"집단 열에 대소문자만 다른 값이 있어 서로 다른 집단으로 처리했습니다: {detail}. "
+            f"같은 집단이라면 입력을 통일한 뒤 다시 실행하세요.")
+    if len(levels) > GROUP_MAX_LEVELS:
+        # 값 목록을 지운다. 집단이 이렇게 많다는 건 대개 환자ID·주민번호·생년월일 같은
+        # **식별자 열을 잘못 지정한** 경우인데, 그대로 두면 분석은 거절해 놓고 정작 그
+        # 식별자 열 전체를 JSON에 복사해 내보내게 된다(협력자에게 그대로 전달된다).
+        info["levels"] = None
+        result["warnings"].append(
+            f"집단별 비교 생략: 집단이 {len(levels)}개로 너무 많습니다(상한 {GROUP_MAX_LEVELS}). "
+            f"연속형 변수(나이·점수)나 식별자(환자ID 등)를 지정하지 않았는지 확인하세요 — "
+            f"범주로 묶어서 다시 주세요. (식별정보가 결과 파일에 새지 않도록 집단값 목록은 "
+            f"출력하지 않았습니다.)")
+        return
+
+    fitted: Dict[str, np.ndarray] = {}
+    for lv in levels:
+        sel = labels == lv
+        xg = x[sel]
+        ng = int(xg.shape[0])
+        row: Dict = {"level": lv, "n": ng, "congruence": None, "alpha": None,
+                     "kmo": None, "skipped": None, "provisional": None}
+        # 문항 수보다 응답자가 적으면 그 집단의 상관행렬은 특이해서 요인해가 잡음이다.
+        # 전체 분석은 n<p를 '결과 신뢰 불가'로 막으면서 집단별 재적합만 무방비였다.
+        hard_min = max(GROUP_MIN_N, k + 1, p + 1)
+        if ng < hard_min:
+            reason = (f"표본 부족(n={ng} < {hard_min}"
+                      + (f"; 문항 수 p={p}보다 적어 상관행렬이 특이)" if ng <= p else ")"))
+            row["skipped"] = reason
+            info["groups"].append(row)
+            continue
+        with np.errstate(over="ignore", invalid="ignore"):
+            sd = xg.std(axis=0)
+        const = [names[i] for i in range(p) if not np.isfinite(sd[i]) or sd[i] <= 1e-12]
+        if const:
+            row["skipped"] = f"이 집단에서 값이 모두 동일한 문항: {', '.join(const)}"
+            info["groups"].append(row)
+            continue
+        try:
+            rg = (polychoric.polychoric_matrix(xg) if correlation == "polychoric"
+                  else efa.correlation_matrix(xg))
+            if not np.all(np.isfinite(rg)):
+                raise ValueError("상관행렬에 계산 불가 값이 있습니다")
+            raw_g, conv_g, hey_g = efa.extract_with_flags(rg, k, extraction)
+            rot_g, _ = efa.rotate_loadings(raw_g, rotation)
+            aligned, _ = efa.procrustes_align(rot_g, reference)
+        except (ValueError, np.linalg.LinAlgError) as exc:
+            row["skipped"] = f"요인해 계산 실패: {exc}"
+            info["groups"].append(row)
+            continue
+        # PAF/ML은 수렴 실패해도 예외 없이 마지막 반복값을 돌려준다. 그 값으로 φ를 내면
+        # '최적화가 도중에 멈춘 상태'를 구조 차이로 오독해, 멀쩡한 다기관 자료에
+        # "사이트를 합치지 마세요"라는 무거운 경고를 발사한다.
+        if not conv_g:
+            row["skipped"] = (f"요인해 수렴 실패({extraction.upper()} 추출) — "
+                              f"이 집단의 적재는 해가 아니라 중간 상태라 비교할 수 없습니다")
+            info["groups"].append(row)
+            continue
+
+        phi_vec = efa.tucker_congruence(aligned, reference)
+        row["congruence"] = [None if not np.isfinite(v) else float(v) for v in phi_vec]
+        row["loadings"] = aligned.tolist()
+        ag = efa.alpha_by_group(xg, groups, k)
+        row["alpha"] = [ag.get(f) for f in range(k)]
+        if efa.is_positive_definite(rg):
+            try:
+                row["kmo"] = float(efa.kmo(rg).overall)
+            except np.linalg.LinAlgError:
+                row["kmo"] = None
+        # '판정 자격' 심사. 표본이 작으면 **같은 모집단에서 뽑아도** φ가 뚝 떨어진다
+        # (모의실험: 문항당 1.2명이면 동일 모집단에서도 최소 φ 중앙값 .75, 오경보 100%).
+        # 그런 집단의 낮은 φ는 '구조가 다르다'가 아니라 '표본이 작다'는 뜻이므로,
+        # 값은 보여 주되 판정과 최상위 경고에서는 뺀다.
+        reasons: List[str] = []
+        if hey_g:
+            reasons.append("Heywood 케이스(공통성이 경계에 도달)")
+        if ng < GROUP_RATIO_MIN * p:
+            reasons.append(f"문항당 {ng / p:.1f}명(권장 ≥{GROUP_RATIO_MIN})")
+        if row["kmo"] is None:
+            reasons.append("상관행렬이 특이해 KMO 계산 불가")
+        elif row["kmo"] < 0.5:
+            reasons.append(f"KMO={row['kmo']:.2f}(<0.50, 요인분석 부적합)")
+        if reasons:
+            row["provisional"] = " · ".join(reasons)
+        elif ng < 5 * p:
+            row["note"] = f"표본이 작아(문항당 {ng / p:.1f}명) 이 집단의 해는 불안정할 수 있습니다."
+        fitted[lv] = aligned
+        info["groups"].append(row)
+
+    # bool([None, None]) 은 True다 — φ가 전부 정의 불가인 집단이 '비교 완료'로 세어져
+    # "비교 가능한 집단이 2개 미만" 경고를 조용히 삼키던 버그. 실제 값이 있는지로 판정한다.
+    usable = [r for r in info["groups"]
+              if any(v is not None for v in (r.get("congruence") or []))]
+    # 판정에 쓸 수 있는(자격을 갖춘) 집단.
+    judged = [r for r in usable if not r.get("provisional")]
+    info["n_usable"] = len(usable)
+    info["n_judged"] = len(judged)
+    if len(usable) < 2:
+        result["warnings"].append(
+            "집단별 비교를 완료한 집단이 2개 미만이라 구조 재현성을 판단할 수 없습니다"
+            "(각 집단의 사유는 보고서의 집단별 표를 보세요).")
+        return
+
+    # 집단 쌍끼리 직접 비교. 두 집단이 각각 전체 해와는 그럭저럭 닮았는데 서로는 크게
+    # 다른 경우가 있어(전체 해가 둘의 평균이므로), 전체 대비 φ만 보면 놓친다.
+    pair_rows: List[Dict] = []
+    ok_levels = {r["level"] for r in judged}
+    lv_ok = [r["level"] for r in usable]
+    for i in range(len(lv_ok)):
+        for j in range(i + 1, len(lv_ok)):
+            a, b = fitted[lv_ok[i]], fitted[lv_ok[j]]
+            # 두 집단해는 이미 같은 기준(전체 해)에 정렬돼 있어 요인 대응이 맞다.
+            v = efa.tucker_congruence(a, b)
+            pair_rows.append({
+                "a": lv_ok[i], "b": lv_ok[j],
+                "congruence": [None if not np.isfinite(t) else float(t) for t in v],
+                # 한쪽이라도 판정 자격이 없으면 이 쌍도 판정에 쓰지 않는다.
+                "provisional": not (lv_ok[i] in ok_levels and lv_ok[j] in ok_levels),
+            })
+    info["pairwise"] = pair_rows
+
+    # 최소 φ는 **판정 자격을 갖춘** 집단·쌍만으로 계산한다. 표본이 작아 잡음이 큰 집단이
+    # 최솟값을 끌어내려 무거운 경고를 발사하던 것이 오경보의 주원인이었다.
+    all_phi = [v for r in judged for v in r["congruence"] if v is not None]
+    all_phi += [v for r in pair_rows if not r["provisional"]
+                for v in r["congruence"] if v is not None]
+    if all_phi:
+        info["min_congruence"] = float(min(all_phi))
+
+    provisional = [r["level"] for r in usable if r.get("provisional")]
+    if provisional:
+        result["notes"].append(
+            f"판정 보류 집단: {', '.join(map(str, provisional))}. 표본이 작거나(문항당 "
+            f"{GROUP_RATIO_MIN}명 미만) 그 집단의 상관행렬이 요인분석에 부적합해, φ가 낮게 나와도 "
+            f"'구조가 다르다'는 근거로 쓸 수 없습니다(같은 모집단에서 뽑아도 이 표본 크기에서는 "
+            f"φ가 떨어집니다). 값은 참고로만 표시하고 판정·경고에서는 제외했습니다.")
+    if len(judged) < 2:
+        # 판정을 안 했으면 판정용 숫자도 남기지 않는다 — JSON 소비자가 보고서는 거부한
+        # 값을 '결론'으로 읽는다.
+        info["min_congruence"] = None
+        result["notes"].append(
+            "판정 자격을 갖춘 집단이 2개 미만이라 구조 재현성을 확정적으로 판단하지 않았습니다 "
+            "— 집단별 표본을 더 모은 뒤 다시 확인하세요.")
+        return
+
+    # --- 자기 자료에서 만든 널 기준선 ---
+    # 고정 임계값(.85)만으로는 오경보를 통제할 수 없다. 같은 모집단을 이 크기로 나눴을 때
+    # 기대되는 최소 φ를 직접 구해, 관측값이 그보다 낮을 때만 '다르다'고 말한다.
+    info["null_reference"] = None
+    judged_sizes = [r["n"] for r in judged]
+    if correlation != "polychoric" and len(judged_sizes) >= 2:
+        try:
+            pooled = x[np.isin(labels, [r["level"] for r in judged])]
+            info["null_reference"] = efa.congruence_null_reference(
+                pooled, judged_sizes, k, reference, extraction=extraction,
+                rotation=rotation, n_rep=GROUP_NULL_REPS, seed=seed)
+        except (ValueError, np.linalg.LinAlgError):
+            info["null_reference"] = None
+
+    worst = info["min_congruence"]
+    nullref = info.get("null_reference")
+    if worst is not None and nullref is not None:
+        # 널 기준선이 있으면 그것이 판정 기준이다(고정 .85보다 자료에 맞다).
+        floor = nullref["p_low"]
+        if worst < floor:
+            bad = [f"{r['level']}·F{j+1}(φ={v:.2f})"
+                   for r in judged for j, v in enumerate(r["congruence"])
+                   if v is not None and v < floor]
+            bad += [f"{r['a']}↔{r['b']}·F{j+1}(φ={v:.2f})"
+                    for r in pair_rows if not r["provisional"]
+                    for j, v in enumerate(r["congruence"])
+                    if v is not None and v < floor]
+            result["warnings"].append(
+                f"요인구조가 집단 간에 재현되지 않습니다: 관측된 최소 Tucker φ={worst:.2f} 가 "
+                f"**같은 모집단을 이 크기로 나눴을 때 기대되는 하한**(φ={floor:.2f}, 중앙값 "
+                f"{nullref['median']:.2f})보다 낮습니다 — 표본 크기만으로는 설명되지 않는 차이입니다"
+                + (f": {', '.join(bad[:6])}{' 외' if len(bad) > 6 else ''}" if bad else "") +
+                f". 해당 집단에서는 같은 문항이 다른 것을 재고 있을 수 있어, 집단을 합친 총점 "
+                f"비교나 공통 규준 사용은 위험합니다 — 집단별로 따로 보고하거나 확인적 "
+                f"요인분석(CFA)으로 측정동일성을 검증하세요. (판정 기준은 하위 5백분위라, "
+                f"구조가 완전히 같은 자료도 약 20번에 1번은 여기 걸립니다.)")
+        else:
+            result["notes"].append(
+                f"집단 간 요인구조 차이는 표본 크기로 설명되는 범위 안입니다"
+                f"(관측 최소 φ={worst:.2f} ≥ 같은 모집단 기대 하한 {floor:.2f}, "
+                f"중앙값 {nullref['median']:.2f}, 무작위 분할 {nullref['n_ok']}회). "
+                f"고정 기준(.85)만 보면 낮아 보여도 이 크기에서는 정상 범위입니다.")
+        return
+
+    if worst is not None and worst < CONGRUENCE_FAIR:
+        bad = [f"{r['level']}·F{j+1}(φ={v:.2f})"
+               for r in judged for j, v in enumerate(r["congruence"])
+               if v is not None and v < CONGRUENCE_FAIR]
+        bad += [f"{r['a']}↔{r['b']}·F{j+1}(φ={v:.2f})"
+                for r in pair_rows if not r["provisional"]
+                for j, v in enumerate(r["congruence"])
+                if v is not None and v < CONGRUENCE_FAIR]
+        result["warnings"].append(
+            f"요인구조가 집단 간에 재현되지 않습니다(Tucker φ<{CONGRUENCE_FAIR:.2f}): "
+            f"{', '.join(bad[:6])}{' 외' if len(bad) > 6 else ''}. 해당 집단에서는 같은 문항이 "
+            f"다른 것을 재고 있을 수 있어, 집단을 합친 총점 비교나 공통 규준 사용은 위험합니다 — "
+            f"집단별로 따로 보고하거나 확인적 요인분석(CFA)으로 측정동일성을 검증하세요.")
+    elif worst is not None and worst < CONGRUENCE_EQUAL:
+        result["notes"].append(
+            f"집단 간 요인구조가 대체로 유사하지만 완전히 같지는 않습니다"
+            f"(최소 Tucker φ={worst:.2f}, {CONGRUENCE_FAIR:.2f}≤φ<{CONGRUENCE_EQUAL:.2f} = '공정한 유사'). "
+            f"집단 비교를 논문의 핵심 주장으로 쓸 계획이면 측정동일성 검증을 권합니다.")
+
+
+def _hypothesis_check(x: np.ndarray, names: List[str], structure: Dict[str, List[str]],
+                      k: int, rotated: np.ndarray, groups: np.ndarray,
+                      result: Dict, min_loading: float = 0.40) -> None:
+    """연구자가 **미리 정한** 하위척도 구조와 실제 요인해를 정면으로 대조한다.
+
+    척도 개발·번안 논문은 언제나 가설을 가지고 시작한다("Q1–Q4는 수면의 질, Q5–Q8은 주간
+    기능"). 그런데 EFA는 그 가설을 모른 채 요인을 뽑고, 요인 번호는 고유값 크기 순일 뿐이라
+    연구자가 표를 눈으로 대조해야 했다. 여기서 자동으로 답한다:
+
+    - **문항 배정 일치율**: 각 문항이 자기가 속하기로 한 하위척도에 실제로 최대 적재됐는가.
+      어긋난 문항은 '어디로 갔는지'까지 이름으로 알려 준다(논문에서 삭제/재배치를 정당화할 근거).
+    - **가설 하위척도별 α**(+ 신뢰구간): 요인해의 argmax 배정이 아니라 **연구자가 정한 문항
+      묶음** 그대로 계산한다. 배정이 어긋난 문항이 있어도 "원래 의도한 하위척도의 신뢰도"를
+      알 수 있어야 하기 때문이다.
+    - **목표 일치계수 φ**: 각 경험 요인이 이상적 단순구조(해당 문항 1, 나머지 0)에 얼마나
+      가까운지. 가설 요인과 경험 요인의 대응은 |φ| 합 최대로 자동 결정한다(요인 번호는 임의).
+
+    가설 요인 수와 적용된 요인 수가 다르면 그 자체가 중요한 결과이므로 경고로 알린다.
+    """
+    p = len(names)
+    idx = {nm: i for i, nm in enumerate(names)}
+    labels = list(structure.keys())
+    m = len(labels)
+
+    info: Dict = {"labels": labels, "n_hypothesized": m, "n_applied": k,
+                  "counts": [len(structure[lab]) for lab in labels],
+                  "agreement": None, "agreement_strict": None,
+                  "items": [], "mismatches": [], "weak": [],
+                  "alpha": [], "alpha_ci": [],
+                  "target_congruence": None, "target_congruence_flipped": None,
+                  "matched_factor": None, "min_loading": float(min_loading),
+                  "uncovered_items": [], "n_items_checked": 0}
+    result["hypothesis"] = info
+
+    # 배정표 만들기(가설에 없는 문항·중복 문항은 명확히 거절/보고).
+    member: Dict[str, int] = {}
+    for j, lab in enumerate(labels):
+        for nm in structure[lab]:
+            if nm not in idx:
+                raise ValueError(
+                    f"설정의 structure에 있는 문항 '{nm}'을 분석 문항에서 찾을 수 없습니다"
+                    f"(분석 문항: {', '.join(names)}). 이름 오타나 --items 지정을 확인하세요.")
+            if nm in member:
+                raise ValueError(
+                    f"설정의 structure에서 문항 '{nm}'이 둘 이상의 하위척도에 들어 있습니다 "
+                    f"— 각 문항은 하나의 하위척도에만 배정하세요.")
+            member[nm] = j
+    info["n_items_checked"] = len(member)
+    uncovered = [nm for nm in names if nm not in member]
+    info["uncovered_items"] = uncovered
+    if uncovered:
+        result["notes"].append(
+            f"가설 구조에 포함되지 않은 문항 {len(uncovered)}개는 배정 대조에서 제외했습니다: "
+            f"{', '.join(uncovered)}.")
+
+    # 가설 하위척도별 α — 요인해와 무관하게 '연구자가 정한 문항 묶음'으로 직접 계산.
+    for lab in labels:
+        cols = [idx[nm] for nm in structure[lab]]
+        a = efa.cronbach_alpha(x[:, cols]) if len(cols) >= 2 else None
+        info["alpha"].append(a)
+        ci = efa.alpha_ci_feldt(a, x.shape[0], len(cols)) if a is not None else None
+        info["alpha_ci"].append(list(ci) if ci else None)
+
+    if m != k:
+        result["warnings"].append(
+            f"가설 요인 수({m}개: {', '.join(labels)})와 실제 적용된 요인 수({k}개)가 다릅니다. "
+            f"자료가 가설과 다른 차원 구조를 지지한다는 뜻이며, 이는 그 자체로 보고할 결과입니다 "
+            f"— 문항 배정 대조는 요인 수가 같을 때만 가능하니 `--n-factors {m}` 으로 가설 구조를 "
+            f"강제해 비교해 보세요(가설 하위척도별 α는 위 표에 그대로 제공됩니다).")
+        return
+
+    # 목표행렬은 **가설이 다루는 문항만**으로 만든다. 가설 밖 문항을 남겨 두면 그 적재가
+    # 분모에는 들어가고 분자에는 안 들어가 φ를 기계적으로 끌어내린다(완벽한 24문항 3요인
+    # 구조라도 가설 밖 문항 6개가 있으면 φ가 .87까지 떨어져 '유사'로 잘못 읽힌다).
+    covered = np.array([i for i, nm in enumerate(names) if nm in member], dtype=int)
+    target = np.zeros((covered.size, m))
+    for pos, i in enumerate(covered):
+        target[pos, member[names[i]]] = 1.0
+    perm, phi = efa.match_factors(rotated[covered], target)
+    info["matched_factor"] = [int(c) + 1 for c in perm]      # 1-based 표시용
+    # 부호는 요인 부호 관례(절댓값 최대 적재를 양수로)에 좌우돼 임의다 — 같은 자료가
+    # +0.48도 −0.48도 될 수 있으므로 크기만 보고하고, 부호가 뒤집힌 경우는 따로 알린다.
+    info["target_congruence"] = [None if not np.isfinite(v) else float(abs(v)) for v in phi]
+    info["target_congruence_flipped"] = [bool(np.isfinite(v) and v < 0) for v in phi]
+    info["min_loading"] = float(min_loading)
+
+    # 경험 요인 → 가설 요인 역매핑으로 문항 배정을 대조한다.
+    factor_to_hypo = {int(c): j for j, c in enumerate(perm)}
+    hit = 0
+    strict_hit = 0
+    rows: List[Dict] = []
+    for nm in names:
+        if nm not in member:
+            continue
+        j = member[nm]
+        i = idx[nm]
+        top = int(groups[i])
+        landed = factor_to_hypo.get(top)
+        lam_hyp = float(rotated[i, int(perm[j])])
+        lam_top = float(rotated[i, top])
+        matched = landed == j
+        # 배정만 맞고 적재가 기준 미만이면 '실렸다'고 말할 수 없다. argmax만 보면
+        # 순수 잡음 문항(λ=0.20)도 '일치'로 세어져 '가설 구조가 재현되었다'가 찍힌다.
+        strong = matched and abs(lam_hyp) >= min_loading
+        hit += int(matched)
+        strict_hit += int(strong)
+        rows.append({
+            "item": nm,
+            "hypothesized": labels[j],
+            "landed_on": labels[landed] if landed is not None else f"F{top+1}",
+            "loading": lam_top,
+            "loading_on_hypothesized": lam_hyp,
+            "status": "ok" if strong else ("weak" if matched else "moved"),
+        })
+    # 요인 이름을 가설 하위척도명으로 자동 부여한다. 요인 번호(F1/F2)는 고유값 크기 순일
+    # 뿐이라 보고서 전체에서 의미를 읽을 수 없었는데, 대응은 이미 계산해 놓고 있었다.
+    factor_names = [None] * k
+    for j, c in enumerate(perm):
+        factor_names[int(c)] = labels[j]
+    result["factor_names"] = factor_names
+    info["items"] = rows
+    info["mismatches"] = [r for r in rows if r["status"] == "moved"]
+    info["weak"] = [r for r in rows if r["status"] == "weak"]
+    n_it = len(rows)
+    info["agreement"] = hit / n_it if n_it else None
+    info["agreement_strict"] = strict_hit / n_it if n_it else None
+
+    if info["mismatches"]:
+        detail = ", ".join(f"{d['item']}({d['hypothesized']}→{d['landed_on']}, "
+                           f"λ={d['loading']:+.2f})" for d in info["mismatches"][:6])
+        result["warnings"].append(
+            f"가설과 다른 하위척도에 실린 문항이 {len(info['mismatches'])}개 있습니다"
+            f"({info['agreement']*100:.0f}% 일치): {detail}"
+            f"{' 외' if len(info['mismatches']) > 6 else ''}. 문항 문구가 두 개념을 함께 건드리는지 "
+            f"확인하고, 재배치·수정·삭제 중 무엇을 할지 근거와 함께 보고하세요.")
+    if info["weak"]:
+        detail = ", ".join(f"{d['item']}(λ={d['loading_on_hypothesized']:+.2f})"
+                           for d in info["weak"][:6])
+        result["warnings"].append(
+            f"가설한 하위척도에 배정되기는 했지만 적재가 기준(|λ|≥{min_loading:.2f})에 못 미치는 "
+            f"문항이 {len(info['weak'])}개 있습니다: {detail}"
+            f"{' 외' if len(info['weak']) > 6 else ''}. '가설 구조가 재현되었다'고 보고하기 전에 "
+            f"이 문항들을 검토하세요 — 배정은 최대적재(argmax)만 보므로 적재가 0.2인 잡음 문항도 "
+            f"어딘가에는 배정됩니다.")
+    if not info["mismatches"] and not info["weak"]:
+        result["notes"].append(
+            f"모든 문항({n_it}개)이 가설한 하위척도에 |λ|≥{min_loading:.2f}로 실렸습니다 — "
+            f"가설 요인구조가 자료에서 재현되었습니다.")
 
 
 def analyze(prep: Prepared,
@@ -139,7 +662,10 @@ def analyze(prep: Prepared,
             fit_scan: bool = False,
             scale_min: Optional[float] = None,
             scale_max: Optional[float] = None,
-            bootstrap: int = 0) -> Dict:
+            bootstrap: int = 0,
+            group_labels: Optional[Sequence] = None,
+            group_name: Optional[str] = None,
+            structure: Optional[Dict[str, List[str]]] = None) -> Dict:
     """전처리된 데이터에 EFA/타당도 진단을 수행하고 결과 딕셔너리를 반환.
 
     extraction: "pca"(주성분, SPSS 기본) · "paf"(주축분해) · "ml"(최대우도, 적합도지수 제공).
@@ -274,10 +800,21 @@ def analyze(prep: Prepared,
         sign_r, logdet_r = np.linalg.slogdet(r)
     det_r = float(np.exp(logdet_r)) if sign_r > 0 else 0.0
     result["r_determinant"] = det_r
-    if 0.0 < det_r < 1e-5:
+    # det==0(완전 특이 = 다중공선성의 최악)이 조건에서 빠지면 안 된다 — 가장 심한 경우에
+    # 경고가 오히려 꺼지는 역전이 생긴다. 원인 열까지 SMC로 지목해 준다.
+    if det_r < 1e-5:
+        culprit = ""
+        try:
+            smc = efa.squared_multiple_correlations(r)
+            worst = [names[i] for i in np.argsort(-smc)[:3] if smc[i] > 0.95]
+            if worst:
+                culprit = (f" 다른 문항들로 거의 완전히 설명되는 열: "
+                           f"{', '.join(worst)} (총점·합계·중복 문항이 아닌지 확인하세요).")
+        except (np.linalg.LinAlgError, ValueError):
+            pass
         result["warnings"].append(
             f"상관행렬 행렬식이 매우 작습니다(det={det_r:.2e}). 문항 간 다중공선성(거의 중복되는 "
-            f"문항)이 의심되니 중복 문항을 확인하세요.")
+            f"문항)이 의심되니 중복 문항을 확인하세요.{culprit}")
 
     # --- 요인분석 적합성: Bartlett & KMO (역행렬/행렬식 필요) ---
     if pos_def:
@@ -317,7 +854,14 @@ def analyze(prep: Prepared,
             result["map_k"] = mp["k"]
             result["map_values"] = mp["values"]
         except np.linalg.LinAlgError:
-            pass
+            result["notes"].append("Velicer MAP 생략: 편상관 계산에 실패했습니다(특이행렬).")
+    else:
+        # 조용히 사라지면 사용자는 '세 기준을 나란히 본다'는 약속이 깨진 걸 눈치채지 못한다.
+        why = ("상관행렬이 양의 정부호가 아니어서" if not pos_def
+               else f"문항이 {p}개뿐이라(3개 이상 필요)")
+        result["notes"].append(
+            f"Velicer MAP 기준 생략: {why} 편상관을 계산할 수 없습니다 — 요인 수 판단은 "
+            f"고유값·평행분석으로만 했습니다.")
 
     # 평행분석 관련 키는 생략/불가 시에도 항상 존재(null)하도록 초기화 — JSON 스키마 안정성.
     pa_k = None
@@ -441,12 +985,12 @@ def analyze(prep: Prepared,
     result["loadings"] = rotated.tolist()
 
     # 구조행렬 S = P Φ (직교회전이면 Φ=I 이므로 S=P). 요인-문항 상관이며 |성분|≤1.
-    structure = rotated @ phi if phi is not None else rotated
+    struct_mat = rotated @ phi if phi is not None else rotated
 
     # 공통성·설명분산: 직교회전은 적재제곱합, 사교(promax)회전은 구조행렬 S=PΦ 사용.
     if applied_rotation == "promax" and phi is not None:
-        comm = np.einsum("ij,ij->i", rotated, structure)  # diag(P Φ Pᵀ)
-        ss_loadings = (structure ** 2).sum(axis=0)
+        comm = np.einsum("ij,ij->i", rotated, struct_mat)  # diag(P Φ Pᵀ)
+        ss_loadings = (struct_mat ** 2).sum(axis=0)
         result["notes"].append(
             "사교(promax)회전이 적용되었습니다. 요인이 서로 상관되어 요인별 설명분산이 겹치므로 "
             "합이 총분산과 일치하지 않을 수 있습니다(구조행렬 기준).")
@@ -512,12 +1056,55 @@ def analyze(prep: Prepared,
     resid_phi = phi if applied_rotation == "promax" else None
     result["residual"] = efa.residual_stats(r, rotated, phi=resid_phi)
     # ω는 구조행렬(요인-문항 상관, |값|≤1)로 계산 → 사교회전에서도 [0,1] 유계 보장.
-    # 직교회전이면 structure==loadings 이므로 값이 동일하다.
-    omega = efa.omega_by_group(structure, groups)
+    # 직교회전이면 struct_mat==loadings 이므로 값이 동일하다.
+    omega = efa.omega_by_group(struct_mat, groups)
     result["omega"] = [omega.get(f) for f in range(k)]
     # 요인별 Cronbach's α — 표본 원점수 기반(적재 낙관적 ω와 나란히 보고).
     alpha = efa.alpha_by_group(x, groups, k)
     result["alpha"] = [alpha.get(f) for f in range(k)]
+    # α의 Feldt 95% 신뢰구간 — APA/COSMIN 보고 지침이 요구하는 값. 점추정 .80이
+    # "실제로는 .70을 못 넘을 수도" 있다는 사실은 구간을 봐야만 드러난다.
+    n_by_factor = [int(np.sum(groups == f)) for f in range(k)]
+    result["alpha_ci"] = [
+        (list(ci) if (ci := efa.alpha_ci_feldt(alpha.get(f), n, n_by_factor[f])) else None)
+        for f in range(k)
+    ]
+    # ω(적재 기반)와 α(응답분산 기반)가 크게 어긋나면 계수 자체보다 **자료에 문제가 있다**는
+    # 신호다. 두 값을 나란히 인쇄만 하고 침묵하면, 사용자는 높은 쪽(ω)을 보고 넘어간다.
+    # 임계값은 추출 방식과 하위척도 길이에 맞춰 조정한다. PCA의 ω는 정의상 α보다 낙관적이고
+    # 그 격차는 문항이 적을수록 커진다(Spearman-Brown) — 고정 0.20을 쓰면 2문항 하위척도가
+    # 완전히 정상인데도 100% 발화했다(모의 실측: λ=.60, 2문항, PCA에서 20/20).
+    def _gap_threshold(f: int) -> float:
+        base = OMEGA_ALPHA_GAP
+        if extraction == "pca":
+            base += 0.15                    # PCA 낙관 보정
+            n_items = n_by_factor[f] if f < len(n_by_factor) else 0
+            if n_items <= 3:                # 짧은 하위척도일수록 격차가 커진다
+                base += 0.15
+        return base
+
+    gap = [(f, omega.get(f), alpha.get(f)) for f in range(k)
+           if omega.get(f) is not None and alpha.get(f) is not None
+           and abs(omega[f] - alpha[f]) >= _gap_threshold(f)]
+    if gap:
+        detail = ", ".join(f"F{f+1}(ω={o:.2f} vs α={a:.2f}, 차이 {abs(o-a):.2f})"
+                           for f, o, a in gap)
+        result["warnings"].append(
+            f"ω와 Cronbach α가 크게 다른 요인이 있습니다: {detail}. ω는 적재량에서, α는 실제 "
+            f"응답분산에서 계산하므로 이만큼 벌어지면 ⑴ 역문항 미처리, ⑵ 척도 범위가 다른 열"
+            f"(나이·총점 등)의 혼입, ⑶ 요인 배정 오류 중 하나입니다 — α가 0 근처이거나 음수면 "
+            f"그 하위척도로 총점을 만들지 마세요.")
+
+    weak = [f for f in range(k)
+            if alpha.get(f) is not None and alpha[f] >= ALPHA_GOOD
+            and result["alpha_ci"][f] is not None and result["alpha_ci"][f][0] < ALPHA_GOOD]
+    if weak:
+        detail = ", ".join(
+            f"F{f+1}(α={alpha[f]:.2f}, 95% CI 하한 {result['alpha_ci'][f][0]:.2f})" for f in weak)
+        result["notes"].append(
+            f"신뢰도 점추정은 {ALPHA_GOOD:.2f}를 넘지만 신뢰구간 하한은 그 아래인 요인: {detail}. "
+            f"표본이 작아 'α≥{ALPHA_GOOD:.2f} 달성'이라고 단정할 수 없습니다 — 논문에는 "
+            f"점추정과 구간을 함께 보고하세요.")
     # 문항을 뺐을 때의 α — "이 문항을 지우면 신뢰도가 오르나?"에 직접 답한다.
     aid = efa.alpha_if_deleted(x, groups, k)
     result["alpha_if_deleted"] = aid.tolist()
@@ -531,18 +1118,53 @@ def analyze(prep: Prepared,
             if result.get("parallel_eigenvalues") else None
         bs = efa.bootstrap_stability(
             x, k, reference=rotated, n_boot=int(bootstrap), seed=seed,
-            extraction=extraction, rotation=applied_rotation, pa_reference=pa_ref)
+            extraction=extraction, rotation=applied_rotation, pa_reference=pa_ref,
+            correlation=correlation, groups=groups)
         result["bootstrap"] = {
             "n_boot": bs.n_boot,
             "n_ok": bs.n_ok,
+            "conf": bs.conf,
             "loading_lo": bs.lo.tolist(),
             "loading_hi": bs.hi.tolist(),
+            "loading_mean": bs.mean.tolist(),
+            "alpha_ci": [list(c) if c else None for c in bs.alpha_ci],
+            "omega_ci": [list(c) if c else None for c in bs.omega_ci],
             "pa_agreement": bs.pa_agreement,
             "k_counts": {str(kk): vv for kk, vv in sorted(bs.k_counts.items())},
+            "n_nonconverged": bs.n_nonconverged,
+            "n_heywood": bs.n_heywood,
         }
-        if bs.n_ok < bs.n_boot:
+        if bs.n_nonconverged:
             result["warnings"].append(
-                f"부트스트랩 재표본 {bs.n_boot}개 중 {bs.n_boot - bs.n_ok}개가 계산 불가로 "
+                f"부트스트랩 재표본 {bs.n_nonconverged}개는 {extraction.upper()} 추출이 "
+                f"수렴하지 않아 제외했습니다(성공 {bs.n_ok}/{bs.n_boot}).")
+        if bs.n_heywood:
+            result["notes"].append(
+                f"부트스트랩 재표본 {bs.n_heywood}/{bs.n_ok}개에서 Heywood 케이스(공통성이 경계에 "
+                f"도달)가 발생했습니다. 경계해도 유효한 해라 구간에 포함했지만, 비율이 높으면"
+                f"(대략 10% 이상) 요인 수가 과다하거나 표본이 부족하다는 신호이니 구간을 "
+                f"확정적으로 해석하지 마세요.")
+        # 유효 재표본이 적으면 '95% 신뢰구간'이라는 라벨 자체가 거짓말이 된다. 3개짜리
+        # 백분위 구간은 폭이 0.02로 나와 건강한 실행보다 오히려 더 확신에 차 보이고,
+        # 점추정을 구간 밖에 두기도 한다 — 그대로 논문 표에 복사되면 최악이다.
+        result["bootstrap"]["reliable"] = bs.n_ok >= BOOTSTRAP_MIN_OK
+        if bs.n_ok < BOOTSTRAP_MIN_OK:
+            # 원인을 정확히 짚는다(비수렴인데 '분산 0 문항'을 찾아 헤매게 하지 않는다).
+            causes = []
+            if bs.n_nonconverged:
+                causes.append(f"{extraction.upper()} 비수렴 {bs.n_nonconverged}개")
+            other = bs.n_boot - bs.n_ok - bs.n_nonconverged
+            if other:
+                causes.append(f"분산 0 문항·특이행렬 등 {other}개")
+            why = ("(" + ", ".join(causes) + ")") if causes else ""
+            result["warnings"].append(
+                f"부트스트랩 신뢰구간을 만들지 않았습니다: 유효 재표본이 {bs.n_ok}개뿐이라"
+                f"(요청 {bs.n_boot}개{why}) 백분위 구간이 의미를 갖지 못합니다"
+                f"(최소 {BOOTSTRAP_MIN_OK}개 필요). 요인 수를 줄이거나 추출 방식을 바꿔 보세요.")
+        other_fail = bs.n_boot - bs.n_ok - bs.n_nonconverged
+        if other_fail > 0:
+            result["warnings"].append(
+                f"부트스트랩 재표본 {bs.n_boot}개 중 {other_fail}개가 계산 불가로 "
                 f"제외됐습니다(재표본에서 분산 0 문항이나 특이행렬 발생) — 구간이 낙관적일 수 있습니다.")
         if bs.pa_agreement is not None and bs.pa_agreement < 0.7:
             result["notes"].append(
@@ -551,9 +1173,27 @@ def analyze(prep: Prepared,
                 f"{', '.join(f'{kk}요인 {vv}회' for kk, vv in sorted(bs.k_counts.items()))}). "
                 f"요인 수를 확정적으로 보고하지 말고 표본을 늘리는 것을 검토하세요.")
 
+    # --- 가설(a priori) 요인구조 대조 ---
+    result["hypothesis"] = None
+    result["factor_names"] = None
+    if structure:
+        _hypothesis_check(x, names, structure, k, rotated, groups, result, min_loading)
+
+    # --- 집단별 구조 재현성(Tucker 일치계수) ---
+    # 다기관·성별·투여군에서 "같은 요인구조인가"를 탐색 단계에서 선별한다.
+    result["group_replicability"] = None
+    if group_labels is not None:
+        _group_replicability(x, names, group_labels, k, rotated, extraction,
+                             applied_rotation, correlation, result, groups, seed)
+        if result.get("group_replicability") is not None:
+            result["group_replicability"]["column"] = group_name
+
     # --- 문항별 진단 플래그 ---
     desc = result["item_descriptives"]
     msa = result["kmo"]["per_item"] if result.get("kmo") else [None] * p
+    comm_low = (COMMUNALITY_LOW_COMMON if extraction in ("paf", "ml")
+                else COMMUNALITY_LOW)
+    result["communality_threshold"] = comm_low
     flags: List[Dict] = []
     for i, name in enumerate(names):
         row = rotated[i]
@@ -563,8 +1203,8 @@ def analyze(prep: Prepared,
         problems = []
         if msa[i] is not None and msa[i] < MSA_POOR:
             problems.append(f"MSA<{MSA_POOR}")
-        if comm[i] < COMMUNALITY_LOW:
-            problems.append(f"공통성<{COMMUNALITY_LOW}")
+        if comm[i] < comm_low:
+            problems.append(f"공통성<{comm_low:g}")
         if not np.isnan(it[i]) and it[i] < ITEM_TOTAL_LOW:
             problems.append(f"문항-총점<{ITEM_TOTAL_LOW}")
         # 그 문항을 빼면 소속 요인의 α가 눈에 띄게 오른다 = 척도를 갉아먹는 문항.

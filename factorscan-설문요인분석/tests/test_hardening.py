@@ -602,8 +602,9 @@ def test_readme_example_output_matches(capsys):
     assert "문항 수: 8    응답자: 77명 사용 (전체 80, 결측제거 3)" in out
     assert "χ²(28) = 335.49" in out
     assert "KMO 전체: 0.813" in out
-    assert "F1=0.911  F2=0.911" in out          # McDonald ω
-    assert "Cronbach α, 응답분산기반·추출방식 무관): F1=0.881  F2=0.880" in out
+    # 요인 이름이 붙으면 라벨이 F1(주간기능) 형태가 된다 — 값 자체를 확인한다.
+    assert "=0.911" in out and out.count("=0.911") >= 2   # 요인별 ω
+    assert "=0.881" in out and "=0.880" in out           # 요인별 α
     assert "Velicer MAP 기준(최소평균편상관): 2개 요인" in out
     assert "RMSR=0.068" in out
     assert "14/28 = 50%" in out

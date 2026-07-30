@@ -15,7 +15,9 @@ class DataError(Exception):
 
 
 # 결측으로 간주할 문자열(대소문자 무시)
-_NA_STRINGS = {"", "na", "n/a", "nan", "null", "none", ".", "-", "missing"}
+NA_STRINGS = frozenset({"", "na", "n/a", "nan", "null", "none", ".", "-", "missing"})
+# 하위호환 별칭(내부 사용).
+_NA_STRINGS = NA_STRINGS
 
 # 자릿수 구분 쉼표(en-US/한국식)를 '명확한' 경우에만 인식한다:
 #  (A) 소수점이 있으면 쉼표는 자릿수구분이 확실  예: "1,000.5", "12,345.60"
@@ -52,6 +54,25 @@ def _to_float(token: str, extra_na: Sequence[str]) -> float:
 def _is_na_token(token: str, extra_na: Sequence[str]) -> bool:
     t = token.strip()
     return t.lower() in _NA_STRINGS or t in extra_na
+
+
+def normalize_name(s: str) -> str:
+    """열 이름을 비교 가능한 형태로 정규화한다(유니코드 NFC · 제어문자 제거 · 공백 정리).
+
+    macOS가 만든 CSV는 한글을 **NFD**(자모 분리)로 저장하는데 사람이 손으로 친 설정 파일은
+    **NFC**다. 두 문자열은 화면에서 완전히 같아 보이지만 바이트가 달라, 사용자는
+    `'수면질'을 찾을 수 없습니다 (분석 문항: 수면질, ...)` 처럼 **자기가 방금 본 이름을
+    못 찾는다는 오류**를 만난다 — 원인을 짐작할 방법이 없다.
+
+    제로폭 공백(U+200B)·BOM(U+FEFF) 같은 보이지 않는 문자와, 엑셀 헤더 셀의 Alt+Enter가
+    남기는 줄바꿈도 함께 없앤다(줄바꿈은 보고서 표를 깨뜨린다).
+    """
+    import unicodedata
+    s = unicodedata.normalize("NFC", str(s))
+    s = "".join("" if ch in ("\u200b", "\u200c", "\u200d", "\ufeff")
+                else (" " if (ch < " " or ch == "\x7f") else ch)
+                for ch in s)
+    return " ".join(s.split())
 
 
 def load_csv(path: str, na_values: Optional[Sequence[str]] = None,
@@ -131,10 +152,20 @@ def _si_text(si) -> str:
 # 압축을 푼 뒤의 XML 한 조각이 이보다 크면 읽지 않는다. 정상적인 설문 시트는 수 MB를
 # 넘지 않으며, 이 상한이 없으면 몇 MB짜리 압축폭탄이 수 GB로 부풀어 메모리를 고갈시킨다.
 _XLSX_MAX_MEMBER_BYTES = 256 * 1024 * 1024
+# 헤더가 아주 좁아도 이 정도 폭까지는 데이터로 인정한다(엑셀이 흘리는 빈 칸 여유).
+_XLSX_MIN_ROW_WIDTH = 64
 
 
 def _xlsx_read(zf, name: str) -> bytes:
-    """zip 멤버를 크기 상한을 확인한 뒤 읽는다(압축폭탄 방어)."""
+    """zip 멤버를 크기 상한 안에서 **스트리밍**으로 읽는다(압축폭탄 방어).
+
+    헤더의 `file_size`만 믿으면 안 된다 — 그 값은 공격자가 쓰는 필드다. 실제로 300MB짜리
+    멤버의 선언 크기를 1234로 위조하면 상한 검사를 그대로 통과하고, `zf.read()`가 전부
+    메모리에 풀어 놓은 **뒤에야** CRC 오류로 죽는다(측정: 상한 256MB인데 RSS +476MB).
+    그래서 선언값은 '빠른 1차 거절'로만 쓰고, 실제 방어는 열어서 조각으로 읽으며 누적
+    바이트를 세는 쪽에 둔다.
+    """
+    import zipfile
     try:
         info = zf.getinfo(name)
     except KeyError:
@@ -144,10 +175,36 @@ def _xlsx_read(zf, name: str) -> bytes:
             f"엑셀 내부 파일 '{name}'의 압축 해제 크기가 너무 큽니다"
             f"({info.file_size / 1e6:.0f}MB > {_XLSX_MAX_MEMBER_BYTES / 1e6:.0f}MB 상한) — "
             f"손상되었거나 비정상적으로 큰 파일입니다.")
+    chunks: List[bytes] = []
+    total = 0
     try:
-        return zf.read(name)
+        with zf.open(name) as fh:
+            while True:
+                chunk = fh.read(1 << 20)        # 1MB씩
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > _XLSX_MAX_MEMBER_BYTES:
+                    raise DataError(
+                        f"엑셀 내부 파일 '{name}'의 실제 압축 해제 크기가 상한"
+                        f"({_XLSX_MAX_MEMBER_BYTES / 1e6:.0f}MB)을 넘었습니다 — 압축 폭탄이거나 "
+                        f"손상된 파일입니다(헤더에 적힌 크기와 실제가 다릅니다).")
+                chunks.append(chunk)
+    except zipfile.BadZipFile as exc:
+        raise DataError(
+            f"엑셀 내부 파일 '{name}'이 손상되었습니다({exc}) — 엑셀에서 다시 저장해 보세요.")
     except (OverflowError, MemoryError) as exc:
         raise DataError(f"엑셀 내부 파일 '{name}'을 읽는 중 메모리가 부족했습니다: {exc}")
+    data = b"".join(chunks)
+    # DTD/내부 엔티티 확장(billion laughs)은 파서 버전에 기대지 않고 여기서 막는다.
+    # expat 2.6+ 는 증폭 한도를 걸지만, requires-python >=3.9 이면 옛 expat에 링크된
+    # 런타임도 지원 범위 안이라 '환경 덕'에 안전한 상태를 방어라고 부를 수 없다.
+    head = data[:4096].lstrip()
+    if b"<!DOCTYPE" in head or b"<!ENTITY" in data[:65536]:
+        raise DataError(
+            f"엑셀 내부 파일 '{name}'에 DTD/엔티티 선언이 있습니다 — 정상적인 .xlsx에는 "
+            f"없는 구조이며 XML 확장 공격에 쓰입니다. 파일을 신뢰할 수 없습니다.")
+    return data
 
 
 def _xlsx_shared_strings(zf) -> List[str]:
@@ -290,6 +347,7 @@ def load_xlsx(path: str, sheet: Optional[str] = None) -> Dict[str, np.ndarray]:
             raise DataError(f"엑셀 파일이 너무 커서 읽을 수 없습니다: {exc}")
 
         rows: List[List[str]] = []
+        header_width = None      # 첫 행의 열 수(희소 행 증폭 방어의 기준)
         for row in root.iter(f"{_SSML}row"):
             cells: Dict[int, str] = {}
             cursor = 0     # r 속성이 없는 셀의 위치(ECMA-376에서 r은 선택 사항)
@@ -335,6 +393,17 @@ def load_xlsx(path: str, sheet: Optional[str] = None) -> Dict[str, np.ndarray]:
                 rows.append([])
                 continue
             width = max(cells) + 1
+            # 희소 행을 조밀 전개할 때 폭을 제한한다. _col_index가 열 번호를 XFD(16384)로
+            # 묶어도, 행마다 'XFC1' 한 칸만 든 시트는 행 × 16384 칸으로 부풀어 32KB 파일이
+            # 510MB를 먹는다(측정). 첫 행(헤더)의 폭을 기준으로 그 이상은 데이터가 아니라
+            # 손상/공격으로 본다.
+            if header_width is None:
+                header_width = width
+            elif width > max(header_width, _XLSX_MIN_ROW_WIDTH):
+                raise DataError(
+                    f"엑셀 {row.get('r') or '?'}행이 헤더({header_width}열)보다 훨씬 넓은 "
+                    f"{width}열을 가리킵니다 — 파일이 손상되었거나 비정상적으로 희소한 "
+                    f"시트입니다(불필요한 셀 참조를 지우고 다시 저장하세요).")
             rows.append([cells.get(i, "") for i in range(width)])
 
     return _rows_to_columns(rows)
@@ -358,7 +427,7 @@ def _rows_to_columns(rows: List[List[str]]) -> Dict[str, np.ndarray]:
     rows = [r for r in rows if any(str(c).strip() for c in r)]
     if not rows:
         raise DataError("빈 파일입니다.")
-    header = [str(h).strip() for h in rows[0]]
+    header = [normalize_name(h) for h in rows[0]]
     # 엑셀은 뒤쪽에 빈 헤더 칸을 흘리는 일이 잦다 — 뒤의 빈 이름만 잘라낸다.
     while header and not header[-1]:
         header.pop()
@@ -413,7 +482,7 @@ def _read_rows(fh, delimiter: str = ",") -> Dict[str, np.ndarray]:
         header = next(reader)
     except StopIteration:
         raise DataError("빈 파일입니다.")
-    header = [h.strip() for h in header]
+    header = [normalize_name(h) for h in header]
     if len(set(header)) != len(header):
         raise DataError("중복된 열 이름이 있습니다: 열 이름을 고유하게 만들어 주세요.")
     ncol = len(header)
@@ -604,7 +673,7 @@ def missing_report(raw: np.ndarray, names: Sequence[str]) -> Dict:
 
 
 def listwise_bias_check(raw: np.ndarray, names: Sequence[str],
-                        min_group: int = 5) -> List[Dict]:
+                        min_group: int = 10, alpha: float = 0.05) -> List[Dict]:
     """listwise 삭제가 응답 분포를 바꾸는지(MCAR 위배 신호) 문항별로 점검한다.
 
     각 문항 i에 대해, **완전응답자**의 i 값 분포와 **일부 결측이 있어 버려질 응답자**의
@@ -612,9 +681,19 @@ def listwise_bias_check(raw: np.ndarray, names: Sequence[str],
     두 분포가 크게 다르면 삭제된 표본이 무작위가 아니어서(MAR/MNAR) 요인분석 결과가
     편향될 수 있다는 신호다 — Little의 MCAR 검정과 같은 취지의 문항별 간이 진단.
 
+    **판정은 d의 크기가 아니라 신뢰구간으로 한다.** 고정 임계값(|d|≥0.2)을 쓰면 삭제군이
+    작을수록 d의 표준오차가 커지는 것을 무시하게 되어, **완전 무작위(MCAR) 자료에서도**
+    24문항 중 평균 4~13개가 걸리고 한 문항이라도 걸릴 확률이 사실상 100%가 된다(모의실험).
+    경고가 늘 켜져 있으면 진짜 MAR일 때조차 아무도 보지 않는다. 그래서
+      SE(d) = sqrt( (n1+n2)/(n1·n2) + d²/(2(n1+n2)) )   (Hedges & Olkin 1985 대표본 근사)
+    로 구간을 만들고, 문항 수만큼의 다중비교를 Bonferroni로 보정한 구간이 0을 포함하지
+    않을 때만 flagged=True 로 표시한다(전체 실행 기준 오경보율 ≈ alpha).
+
     각 군의 유효 표본이 min_group 미만이거나 분산이 0이면 그 문항은 건너뛴다.
-    반환: [{"item", "d", "mean_complete", "mean_dropped", "n_dropped_obs"}, ...]
+    반환: [{"item", "d", "se", "ci_lo", "ci_hi", "ci_lo_adj", "ci_hi_adj", "flagged",
+            "mean_complete", "mean_dropped", "n_dropped_obs", "n_complete_obs"}, ...]
     """
+    from .polychoric import norm_ppf
     miss = ~np.isfinite(raw)
     complete = ~miss.any(axis=1)
     dropped = ~complete
@@ -633,11 +712,25 @@ def listwise_bias_check(raw: np.ndarray, names: Sequence[str],
                            / max(a.size + b.size - 2, 1))
         if not np.isfinite(pooled) or pooled <= 1e-12:
             continue
+        d = float((a.mean() - b.mean()) / pooled)
+        n1, n2 = int(a.size), int(b.size)
+        se = math.sqrt((n1 + n2) / (n1 * n2) + d * d / (2.0 * (n1 + n2)))
         out.append({
-            "item": name,
-            "d": float((a.mean() - b.mean()) / pooled),
+            "item": name, "d": d, "se": float(se),
             "mean_complete": float(a.mean()),
             "mean_dropped": float(b.mean()),
-            "n_dropped_obs": int(b.size),
+            "n_dropped_obs": n2, "n_complete_obs": n1,
         })
+
+    m = len(out)
+    if m:
+        z95 = norm_ppf(1.0 - alpha / 2.0)
+        z_adj = norm_ppf(1.0 - alpha / (2.0 * m))       # Bonferroni
+        for e in out:
+            e["ci_lo"] = e["d"] - z95 * e["se"]
+            e["ci_hi"] = e["d"] + z95 * e["se"]
+            e["ci_lo_adj"] = e["d"] - z_adj * e["se"]
+            e["ci_hi_adj"] = e["d"] + z_adj * e["se"]
+            e["flagged"] = bool(e["ci_lo_adj"] > 0.0 or e["ci_hi_adj"] < 0.0)
+            e["n_tested"] = m       # 보정에 쓰인 검정 수(보고용)
     return out
