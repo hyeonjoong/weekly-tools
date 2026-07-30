@@ -143,8 +143,14 @@ def welch_psd(x: Sequence[float], fs: float, nperseg: Optional[int] = None,
     nyq = (nfft % 2 == 0)
 
     # Per-segment one-sided scaled periodograms, so 'median' averaging can operate
-    # on the fully-scaled estimates exactly as SciPy does.
+    # on the fully-scaled estimates exactly as SciPy does. For 'mean' only a running
+    # sum is needed, so the per-segment rows are NOT retained — with a large overlap
+    # (noverlap = nperseg-1 gives n_seg ≈ N) keeping them all would cost O(N·nfft)
+    # floats and exhaust memory on a long recording.
+    keep_rows = (average == "median")
     segs_psd: List[List[float]] = []
+    acc = [0.0] * n_out
+    n_seg = 0
     for s in starts:
         seg = xs[s:s + nperseg]
         seg = _detrend_segment(seg, detrend)
@@ -159,15 +165,16 @@ def welch_psd(x: Sequence[float], fs: float, nperseg: Optional[int] = None,
             if k != 0 and not (nyq and k == n_out - 1):
                 val *= 2.0
             row[k] = val
-        segs_psd.append(row)
-
-    n_seg = len(segs_psd)
-    psd: List[float] = [0.0] * n_out
-    if average == "mean":
-        for row in segs_psd:
+        n_seg += 1
+        if keep_rows:
+            segs_psd.append(row)
+        else:
             for k in range(n_out):
-                psd[k] += row[k]
-        psd = [v / n_seg for v in psd]
+                acc[k] += row[k]
+
+    psd: List[float] = [0.0] * n_out
+    if not keep_rows:
+        psd = [v / n_seg for v in acc]
     else:  # median with bias correction
         bias = median_bias(n_seg)
         for k in range(n_out):
@@ -359,11 +366,14 @@ def spectral_entropy(freqs: Sequence[float], psd: Sequence[float],
         return None
     ps = [p for p in in_band if p > 0.0]
     total = math.fsum(ps)
-    if total <= 0:
+    if total <= 0 or not math.isfinite(total):
+        # An overflowed (inf) total would make every q underflow to 0 and log(0) raise.
         return None
     h = 0.0
     for p in ps:
         q = p / total
+        if q <= 0.0:          # underflow for an astronomically dominant bin
+            continue
         h -= q * math.log(q)
     if normalize:
         denom = math.log(m)

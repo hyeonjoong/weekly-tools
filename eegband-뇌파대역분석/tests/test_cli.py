@@ -74,12 +74,16 @@ class TestExitCodes(unittest.TestCase):
             self.assertEqual(code, 2)
             self.assertIn("입력 오류", err)
 
-    def test_non_increasing_time_exit_2(self):
+    def test_non_increasing_time_falls_back_to_fs(self):
         # Regression: resolve_fs raised ValueError outside the try/except -> crash.
-        with _TmpCSV("time_s,eeg_uv\n0.0,1\n0.0,2\n0.0,3\n") as p:
-            code, _, err = _run([p])
-            self.assertEqual(code, 2)
-            self.assertIn("입력 오류", err)
+        # Now the unusable time column is ignored and the analysis proceeds.
+        body = "\n".join("0.0,%f" % (5 * math.sin(2 * math.pi * 10 * k / 128.0))
+                          for k in range(512))
+        with _TmpCSV("time_s,eeg_uv\n" + body + "\n") as p:
+            code, out, err = _run([p, "--fs", "128"])
+            self.assertEqual(code, 0)
+            self.assertIn("unusable", out)
+            self.assertIn("alpha", out)
 
     def test_json_and_csv_mutually_exclusive(self):
         with _TmpCSV(_sine_csv(128.0, 10.0, 10.0, 5.0)) as p:
@@ -154,7 +158,10 @@ class TestCsvOutput(unittest.TestCase):
             lines = [l for l in out.splitlines() if l and not l.startswith("#")]
             self.assertEqual(len(lines), 2)          # header + one overall row
             self.assertIn("delta_abs_uv2", lines[0])
-            self.assertTrue(lines[1].startswith("overall,"))
+            # series/source_file columns are ALWAYS present so that appending several
+            # single-series exports into one file stays unambiguous
+            self.assertTrue(lines[0].startswith("series,source_file,epoch,"))
+            self.assertIn(",overall,", lines[1])
 
     def test_csv_epochs_rows(self):
         with _TmpCSV(_sine_csv(128.0, 40.0, 1.5, 40.0)) as p:
@@ -284,7 +291,7 @@ class TestNoComment(unittest.TestCase):
             _, out, _ = _run([p, "--fs", "128", "--csv", "--no-comment"])
             self.assertFalse(out.startswith("#"))
             # first line is the header, directly parseable by base-R/SAS
-            self.assertTrue(out.splitlines()[0].startswith("epoch,"))
+            self.assertTrue(out.splitlines()[0].startswith("series,source_file,"))
 
     def test_comment_present_by_default(self):
         with _TmpCSV(_sine_csv(128.0, 20.0, 1.5, 40.0)) as p:

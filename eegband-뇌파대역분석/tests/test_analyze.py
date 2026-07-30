@@ -109,12 +109,36 @@ class TestAdversarial(unittest.TestCase):
         res = analyze(_sine(20.0, 20.0, 3.0, 5.0), fs=20.0)
         self.assertTrue(any("Nyquist" in w for w in res.warnings))
 
-    def test_fs_mismatch_warning(self):
+    def test_explicit_fs_wins_over_a_disagreeing_time_column(self):
+        """An explicit --fs is a statement of fact; a guessed rate is not. A time
+        column in the wrong unit (Unix ms, a counter) must not silently override it."""
         times = [k / 128.0 for k in range(256)]
         fs, source, warns = resolve_fs(100.0, times)
-        self.assertAlmostEqual(fs, 128.0, delta=0.1)
-        self.assertEqual(source, "inferred (user mismatch)")
-        self.assertTrue(any("disagrees" in w for w in warns))
+        self.assertEqual(fs, 100.0)
+        self.assertEqual(source, "user (time column disagreed)")
+        self.assertTrue(any("USING --fs" in w for w in warns))
+        # ...but with no --fs the inferred rate is used, with no spurious warning
+        fs2, source2, warns2 = resolve_fs(None, times)
+        self.assertAlmostEqual(fs2, 128.0, delta=1e-9)
+        self.assertEqual(source2, "inferred")
+        self.assertFalse(any("disagrees" in w for w in warns2))
+
+    def test_inferred_fs_is_snapped_to_a_round_value(self):
+        """A 6-dp time column gives 127.999998 Hz; that noise must not leak into
+        every reported frequency."""
+        times = [round(k / 128.0, 6) for k in range(2000)]
+        fs, source, warns = resolve_fs(None, times)
+        self.assertEqual(fs, 128.0)
+        self.assertTrue(any("snapped" in w for w in warns))
+        # a genuinely different rate is NOT snapped
+        fs2, _, _ = resolve_fs(None, [k / 127.0 for k in range(200)])
+        self.assertAlmostEqual(fs2, 127.0, delta=1e-9)
+
+    def test_unusable_time_column_falls_back_instead_of_failing(self):
+        fs, source, warns = resolve_fs(256.0, [0.0, 0.0, 0.0, 0.0])
+        self.assertEqual(fs, 256.0)
+        self.assertEqual(source, "user (time column ignored)")
+        self.assertTrue(any("unusable" in w for w in warns))
 
     def test_custom_bands(self):
         bands = [("low", 0.5, 8.0), ("mid", 8.0, 20.0), ("high", 20.0, 45.0)]
@@ -304,12 +328,34 @@ class TestArtifactRejection(unittest.TestCase):
         # peak_amp is still recorded even without a threshold
         self.assertGreater(res.epochs[2].peak_amp, 300.0)
 
-    def test_all_rejected_falls_back(self):
+    def test_all_rejected_reports_qc_failure_and_no_summary(self):
+        """A recording where every epoch fails QC must NOT produce the same numbers
+        as a clean one: no summary, no density, no trend, qc_pass False."""
         res = analyze(_sine(128.0, 40.0, 1.5, 40.0), fs=128.0, epoch_sec=10.0,
                       max_amp=1.0)   # everything exceeds 1 µV
         self.assertEqual(res.n_epochs_kept, 0)
-        self.assertIsNotNone(res.swa_density)  # falls back to all epochs
-        self.assertTrue(any("all epochs were rejected" in w for w in res.warnings))
+        self.assertEqual(res.n_epochs_rejected, 4)
+        self.assertFalse(res.qc_pass)
+        self.assertIsNone(res.swa_density)
+        self.assertEqual(res.epoch_summary, {})
+        self.assertEqual(res.epoch_trends, {})
+        self.assertTrue(any("QC FAILURE" in w for w in res.warnings))
+        # the per-epoch rows are still there, all flagged
+        self.assertTrue(all(ep.rejected for ep in res.epochs))
+
+    def test_partial_rejection_summarises_only_kept_epochs(self):
+        clean = _sine(128.0, 30.0, 1.5, 40.0)
+        spiky = list(clean)
+        for i in range(128 * 10, 128 * 20):        # epoch 1 gets huge amplitudes
+            spiky[i] *= 10.0
+        res = analyze(spiky, fs=128.0, epoch_sec=10.0, max_amp=200.0)
+        self.assertEqual(res.n_epochs_kept, 2)
+        self.assertTrue(res.qc_pass)
+        self.assertEqual(res.epoch_summary["swa_absolute_uv2"]["n"], 2.0)
+        kept = [ep for ep in res.epochs if not ep.rejected]
+        self.assertAlmostEqual(
+            res.epoch_summary["swa_absolute_uv2"]["mean"],
+            sum(ep.spectrum.swa_abs for ep in kept) / 2.0, places=9)
 
 
 if __name__ == "__main__":
