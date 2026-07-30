@@ -35,7 +35,7 @@ from .effects import hedges_correction
 from .validate import PowerPlanError
 
 __all__ = ["GroupStats", "read_two_group", "read_paired", "effect_from_two_group",
-           "effect_from_paired", "MISSING_TOKENS", "MAX_FILE_BYTES"]
+           "effect_from_paired", "strip_unsafe", "MISSING_TOKENS", "MAX_FILE_BYTES"]
 
 #: 결측으로 볼 문자열 (대소문자 무시, 앞뒤 공백 제거 후 비교)
 MISSING_TOKENS = frozenset({"", "na", "n/a", "nan", "none", "null", ".", "-", "--",
@@ -47,7 +47,8 @@ _DELIMITERS = (",", "\t", ";", "|")
 _MAX_GROUPS = 500
 _MAX_ERROR_EXAMPLES = 5
 _SNIFF_BYTES = 65536
-#: csv 모듈의 필드 길이 상한 (기본 128KB) — 넘으면 따옴표 짝이 깨진 파일이다
+#: csv 모듈의 필드 길이 상한. 자유기술 항목이 있는 임상 CSV는 기본값(128KB)을
+#: 넘길 수 있으므로 조금 올려 잡되, 무한정 늘리지는 않는다.
 _MAX_FIELD_BYTES = 1024 * 1024
 #: "1,234,567" 형태의 천단위 구분자만 제거 대상으로 인정
 _THOUSANDS_RE = re.compile(r"^[+-]?\d{1,3}(,\d{3})+(\.\d*)?$")
@@ -63,6 +64,18 @@ _CTRL.update({c: None for c in range(0x202A, 0x2030)})     # 양방향 임베딩
 _CTRL.update({c: None for c in range(0x2066, 0x206A)})     # 양방향 격리
 #: 스프레드시트가 수식으로 해석하는 시작 문자 (CSV 수식 주입 방지)
 _FORMULA_LEADERS = ("=", "+", "-", "@")
+
+
+def strip_unsafe(text, limit: int = 200) -> str:
+    """제어문자·양방향 조작·폭 0 문자만 제거한다 (수식 이스케이프는 하지 않음).
+
+    명령줄처럼 ``-``로 시작하는 것이 정상인 문자열에는 `_safe_label`의 수식 방지
+    어포스트로피를 붙이면 안 된다 — 붙이면 재현용 명령이 깨진다.
+    """
+    cleaned = str(text).translate(_CTRL)
+    if len(cleaned) > limit:
+        cleaned = cleaned[: limit - 1] + "…"
+    return cleaned
 
 
 def _safe_label(text: str, limit: int = 60) -> str:
@@ -158,6 +171,15 @@ class PairedAccumulator:
         return self.c_xy / math.sqrt(self.m2_x * self.m2_y)
 
 
+def _raise_field_limit() -> None:
+    """csv 필드 길이 상한을 _MAX_FIELD_BYTES로 올린다 (플랫폼 상한을 넘지 않게)."""
+    try:
+        if csv.field_size_limit() < _MAX_FIELD_BYTES:
+            csv.field_size_limit(_MAX_FIELD_BYTES)
+    except (OverflowError, ValueError):  # pragma: no cover - 플랫폼 의존
+        pass
+
+
 def _sniff(path: str) -> tuple[str, str]:
     """앞부분만 읽어 (인코딩, 구분자)를 판별한다. 파일 전체를 읽지 않는다."""
     if not os.path.exists(path):
@@ -184,9 +206,19 @@ def _sniff(path: str) -> tuple[str, str]:
         raise PowerPlanError(f"파일을 읽을 수 없습니다: {path} ({exc.strerror})") from None
     if not head.strip():
         raise PowerPlanError(f"빈 파일입니다: {path}")
+    if head[:2] in (b"\xff\xfe", b"\xfe\xff") or head[:4] in (
+            b"\xff\xfe\x00\x00", b"\x00\x00\xfe\xff"):
+        # 엑셀의 "유니코드 텍스트(.txt)"가 UTF-16이다 — NUL 바이트 때문에 이진 파일로
+        # 오해받기 쉬우므로, 무엇을 하면 되는지 정확히 알려 준다.
+        raise PowerPlanError(
+            f"UTF-16으로 저장된 파일입니다: {os.path.basename(path)}. 엑셀에서 "
+            "'CSV UTF-8(쉼표로 분리)'로 다시 저장하거나, 메모장에서 열어 UTF-8로 "
+            "저장한 뒤 다시 시도하세요"
+        )
     if b"\x00" in head:
         raise PowerPlanError(
-            f"CSV가 아닌 것 같습니다(이진 파일): {path}. .xlsx라면 CSV로 저장해 주세요"
+            f"CSV가 아닌 것 같습니다(이진 파일): {os.path.basename(path)}. "
+            ".xlsx라면 CSV로 저장해 주세요"
         )
     encoding = None
     sample = ""
@@ -232,23 +264,38 @@ def _resolve_column(header: list[str], name: str, what: str) -> int:
     )
 
 
-def _parse_number(text: str, row_no: int, column: str, errors: list[str]) -> float | None:
-    """숫자 파싱. 결측이면 None, 이상하면 errors에 기록하고 None."""
+def _parse_number(text: str, row_no: int, column: str, errors: list[str],
+                  show_values: bool = False) -> float | None:
+    """숫자 파싱. 결측이면 None, 이상하면 errors에 기록하고 None.
+
+    오류 메시지에 **원본 셀 값을 넣지 않는 것이 기본**이다. 숫자 열에 자유기술이
+    섞여 들어가는 일은 임상 자료에서 흔하고(이름·MRN·전화번호), 그 값이 터미널·
+    셸 기록·CI 로그·스크린샷으로 새어 나가면 재식별 위험이 된다. 값이 꼭 필요하면
+    `--show-values`로 명시적으로 요청해야 한다.
+    """
     token = text.strip().strip('"').strip()
     if token.lower() in MISSING_TOKENS:
         return None
     # 천단위 구분자만 제거한다. "1,5"(유럽식 소수점)는 일부러 오류로 남겨
     # 15로 조용히 잘못 읽히는 일을 막는다.
     cleaned = token.replace(",", "") if _THOUSANDS_RE.match(token) else token
+
+    def note(suffix: str = "") -> None:
+        if len(errors) >= _MAX_ERROR_EXAMPLES:
+            return
+        where = f"{row_no}행 '{_safe_label(column, 30)}'"
+        if show_values:
+            errors.append(f"{where} = {_safe_label(token, 20)}{suffix}")
+        else:
+            errors.append(f"{where}: 숫자로 읽을 수 없음{suffix}")
+
     try:
         value = float(cleaned)
     except ValueError:
-        if len(errors) < _MAX_ERROR_EXAMPLES:
-            errors.append(f"{row_no}행 '{column}' = {_safe_label(token, 20)}")
+        note()
         return None
     if not math.isfinite(value):
-        if len(errors) < _MAX_ERROR_EXAMPLES:
-            errors.append(f"{row_no}행 '{column}' = {_safe_label(token, 20)} (무한/NaN)")
+        note(" (무한/NaN)")
         return None
     return value
 
@@ -275,6 +322,7 @@ def _read_rows(path: str):
     호출부가 핸들을 닫아야 한다 (아래 read_* 함수들은 try/finally로 감싼다).
     """
     enc, delim = _sniff(path)
+    _raise_field_limit()
     try:
         handle = open(path, "r", encoding=enc, newline="")
     except OSError as exc:
@@ -305,6 +353,14 @@ def _iter_rows(reader, path: str):
         except StopIteration:
             return
         except csv.Error as exc:
+            if "field larger than field limit" in str(exc):
+                # 필드 길이 초과는 따옴표 문제가 아니다 — 예전에는 둘을 같은
+                # 메시지로 묶어 "따옴표를 확인하라"는 엉뚱한 조언을 했다.
+                raise PowerPlanError(
+                    f"한 칸의 값이 너무 깁니다 ({row_no}행 이후, 상한 "
+                    f"{_MAX_FIELD_BYTES // 1024:,}KB). 따옴표(\")의 짝이 맞지 않아 "
+                    "여러 줄이 한 칸으로 붙었을 가능성이 큽니다 — 원본을 확인하세요"
+                ) from None
             raise PowerPlanError(
                 f"CSV 형식이 깨졌습니다 ({row_no}행 이후): {exc}. "
                 "따옴표(\")의 짝이 맞는지 확인하세요"
@@ -321,13 +377,16 @@ def _iter_rows(reader, path: str):
 def read_two_group(path: str, value_col: str, group_col: str,
                    groups: tuple[str, str] | None = None,
                    skip_invalid: bool = False,
-                   filters=None, baseline_col: str | None = None) -> dict:
+                   filters=None, baseline_col: str | None = None,
+                   show_values: bool = False, redact: bool = False) -> dict:
     """두 군 CSV를 스트리밍으로 읽어 군별 요약 통계를 만든다.
 
     Args:
         groups: 비교할 두 군의 **원본 라벨**. None이면 파일에 군이 정확히 둘일 때만 진행.
         filters: [(열, 값)] 형태의 행 선택 조건 (예: 특정 사이트/방문차수만).
         baseline_col: 주면 기저값-추적값의 군내 상관 r을 함께 추정한다(ANCOVA 계획용).
+        show_values: 오류 메시지에 원본 셀 값을 넣을지 (기본 False — 재식별 위험).
+        redact: 군 라벨·관측 범위를 결과에서 지운다 (출력물을 공유해야 할 때).
     """
     handle, reader, header, enc, delim = _read_rows(path)
     try:
@@ -371,7 +430,7 @@ def read_two_group(path: str, value_col: str, group_col: str,
                 stats[label] = GroupStats(label)
                 paired[label] = PairedAccumulator()
             before = len(errors)
-            value = _parse_number(row[vi], row_no, value_col, errors)
+            value = _parse_number(row[vi], row_no, value_col, errors, show_values)
             if len(errors) > before:
                 safe_errors.append(f"{row_no}행 '{_safe_label(value_col, 30)}': 숫자 아님")
             if value is None:
@@ -381,7 +440,7 @@ def read_two_group(path: str, value_col: str, group_col: str,
                 continue
             stats[label].add(value)
             if bi is not None:
-                base = _parse_number(row[bi], row_no, baseline_col or "", [])
+                base = _parse_number(row[bi], row_no, baseline_col or "", [], False)
                 if base is not None:
                     paired[label].add(base, value)
         if (bad_rows or short_rows) and not skip_invalid:
@@ -413,8 +472,10 @@ def read_two_group(path: str, value_col: str, group_col: str,
                 )
             chosen = [by_label[g] for g in groups]
         elif len(usable) < 2:
+            hint = (f" (--filter로 {filtered_out}개 행을 제외했습니다 — 조건이 한쪽 군만 "
+                    "남기고 있지 않은지 확인하세요)" if filtered_out else "")
             raise PowerPlanError(
-                f"두 군 비교에는 각 군 n ≥ 2가 필요합니다. 읽은 군: {detail}"
+                f"두 군 비교에는 각 군 n ≥ 2가 필요합니다. 읽은 군: {detail}{hint}"
             )
         elif len(usable) > 2:
             raise PowerPlanError(
@@ -424,19 +485,28 @@ def read_two_group(path: str, value_col: str, group_col: str,
             )
         else:
             chosen = usable
-        shown = _display_labels([s.label for s in chosen])
+        shown = (["군1", "군2"] if redact
+                 else _display_labels([s.label for s in chosen]))
         others = [s for s in found if all(s is not c for c in chosen)]
         out = {
-            "path": path, "encoding": enc, "delimiter": delim,
-            "group1": chosen[0].as_dict(shown[0]), "group2": chosen[1].as_dict(shown[1]),
-            "other_groups": [s.as_dict() for s in others]
-            + [{"label": _safe_label(label), "rows": count}
-               for label, count in sorted(skipped.items(), key=lambda kv: -kv[1])],
+            # 경로 전체가 아니라 파일 이름만 남긴다 (임상 파일명에는 연구·사이트·
+            # 대상자 정보가 들어가는 일이 흔하다)
+            "path": _safe_label(os.path.basename(path), 80),
+            "encoding": enc, "delimiter": delim,
+            "redacted": bool(redact),
+            "group1": _maybe_redact(chosen[0].as_dict(shown[0]), redact),
+            "group2": _maybe_redact(chosen[1].as_dict(shown[1]), redact),
+            "other_groups": ([] if redact else
+                             [s.as_dict() for s in others]
+                             + [{"label": _safe_label(label), "rows": count}
+                                for label, count in sorted(skipped.items(),
+                                                           key=lambda kv: -kv[1])]),
             "invalid_ignored": bad_rows + short_rows if skip_invalid else 0,
             # 저장 파일에는 원본 값을 남기지 않는다 (행·열 위치만)
             "invalid_examples": safe_errors if skip_invalid else [],
             "filtered_out": filtered_out,
-            "filters": [{"column": _safe_label(c), "value": _safe_label(v)}
+            "filters": [{"column": _safe_label(c),
+                         "value": "(가림)" if redact else _safe_label(v)}
                         for _i, c, v in resolved],
         }
         if bi is not None:
@@ -459,8 +529,23 @@ def _pooled_correlation(accumulators) -> float | None:
     return max(-0.999, min(0.999, r))
 
 
+def _maybe_redact(group: dict, redact: bool) -> dict:
+    """군 요약에서 재식별 소지가 있는 항목을 지운다.
+
+    min/max는 **개별 대상자 한 명의 실제 측정값**이다 (평균·SD와 달리 집계가 아니다).
+    출력물을 외부와 공유해야 하는 상황에서는 지우는 편이 안전하다.
+    """
+    if not redact:
+        return group
+    out = dict(group)
+    out["min"] = None
+    out["max"] = None
+    return out
+
+
 def read_paired(path: str, pre_col: str, post_col: str,
-                skip_invalid: bool = False, filters=None) -> dict:
+                skip_invalid: bool = False, filters=None,
+                show_values: bool = False, redact: bool = False) -> dict:
     """사전-사후 두 열을 읽어 **차이**의 요약 통계를 만든다 (쌍 단위).
 
     `filters`로 특정 군/사이트/방문차수만 골라낼 수 있다. 중재군과 대조군을
@@ -495,8 +580,8 @@ def read_paired(path: str, pre_col: str, post_col: str,
                 filtered_out += 1
                 continue
             before = len(errors)
-            pre = _parse_number(row[pi], row_no, pre_col, errors)
-            post = _parse_number(row[qi], row_no, post_col, errors)
+            pre = _parse_number(row[pi], row_no, pre_col, errors, show_values)
+            post = _parse_number(row[qi], row_no, post_col, errors, show_values)
             if len(errors) > before:
                 bad_rows += 1
                 safe_errors.append(f"{row_no}행: 숫자 아님")
@@ -519,14 +604,18 @@ def read_paired(path: str, pre_col: str, post_col: str,
                 f"사전·사후가 모두 있는 쌍이 {diff.n}개뿐입니다 (최소 2쌍 필요){extra}"
             )
         return {
-            "path": path, "encoding": enc, "delimiter": delim,
-            "pre": pre_stats.as_dict(_safe_label(pre_col)),
-            "post": post_stats.as_dict(_safe_label(post_col)),
-            "diff": diff.as_dict(), "incomplete_pairs": incomplete,
+            "path": _safe_label(os.path.basename(path), 80),
+            "encoding": enc, "delimiter": delim,
+            "redacted": bool(redact),
+            "pre": _maybe_redact(pre_stats.as_dict(_safe_label(pre_col)), redact),
+            "post": _maybe_redact(post_stats.as_dict(_safe_label(post_col)), redact),
+            "diff": _maybe_redact(diff.as_dict(), redact),
+            "incomplete_pairs": incomplete,
             "invalid_ignored": bad_rows if skip_invalid else 0,
             "invalid_examples": safe_errors if skip_invalid else [],
             "filtered_out": filtered_out,
-            "filters": [{"column": _safe_label(c), "value": _safe_label(v)}
+            "filters": [{"column": _safe_label(c),
+                         "value": "(가림)" if redact else _safe_label(v)}
                         for _i, c, v in resolved],
             "pre_post_r": together.correlation,
         }
@@ -551,6 +640,11 @@ def effect_from_two_group(data: dict, conf: float = 0.95) -> dict:
         raise PowerPlanError(
             "두 군의 표준편차가 모두 0입니다 (모든 값이 동일) — 효과크기를 계산할 수 없습니다"
         )
+    if not math.isfinite(sd_pooled):
+        raise PowerPlanError(
+            "관측값이 너무 커서 분산 계산이 넘쳤습니다(무한대). 값의 자릿수를 "
+            "확인하거나 단위를 바꿔(예: 그램 → 킬로그램) 다시 시도하세요"
+        )
     diff = g1["mean"] - g2["mean"]
     d = diff / sd_pooled
     se_unit = math.sqrt(1.0 / n1 + 1.0 / n2)
@@ -574,6 +668,11 @@ def effect_from_paired(data: dict, conf: float = 0.95) -> dict:
     if diff["sd"] <= 0.0:
         raise PowerPlanError(
             "모든 쌍의 변화량이 동일합니다(차이의 SD = 0) — 효과크기를 계산할 수 없습니다"
+        )
+    if not math.isfinite(diff["sd"]):
+        raise PowerPlanError(
+            "변화량이 너무 커서 분산 계산이 넘쳤습니다(무한대). 값의 자릿수를 "
+            "확인하거나 단위를 바꿔 다시 시도하세요"
         )
     dz = diff["mean"] / diff["sd"]
     df = n - 1

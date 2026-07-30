@@ -186,9 +186,26 @@ def test_non_numeric_value_raises_with_row_number(tmp_path):
 
 
 def test_european_decimal_comma_is_rejected_not_silently_misread(tmp_path):
+    """'1,5'를 15로 조용히 읽지 않고 거절해야 한다 (유럽식 소수점)."""
     path = write(tmp_path, "eu.csv", "v;g\n1,5;a\n2,5;a\n5,5;b\n7,5;b\n")
-    with pytest.raises(PowerPlanError, match="1,5"):
+    with pytest.raises(PowerPlanError, match="숫자로 읽을 수 없"):
         read_two_group(path, "v", "g")
+    # 값을 보고 싶으면 명시적으로 요청해야 한다
+    with pytest.raises(PowerPlanError, match="1,5"):
+        read_two_group(path, "v", "g", show_values=True)
+
+
+def test_error_messages_do_not_leak_raw_cell_values(tmp_path):
+    """숫자 열에 섞여 들어간 자유기술(이름·MRN 등)이 기본 오류 메시지에 나오면 안 된다."""
+    path = write(tmp_path, "pii.csv",
+                 "v,g\n10.2,a\n11.5,a\n홍길동 MRN 0012345,b\n20.0,b\n21.0,b\n")
+    with pytest.raises(PowerPlanError) as exc:
+        read_two_group(path, "v", "g")
+    message = str(exc.value)
+    assert "홍길동" not in message and "0012345" not in message
+    assert "4행" in message and "숫자로 읽을 수 없" in message
+    with pytest.raises(PowerPlanError, match="홍길동"):
+        read_two_group(path, "v", "g", show_values=True)
 
 
 def test_thousands_separator_is_accepted(tmp_path):

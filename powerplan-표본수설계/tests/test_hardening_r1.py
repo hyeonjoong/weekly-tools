@@ -168,16 +168,23 @@ def test_tost_power_is_monotone_once_not_negligible():
 # 정확도: ANCOVA / 변화량 설계배율
 # --------------------------------------------------------------------------
 def test_ancova_design_factor_and_df():
-    """ANCOVA: d' = d/√(1−r²), df = n1+n2−3 (Frison & Pocock 1992)."""
+    """ANCOVA: d' = d/√(1−r²), df = n1+n2−3, 분산 팽창 1+1/(N−3).
+
+    공변량 불균형에 따른 분산 팽창을 빼먹으면 검정력이 0.5~1.5%p 과대평가된다
+    (모의실험으로 확인). Borm 등(2007)의 "+1명" 규칙이 바로 이 항이다.
+    """
     d, r, n = 0.309, 0.711, 83
     design = TwoSampleT(d, baseline_r=r, analysis="ancova")
     assert design.design_factor == pytest.approx(1 - r * r)
     assert design.effective_d == pytest.approx(d / math.sqrt(1 - r * r))
     df = 2 * n - 3
-    ncp = design.effective_d / math.sqrt(2.0 / n)
+    ncp = design.effective_d / math.sqrt((2.0 / n) * (1.0 + 1.0 / df))
     tc = t_ppf(0.975, df)
     expect = nct_sf(tc, df, ncp) + nct_cdf(-tc, df, ncp)
     assert design.power(n) == pytest.approx(expect, abs=1e-12)
+    # 팽창 항을 빼면 검정력이 위로 치우친다 (이 테스트가 지키려는 것)
+    naive = design.effective_d / math.sqrt(2.0 / n)
+    assert nct_sf(tc, df, naive) + nct_cdf(-tc, df, naive) > expect
 
 
 def test_ancova_reduces_sample_size_as_expected():
@@ -189,6 +196,8 @@ def test_ancova_reduces_sample_size_as_expected():
         approx = math.ceil(raw * (1 - r * r)) + 1
         assert abs(got - approx) <= 2, (r, got, approx)
     assert smallest_unit(TwoSampleT(0.309, baseline_r=0.711, analysis="ancova"), 0.80) == 83
+    # 분산 팽창을 반영해도 ANCOVA는 여전히 추적값만 비교보다 훨씬 작다
+    assert smallest_unit(TwoSampleT(0.309, baseline_r=0.711, analysis="ancova"), 0.80) < 90
 
 
 def test_change_score_factor_and_break_even_at_r_half():
@@ -382,10 +391,22 @@ def test_long_group_labels_are_not_merged(tmp_path):
 
 
 def test_broken_quotes_give_korean_error(tmp_path):
+    """따옴표가 안 닫히면 한 칸이 무한정 길어진다 — 상한을 넘으면 그 사실을 말해야 한다."""
     path = tmp_path / "quote.csv"
-    path.write_text('val,arm\n1,"unclosed\n' + "x" * 200000 + "\n", encoding="utf-8")
+    path.write_text('val,arm\n1,"unclosed\n' + "x" * 2_000_000 + "\n", encoding="utf-8")
     with pytest.raises(PowerPlanError, match="따옴표"):
         read_two_group(str(path), "val", "arm")
+
+
+def test_long_field_within_limit_is_not_blamed_on_quotes(tmp_path):
+    """자유기술 항목이 128KB를 넘어도(엑셀 메모 등) 정상 처리되어야 한다."""
+    long_note = "메" * 200_000
+    path = tmp_path / "longfield.csv"
+    path.write_text(
+        "val,arm,note\n1,a,\"%s\"\n2,a,x\n3,b,y\n4,b,z\n" % long_note,
+        encoding="utf-8")
+    data = read_two_group(str(path), "val", "arm")
+    assert data["group1"]["n"] == 2 and data["group2"]["n"] == 2
 
 
 def test_non_regular_files_are_rejected(tmp_path):

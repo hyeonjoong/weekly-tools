@@ -8,7 +8,12 @@ from __future__ import annotations
 
 import math
 
-__all__ = ["PowerPlanError", "as_float", "positive", "probability", "in_unit_open", "as_int"]
+__all__ = ["PowerPlanError", "as_float", "positive", "probability", "in_unit_open",
+           "as_int", "alpha_value", "MIN_ALPHA"]
+
+#: 유의수준/신뢰수준의 하한. 이보다 작으면 1 − α/2가 배정도에서 정확히 1.0으로
+#: 반올림되어 z 분위수가 무한대가 되고, 그 아래로는 어떤 구현도 신뢰할 수 없다.
+MIN_ALPHA = 1e-9
 
 
 class PowerPlanError(ValueError):
@@ -50,6 +55,24 @@ def probability(name: str, value, lo: float = 0.0, hi: float = 1.0) -> float:
     out = as_float(name, value)
     if not (lo < out < hi):
         raise PowerPlanError(f"{name}: {lo}보다 크고 {hi}보다 작아야 합니다 (받은 값: {out:g})")
+    return out
+
+
+def alpha_value(name: str, value) -> float:
+    """유의수준 — (MIN_ALPHA, 0.5) 사이여야 한다.
+
+    상한 0.5는 의미 없는 검정을 막고, 하한은 수치적으로 표현 가능한 범위를 지킨다.
+    """
+    out = as_float(name, value)
+    if out < MIN_ALPHA:
+        raise PowerPlanError(
+            f"{name}: {MIN_ALPHA:g}보다 작은 유의수준은 수치적으로 계산할 수 없습니다 "
+            f"(받은 값: {out:g}). 보통 0.05를 씁니다"
+        )
+    if out >= 0.5:
+        raise PowerPlanError(
+            f"{name}: 0.5 이상은 의미가 없습니다 (받은 값: {out:g}). 보통 0.05를 씁니다"
+        )
     return out
 
 
