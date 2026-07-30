@@ -78,7 +78,9 @@ def test_report_uses_alpha_norm_for_levene_verdict():
     txt = render_text(res)
     # verdict line must agree with the stored decision boundary (alpha_norm)
     equal_var = res.levene.pvalue > res.alpha_norm
-    assert ("등분산 가정 충족" in txt) == equal_var
+    # a non-significant Levene is "no evidence against", not "assumption met"
+    assert ("등분산 위배 근거 없음" in txt) == equal_var
+    assert "등분산 가정 충족" not in txt
 
 
 def test_posthoc_disabled():

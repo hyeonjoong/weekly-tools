@@ -41,7 +41,7 @@ from dataclasses import dataclass
 from typing import Optional, Sequence, Tuple
 
 from . import tests_stat
-from .special import t_cdf, t_ppf
+from .special import t_cdf, t_ppf, t_sf
 
 __all__ = [
     "EquivalenceResult",
@@ -109,7 +109,7 @@ def tost(diff: float, se: float, df: float, low: float, high: float,
         raise ValueError("degrees of freedom must be positive")
 
     t_low = (diff - low) / se
-    p_low = 1.0 - t_cdf(t_low, df)      # H01: diff <= low  -> upper tail
+    p_low = t_sf(t_low, df)             # H01: diff <= low  -> upper tail
     t_high = (diff - high) / se
     p_high = t_cdf(t_high, df)          # H02: diff >= high -> lower tail
     p = max(p_low, p_high)
@@ -152,7 +152,7 @@ def noninferiority(diff: float, se: float, df: float, margin: float,
     if direction == "higher_is_better":
         bound = -margin
         t_stat = (diff - bound) / se
-        p = 1.0 - t_cdf(t_stat, df)     # H0: diff <= -margin -> upper tail
+        p = t_sf(t_stat, df)            # H0: diff <= -margin -> upper tail
         ci_low, ci_high = diff - tcrit * se, None
         concluded = ci_low > bound
         res_low, res_high = (t_stat, p), (None, None)

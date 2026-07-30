@@ -145,8 +145,15 @@ def hodges_lehmann_independent(a: Sequence[float], b: Sequence[float],
     diffs = sorted(float(x) - float(y) for x in a for y in b)
     est = _median_sorted(diffs)
     alpha = 1.0 - conf
-    method = "exact" if (n1 <= exact.MWU_EXACT_MAX_N
-                         and n2 <= exact.MWU_EXACT_MAX_N) else "asymptotic"
+    # The interval inverts the *untied* rank distribution. With ties present it
+    # is only approximate, and the companion Mann-Whitney p-value has already
+    # dropped to the normal approximation -- labelling this "exact" while the
+    # test beside it says "asymptotic" invites the reader to trust the wrong one.
+    has_ties = len(set(list(a) + list(b))) < (n1 + n2)
+    if n1 <= exact.MWU_EXACT_MAX_N and n2 <= exact.MWU_EXACT_MAX_N:
+        method = "asymptotic (ties present)" if has_ties else "exact"
+    else:
+        method = "asymptotic"
     k = _mwu_trim_index(n1, n2, alpha)
     if k is None:
         return LocationEstimate("Hodges-Lehmann median difference", est,
@@ -177,7 +184,13 @@ def hodges_lehmann_paired(diffs: Sequence[float],
     walsh = sorted((d[i] + d[j]) / 2.0 for i in range(n) for j in range(i, n))
     est = _median_sorted(walsh)
     alpha = 1.0 - conf
-    method = "exact" if n <= exact.SIGNED_RANK_EXACT_MAX_N else "asymptotic"
+    nonzero = [x for x in d if x != 0.0]
+    has_ties = (len({abs(x) for x in nonzero}) < len(nonzero)
+                or len(nonzero) < len(d))
+    if n <= exact.SIGNED_RANK_EXACT_MAX_N:
+        method = "asymptotic (ties present)" if has_ties else "exact"
+    else:
+        method = "asymptotic"
     k = _signed_rank_trim_index(n, alpha)
     if k is None:
         return LocationEstimate("Hodges-Lehmann median difference", est,
