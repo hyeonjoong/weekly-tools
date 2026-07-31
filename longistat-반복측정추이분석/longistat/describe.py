@@ -82,7 +82,8 @@ class MissingReport:
         return self.n_complete / self.n_subjects if self.n_subjects else float("nan")
 
 
-def profile_missing(panel: Panel) -> MissingReport:
+def profile_missing(panel: Panel,
+                    mmrm_available: bool = True) -> MissingReport:
     """Describe how much data is missing, and whether it looks like dropout.
 
     A *monotone* pattern (once missing, always missing) is the signature of
@@ -90,6 +91,9 @@ def profile_missing(panel: Panel) -> MissingReport:
     changes what an analyst should do about it.  Retention is reported **per
     arm**: differential dropout is the first thing a trial statistician looks
     for, and it is the pattern under which a completer analysis is most biased.
+
+    *mmrm_available* only steers the advice: with ``--no-mmrm`` the report has
+    no ``[4c]`` section, so pointing the reader at one would be a dead link.
     """
     n = panel.n_subjects
     per_time = {t: len(panel.column(j)) for j, t in enumerate(panel.times)}
@@ -130,7 +134,10 @@ def profile_missing(panel: Panel) -> MissingReport:
         warnings.append(
             "완전자료 비율이 80% 이하입니다. 완전사례(completer) 분석은 탈락이 "
             "무작위가 아닐 때 편향됩니다 — 확증적 주분석으로 쓰지 말고 "
-            "혼합효과모형(MMRM)이나 다중대체를 고려하세요.")
+            + ("[4c] MMRM(부분 관측 대상을 그대로 사용) 결과를 함께 보세요."
+               if mmrm_available else
+               "혼합효과모형이나 다중대체를 고려하세요 "
+               "(--no-mmrm 을 빼면 MMRM 구획이 나옵니다)."))
     if len(labels) >= 2:
         rates = {lab: (c / t if t else float("nan"))
                  for lab, (c, t) in per_group.items() if lab != ALL_LABEL}

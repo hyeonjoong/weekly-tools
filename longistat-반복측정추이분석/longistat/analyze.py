@@ -19,6 +19,7 @@ from .anova import RMAnovaResult, rm_anova
 from .basics import adjust, mean
 from .dataio import Panel
 from .describe import ALL_LABEL, Cell, MissingReport, describe, profile_missing
+from .mmrm import MMRMResult, mmrm_analysis
 from .nonparam import FriedmanResult, friedman_by_group
 from .normality import MAX_RELIABLE_N, shapiro_wilk
 from .posthoc import (ChangeAnalysis, GroupComparison, PairComparison,
@@ -64,7 +65,8 @@ class Options:
     time_values: Optional[List[float]] = None   # real visit spacing (weeks, ...)
     time_unit: str = ""                         # unit label for the slope table
     trend: bool = True                          # polynomial trend contrasts
-    sensitivity: str = "auto"                   # auto | none | locf,bocf,...
+    sensitivity: str = "auto"                   # auto | none | locf,bocf
+    mmrm: bool = True                           # REML mixed model (MAR-valid),...
 
 
 @dataclass
@@ -84,6 +86,8 @@ class Analysis:
     change_param: ChangeAnalysis
     change_rank: ChangeAnalysis
     ancova: Optional[AncovaResult]
+    mmrm: Optional[MMRMResult]
+    mmrm_error: Optional[str]
     trend: Optional[TrendResult]
     sensitivity: Optional[SensitivityResult]
     responder: Optional[ResponderResult]
@@ -210,6 +214,40 @@ def _sensitivity_kinds(spec: str) -> List[str]:
     return kinds
 
 
+def _sig(p: float, alpha: float) -> Optional[bool]:
+    return None if p is None or math.isnan(p) else p < alpha
+
+
+def _mmrm_disagreements(mmrm: MMRMResult, ancova: Optional[AncovaResult],
+                        change: ChangeAnalysis, alpha: float) -> List[str]:
+    """Visits where MMRM and the matching complete-case test disagree on α.
+
+    The comparator is deliberately the *closest* complete-case answer: the
+    baseline-adjusted ANCOVA when there are arms (same estimand), and the
+    within-group change-score t/Wilcoxon when there is only one.
+    """
+    out: List[str] = []
+    for c in mmrm.contrasts:
+        here = _sig(c.p_adj, alpha)
+        if here is None:
+            continue
+        there: Optional[bool] = None
+        if mmrm.grouped and ancova is not None:
+            for a in ancova.contrasts:
+                if (a.time == c.time and a.group_a == c.group_a
+                        and a.group_b == c.group_b):
+                    there = _sig(a.p_adj, alpha)
+        elif not mmrm.grouped:
+            for row in change.within:
+                if row.time == c.time:
+                    there = _sig(row.p_adj, alpha)
+        if there is None or there == here:
+            continue
+        out.append(f"{c.time}: 완전사례 {'유의' if there else '비유의'} → "
+                   f"MMRM {'유의' if here else '비유의'}")
+    return out
+
+
 def analyze(panel: Panel, options: Optional[Options] = None) -> Analysis:
     """Run the full longitudinal analysis pipeline on *panel*."""
     opt = options or Options()
@@ -219,7 +257,7 @@ def analyze(panel: Panel, options: Optional[Options] = None) -> Analysis:
     warnings: List[str] = list(panel.notes)
 
     desc = describe(panel, opt.alpha)
-    miss = profile_missing(panel)
+    miss = profile_missing(panel, mmrm_available=opt.mmrm)
     warnings.extend(miss.warnings)
 
     norm_rows, norm_rejected = _normality(panel, baseline, opt.alpha_norm)
@@ -259,6 +297,19 @@ def analyze(panel: Panel, options: Optional[Options] = None) -> Analysis:
     ancova = ancova_analysis(panel, baseline, opt.alpha, opt.correction,
                              opt.primary_time)
 
+    # ---- MMRM: the only track here that keeps partially observed subjects --
+    mmrm: Optional[MMRMResult] = None
+    mmrm_error: Optional[str] = None
+    if opt.mmrm:
+        skipped: List[str] = []
+        try:
+            mmrm = mmrm_analysis(panel, baseline, opt.alpha, opt.correction,
+                                 opt.primary_time, skipped=skipped)
+        except (ArithmeticError, ValueError) as exc:
+            mmrm_error = str(exc)
+        if mmrm is None and mmrm_error is None and skipped:
+            mmrm_error = skipped[0]
+
     # ---- trend over time -------------------------------------------------
     if opt.time_values is not None and len(opt.time_values) != panel.n_times:
         # Checked here rather than only inside trend_analysis, which returns
@@ -294,8 +345,14 @@ def analyze(panel: Panel, options: Optional[Options] = None) -> Analysis:
             if flips:
                 warnings.append(
                     "결측 대체 방법에 따라 결론이 달라집니다 — " + " / ".join(flips)
-                    + " 확증적 분석이라면 MMRM(R nlme·lme4, SAS PROC MIXED)을 "
-                      "쓰세요.")
+                    + (" MAR 가정에서 타당한 [4c] MMRM 결과와 함께 보세요 "
+                       "(주분석은 계획서에 사전 지정된 것이어야 합니다)."
+                       if mmrm is not None else
+                       (" --no-mmrm 을 빼고 다시 돌리면 [4c] MMRM 이 "
+                        "부분 관측 대상까지 쓴 답을 보여 줍니다."
+                        if not opt.mmrm else
+                        " 확증적 분석이라면 MMRM(R mmrm·nlme, SAS PROC MIXED)을 "
+                        "쓰세요.")))
 
     # ---- responder / RCI -------------------------------------------------
     responder: Optional[ResponderResult] = None
@@ -334,6 +391,27 @@ def analyze(panel: Panel, options: Optional[Options] = None) -> Analysis:
     else:
         recommended = "parametric"
         reason = "Shapiro–Wilk(Holm 보정)에서 정규성 위배 근거가 없습니다."
+
+    if mmrm is not None and not mmrm.converged:
+        warnings.append(
+            f"[4c] MMRM 이 EM 반복 {mmrm.iterations}회 안에 수렴하지 "
+            "않았습니다 — 그 구획의 추정치·p값을 인용하지 마세요 "
+            "(시점을 줄이거나 R mmrm·SAS PROC MIXED 로 확인).")
+    if mmrm is not None and mmrm.n_subjects > len(panel.complete_rows()):
+        # The whole point of MMRM is that it reads subjects the complete-case
+        # tables drop.  If the two tracks then disagree, say so out loud — that
+        # disagreement is a finding about the dropouts, not a rounding artefact.
+        # Compare against whichever change-score track the report actually
+        # prints, or the warning contradicts the [5] table it points at.
+        flipped = _mmrm_disagreements(
+            mmrm, ancova,
+            change_param if recommended == "parametric" else change_rank,
+            opt.alpha)
+        if flipped:
+            warnings.append(
+                "완전사례 분석과 MMRM([4c])의 유의성 판정이 다릅니다 — "
+                + " / ".join(flipped)
+                + ". 탈락이 결과와 무관(MCAR)하지 않다면 MMRM 쪽이 맞습니다.")
 
     # The per-visit group comparison follows the recommended track, so the
     # report never labels a Welch t as a rank test (or the reverse).
@@ -379,7 +457,8 @@ def analyze(panel: Panel, options: Optional[Options] = None) -> Analysis:
         missing=miss, normality=norm_rows, anova=anova, anova_error=anova_error,
         friedman=fried, pairwise_param=pair_param, pairwise_rank=pair_rank,
         between=between, change_param=change_param, change_rank=change_rank,
-        ancova=ancova, trend=trend, sensitivity=sens, responder=responder,
+        ancova=ancova, mmrm=mmrm, mmrm_error=mmrm_error,
+        trend=trend, sensitivity=sens, responder=responder,
         rci=rci, recommended=recommended,
         recommendation_reason=reason, correction_used=correction_used,
         warnings=warnings)

@@ -21,7 +21,9 @@ either direction.  They earn their place as a **stability check**: if the
 observed-case, LOCF and BOCF answers all point the same way, dropout is not
 driving the conclusion, and that sentence is worth a paragraph in the discussion.
 If they disagree, the report says so instead of leaving the reader to guess, and
-that disagreement is the signal to reach for a proper MMRM in R or SAS.
+that disagreement is the signal to lead with the MMRM in :mod:`longistat.mmrm`
+(report section ``[4c]``), which is valid under MAR rather than under the
+"the value simply stopped changing" fiction these two methods encode.
 
 Baseline itself is never imputed — a subject with no baseline has no change score
 to impute *toward*, and inventing one would silently manufacture the primary

@@ -189,13 +189,15 @@ def ancova_analysis(panel: Panel, baseline: int = 0, alpha: float = 0.05,
                     primary=(tname == primary_time)))
         res.contrasts.extend(pairs)
 
-    secondary = [c for c in res.contrasts if not c.primary]
-    for row, padj in zip(secondary,
-                         adjust([r.p_raw for r in secondary], correction)):
-        row.p_adj = padj
-    for row in res.contrasts:
-        if row.primary:
-            row.p_adj = row.p_raw
+    # The primary visit is its own family, not an exemption: with three arms
+    # there are three pairwise contrasts at that visit and reporting all of them
+    # unadjusted inflates the error rate at exactly the timepoint the protocol
+    # cares about.  A family of one is unchanged by Holm/BH.
+    for family in ([c for c in res.contrasts if c.primary],
+                   [c for c in res.contrasts if not c.primary]):
+        for row, padj in zip(family,
+                             adjust([r.p_raw for r in family], correction)):
+            row.p_adj = padj
     if not res.contrasts:
         return None
     return res
