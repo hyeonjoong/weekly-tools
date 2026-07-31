@@ -11,7 +11,9 @@ import sys
 from datetime import date
 from typing import List, Optional, Sequence, Tuple
 
+from .adherence import DEFAULT_PERIOD_DAYS, DEFAULT_TARGET, MAX_WEEKS_CAP
 from .analyze import analyze, to_csv_tables, to_dict
+from .anonymize import anonymize_users
 from .dataio import INPUT_FORMATS, load_events
 from .groups import filter_to_groups
 from .report import render_text
@@ -70,6 +72,22 @@ def _parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
                         "커서 메모리를 소진하는 것을 막는 안전장치")
     p.add_argument("--churn-days", type=int, default=7,
                    help="마지막 활동 후 이 일수 이상 무활동이면 이탈로 간주 (기본: 7)")
+    p.add_argument("--adherence-days", type=int, default=None,
+                   help="프로토콜 준수 기준: 한 주(기본 7일)에 이 일수 이상 사용하면 준수. "
+                        "지정하면 주차별 준수율·준수 참여자 비율을 함께 계산")
+    p.add_argument("--adherence-period", type=int, default=DEFAULT_PERIOD_DAYS,
+                   help=f"준수도의 '한 주' 길이(일). 격주 규약이면 14 (기본: {DEFAULT_PERIOD_DAYS})")
+    p.add_argument("--adherence-target", type=float, default=DEFAULT_TARGET,
+                   help=f"'준수 참여자' 판정 기준 — 자기 관찰 주의 이 비율 이상을 준수 "
+                        f"(0 초과 1 이하, 기본: {DEFAULT_TARGET})")
+    p.add_argument("--adherence-weeks", type=int, default=None,
+                   help="프로토콜 관찰 창(주차 수, 예: 8주 프로토콜이면 8). 주면 이 창을 "
+                        "끝까지 관찰한 완주자만 '준수 참여자' 분모에 넣습니다. "
+                        "기본: 참여자마다 관찰된 만큼(최대 104주)")
+    p.add_argument("--anonymize", action="store_true",
+                   help="사용자 ID 를 U001··· 가명으로 바꿔 출력 (리포트 외부 공유용). "
+                        "대응표는 저장하지 않습니다. 가려지는 것은 ID 뿐 — 이벤트 이름·"
+                        "군 라벨·시각은 원본 그대로입니다")
     p.add_argument("--format", dest="input_format", choices=INPUT_FORMATS, default="auto",
                    help="입력 형식: auto(확장자 판별)/csv/jsonl. .gz 는 자동 해제 (기본: auto)")
     p.add_argument("--json", dest="as_json", action="store_true",
@@ -94,14 +112,16 @@ def _same_file(a: str, b: str) -> bool:
     return False
 
 
-def _write_csv_tables(result, csv_dir: str, input_path: str) -> Tuple[List[str], List[str]]:
+def _write_csv_tables(
+    result, csv_dir: str, input_path: str
+) -> Tuple[List[str], List[str], List[str]]:
     """분석 표들을 csv_dir 에 <name>.csv 로 저장. 저장 실패는 ValueError 로 변환.
 
     표 이름은 고정(`users.csv`, `events.csv` 등)이라 입력 로그와 이름이 겹칠 수 있다.
     입력 파일을 덮어쓰면 원본 데이터가 사라지므로, 쓰기 **전에** 모든 대상 경로를
     입력과 대조해 하나라도 같으면 아무것도 쓰지 않고 오류를 낸다(부분 저장 방지).
 
-    반환: (쓴 경로들, 기존 파일을 덮어쓴 경로들)
+    반환: (쓴 경로들, 기존 파일을 덮어쓴 경로들, 이번 실행이 만들지 않은 남은 .csv 이름들)
     """
     tables = to_csv_tables(result)
     paths = {name: os.path.join(csv_dir, f"{name}.csv") for name in tables}
@@ -122,7 +142,13 @@ def _write_csv_tables(result, csv_dir: str, input_path: str) -> Tuple[List[str],
             written.append(path)
     except OSError as exc:
         raise ValueError(f"CSV 표 저장 실패: {exc}") from exc
-    return written, overwritten
+    # 이전 실행이 남긴 표(예: --adherence-days 없이 다시 돌렸을 때의 adherence_*.csv)는
+    # 손대지 않으므로, 한 폴더에 두 실행의 숫자가 섞인다. 지우지는 않고 알린다.
+    stale = sorted(
+        f for f in os.listdir(csv_dir)
+        if f.endswith(".csv") and f[:-4] not in tables
+    ) if os.path.isdir(csv_dir) else []
+    return written, overwritten, stale
 
 
 def _parse_date(raw: Optional[str], label: str) -> Optional[date]:
@@ -194,6 +220,36 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.max_rows < 0:
         print("오류: --max-rows 는 0 이상이어야 합니다", file=sys.stderr)
         return 1
+    if args.adherence_period < 1:
+        print("오류: --adherence-period 는 1 이상이어야 합니다", file=sys.stderr)
+        return 1
+    if args.adherence_days is not None and not (1 <= args.adherence_days <= args.adherence_period):
+        print(f"오류: --adherence-days 는 1 이상 --adherence-period({args.adherence_period}) "
+              f"이하여야 합니다", file=sys.stderr)
+        return 1
+    if not (math.isfinite(args.adherence_target) and 0.0 < args.adherence_target <= 1.0):
+        print("오류: --adherence-target 은 0 초과 1 이하의 유한한 수여야 합니다", file=sys.stderr)
+        return 1
+    if args.adherence_weeks is not None and not (1 <= args.adherence_weeks <= MAX_WEEKS_CAP):
+        print(f"오류: --adherence-weeks 는 1 이상 {MAX_WEEKS_CAP} 이하여야 합니다 "
+              f"(그보다 긴 창은 주차 표가 수만 줄이 됩니다)", file=sys.stderr)
+        return 1
+    if args.adherence_days is None and (
+        args.adherence_weeks is not None
+        or args.adherence_period != DEFAULT_PERIOD_DAYS
+        or args.adherence_target != DEFAULT_TARGET
+    ):
+        print("오류: --adherence-period/--adherence-target/--adherence-weeks 는 "
+              "--adherence-days 와 함께 써야 합니다", file=sys.stderr)
+        return 1
+    if args.anonymize and args.group_col is not None:
+        # 가명화는 사용자 ID 만 가린다. 군 열이 곧 사용자 열이면 가린 ID 가 군 라벨로
+        # 그대로 리포트에 다시 실려, "가명화했으니 공유해도 된다" 는 판단이 무너진다.
+        if args.group_col.strip().lower() == args.user_col.strip().lower():
+            print("오류: --anonymize 와 함께 --group-col 을 사용자 ID 열로 지정할 수 "
+                  "없습니다 (군 라벨은 가명화되지 않아 ID 가 그대로 노출됩니다)",
+                  file=sys.stderr)
+            return 1
     if args.delimiter is not None and len(args.delimiter) != 1:
         print("오류: --delimiter 는 정확히 1글자여야 합니다", file=sys.stderr)
         return 1
@@ -202,6 +258,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 1
     counters: dict = {}
     dropped_users = 0
+    n_anon = 0
+    anon_prefix = "U"
     try:
         events = load_events(
             args.csv,
@@ -226,6 +284,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             if not wanted:
                 raise ValueError("--only-groups 목록이 비어 있습니다")
             events, dropped_users = filter_to_groups(events, wanted)
+        if args.anonymize:
+            # 군을 고른 뒤에 가명화한다 — 남은 사용자만 번호를 받아 번호가 촘촘해진다.
+            events, n_anon, anon_prefix = anonymize_users(events)
         result = analyze(
             events,
             gap_seconds=args.gap_min * 60.0,
@@ -236,16 +297,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             group_col=args.group_col,
             churn_days=args.churn_days,
             reference_group=args.ref_group,
+            adherence_min_days=args.adherence_days,
+            adherence_period=args.adherence_period,
+            adherence_target=args.adherence_target,
+            adherence_weeks=args.adherence_weeks,
         )
         report = (
             json.dumps(to_dict(result), ensure_ascii=False, indent=2)
             if args.as_json
             else render_text(result, top=args.top)
         )
-        csv_written, csv_overwritten = (
+        csv_written, csv_overwritten, csv_stale = (
             _write_csv_tables(result, args.csv_dir, args.csv)
             if args.csv_dir
-            else ([], [])
+            else ([], [], [])
         )
     except FileNotFoundError:
         print(f"오류: 파일을 찾을 수 없습니다: {args.csv}", file=sys.stderr)
@@ -289,6 +354,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if csv_overwritten:
         print(f"(참고: 기존 파일 {len(csv_overwritten)}개를 덮어썼습니다: "
               f"{', '.join(os.path.basename(p) for p in csv_overwritten)})", file=sys.stderr)
+    if csv_stale:
+        print(f"(주의: 이 폴더에 이번 실행이 만들지 않은 CSV 가 남아 있습니다 "
+              f"({', '.join(csv_stale)}). 이전 실행의 숫자일 수 있으니 확인하세요.)",
+              file=sys.stderr)
 
     skipped = counters.get("skipped_missing", 0) + counters.get("skipped_bad", 0)
     notes = []
@@ -305,6 +374,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if dropped_users:
         print(f"(참고: --only-groups 로 사용자 {dropped_users}명을 제외했습니다.)",
               file=sys.stderr)
+    if n_anon:
+        print(f"(참고: 사용자 {n_anon}명의 ID 를 {anon_prefix}001··· 가명으로 바꿔 "
+              f"출력했습니다. 대응표는 저장하지 않습니다.)", file=sys.stderr)
+        if anon_prefix != "U":
+            print(f"(참고: 입력에 이미 U001 꼴의 ID 가 있어 가명 접두어를 "
+                  f"'{anon_prefix}' 로 바꿨습니다 — 원본 ID 와 섞이지 않도록.)",
+                  file=sys.stderr)
+        print("(경고: 가명화되는 것은 사용자 ID 뿐입니다 — 이벤트 이름"
+              + (", 군 라벨" if args.group_col else "")
+              + ", 타임스탬프는 원본 그대로 실리므로 드문 이벤트나 소수 인원 군은 "
+                "여전히 개인을 좁힐 수 있습니다.)", file=sys.stderr)
     return 0
 
 

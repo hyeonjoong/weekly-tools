@@ -228,7 +228,7 @@ def test_three_arms_show_caveat_and_no_reference_label(tmp_path, capsys):
 
 def test_holm_family_size_caveat_present(tmp_path, capsys):
     assert main([str(_two_arm_csv(tmp_path)), "--group-col", "arm"]) == 0
-    assert "--retention/--funnel 에 따라 달라지므로" in capsys.readouterr().out
+    assert "--retention/--funnel/--adherence-days 에 따라 달라지므로" in capsys.readouterr().out
 
 
 def test_usage_time_definition_footnote_present(tmp_path, capsys):

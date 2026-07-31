@@ -61,7 +61,10 @@ def user_breakdown(events: Sequence[Event]) -> List[UserStat]:
     stats = [
         UserStat(u, counts[u], len(days[u]), first[u], last[u]) for u in counts
     ]
-    stats.sort(key=lambda s: (-s.event_count, s.user))
+    # 동점은 활성일수 → 첫 등장 시각 → ID 순으로 가른다. ID 를 먼저 보면 `--anonymize`
+    # 로 ID 를 바꿨을 때 상위 사용자 표에 다른 사람이 올라와, 원본 리포트와 공유용
+    # 리포트를 나란히 놓고 볼 수 없다.
+    stats.sort(key=lambda s: (-s.event_count, -s.active_days, s.first_seen, s.user))
     return stats
 
 

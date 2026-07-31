@@ -13,6 +13,7 @@ from datetime import date
 from typing import Dict, List, Optional, Sequence
 
 from . import __version__
+from .adherence import Adherence, adherence as compute_adherence
 from .dataio import Event
 from .groups import GroupComparison, compare_groups
 from .metrics import (
@@ -56,6 +57,7 @@ class Analysis:
     funnel_steps: Optional[List[str]]
     retention_mode: str = "exact"
     groups: Optional[GroupComparison] = None
+    adherence: Optional[Adherence] = None
 
 
 def analyze(
@@ -69,6 +71,10 @@ def analyze(
     group_col: Optional[str] = None,
     churn_days: int = 7,
     reference_group: Optional[str] = None,
+    adherence_min_days: Optional[int] = None,
+    adherence_period: int = 7,
+    adherence_target: float = 0.8,
+    adherence_weeks: Optional[int] = None,
 ) -> Analysis:
     if not events:
         raise ValueError("분석할 이벤트가 없습니다 (빈 입력)")
@@ -104,8 +110,24 @@ def analyze(
                 retention_mode=retention_mode,
                 churn_days=churn_days,
                 reference=reference_group,
+                adherence_min_days=adherence_min_days,
+                adherence_period=adherence_period,
+                adherence_target=adherence_target,
+                adherence_weeks=adherence_weeks,
             )
             if group_col
+            else None
+        ),
+        adherence=(
+            compute_adherence(
+                events,
+                min_days=adherence_min_days,
+                period_days=adherence_period,
+                target=adherence_target,
+                confidence=confidence,
+                max_weeks=adherence_weeks,
+            )
+            if adherence_min_days is not None
             else None
         ),
     )
@@ -198,7 +220,56 @@ def to_dict(a: Analysis) -> dict:
             "weekday_labels": _WEEKDAY_KO,
             "peak_hour": a.peak_hour,
         },
+        "adherence": _adherence_to_dict(a.adherence),
         "groups": _groups_to_dict(a.groups),
+    }
+
+
+def _adherence_to_dict(ad: Optional[Adherence]) -> Optional[dict]:
+    """준수도 결과를 JSON 직렬화 가능한 dict 로."""
+    if ad is None:
+        return None
+    return {
+        "min_days": ad.min_days,
+        "period_days": ad.period_days,
+        "target": ad.target,
+        "window_weeks": ad.window_weeks,
+        "observed_weeks": ad.observed_weeks,
+        "required_weeks": ad.required_weeks,
+        "eligible_weeks_range": (
+            list(ad.eligible_weeks_range) if ad.eligible_weeks_range else None
+        ),
+        "n_users": ad.n_users,
+        "n_adherent_users": ad.n_adherent_users,
+        "adherent_rate": (ad.n_adherent_users / ad.n_users) if ad.n_users else None,
+        "adherent_ci": _ci(ad.adherent_ci),
+        "median_user_rate": ad.median_user_rate,
+        "median_streak_weeks": ad.median_streak,
+        "n_no_full_week": ad.n_no_full_week,
+        "n_incomplete": ad.n_incomplete,
+        "notes": ad.notes,
+        "weeks": [
+            {
+                "week": w.week,
+                "eligible": w.eligible,
+                "adherent": w.adherent,
+                "rate": w.rate,
+                "ci": _ci(w.ci),
+                "median_active_days": w.median_active_days,
+            }
+            for w in ad.weeks
+        ],
+        "users": [
+            {
+                "user": u.user,
+                "eligible_weeks": u.eligible_weeks,
+                "adherent_weeks": u.adherent_weeks,
+                "rate": u.rate,
+                "longest_streak_weeks": u.longest_streak,
+                "active_days_in_window": u.active_days_in_window,
+            }
+            for u in ad.users
+        ],
     }
 
 
@@ -233,6 +304,15 @@ def _groups_to_dict(g: Optional[GroupComparison]) -> Optional[dict]:
                 "funnel_completion": (
                     {"completed": s.funnel_completion[0], "entered": s.funnel_completion[1]}
                     if s.funnel_completion is not None
+                    else None
+                ),
+                "adherence": (
+                    {
+                        "adherent_users": s.adherence[0],
+                        "n_users": s.adherence[1],
+                        "median_user_rate": s.median_adherence_rate,
+                    }
+                    if s.adherence is not None
                     else None
                 ),
             }
@@ -316,6 +396,19 @@ def _round(x: Optional[float], nd: int = 4) -> Optional[float]:
     return None if x is None else round(x, nd)
 
 
+# 엑셀/스프레드시트가 수식으로 해석하는 선두 문자. 사용자 ID·이벤트 이름·군 라벨은
+# 입력에서 그대로 오므로, `=cmd|...` 같은 값이 표에 실려 열람자의 엑셀에서 실행되지
+# 않도록 앞에 작은따옴표를 붙인다 (CSV injection 방어; 값 자체는 보존).
+_CSV_FORMULA_LEAD = ("=", "+", "-", "@", "\t", "\r", "\n")
+
+
+def _safe_cell(value):
+    """CSV 셀 하나를 스프레드시트 수식으로 해석되지 않게 다듬는다 (문자열만)."""
+    if isinstance(value, str) and value.startswith(_CSV_FORMULA_LEAD):
+        return "'" + value
+    return value
+
+
 def to_csv_tables(a: Analysis) -> Dict[str, str]:
     """분석 결과를 원고·엑셀에 붙이기 좋은 여러 CSV 표(문자열)로 반환.
 
@@ -329,7 +422,7 @@ def to_csv_tables(a: Analysis) -> Dict[str, str]:
         buf = io.StringIO()
         w = csv.writer(buf)
         w.writerow(header)
-        w.writerows(rows)
+        w.writerows([_safe_cell(c) for c in row] for row in rows)
         return buf.getvalue()
 
     tables["active_users"] = _csv(
@@ -373,6 +466,22 @@ def to_csv_tables(a: Analysis) -> Dict[str, str]:
         ["weekday", "label", "events"],
         [[i, _WEEKDAY_KO[i], a.weekday_hist[i]] for i in range(7)],
     )
+    if a.adherence is not None:
+        ad = a.adherence
+        tables["adherence_weekly"] = _csv(
+            ["week", "eligible", "adherent", "rate", "ci_low", "ci_high",
+             "median_active_days", "min_days", "period_days"],
+            [[w.week, w.eligible, w.adherent, _round(w.rate),
+              _round(w.ci[0]) if w.ci else None, _round(w.ci[1]) if w.ci else None,
+              _round(w.median_active_days, 2), ad.min_days, ad.period_days]
+             for w in ad.weeks],
+        )
+        tables["adherence_users"] = _csv(
+            ["user", "eligible_weeks", "adherent_weeks", "adherence_rate",
+             "longest_streak_weeks", "active_days_in_window"],
+            [[u.user, u.eligible_weeks, u.adherent_weeks, _round(u.rate),
+              u.longest_streak, u.active_days_in_window] for u in ad.users],
+        )
     if a.groups is not None:
         tables.update(_group_tables(a.groups, _csv))
     return tables
@@ -383,10 +492,16 @@ def _group_tables(g: GroupComparison, _csv) -> Dict[str, str]:
     out: Dict[str, str] = {}
     out["group_summary"] = _csv(
         ["group", "n_users", "n_events", "n_sessions", "median_events_per_user",
-         "median_sessions_per_user", "median_minutes_per_user", "median_active_days"],
+         "median_sessions_per_user", "median_minutes_per_user", "median_active_days",
+         "adherent_users", "adherence_denominator", "median_adherence_pct"],
         [[s.group, s.n_users, s.n_events, s.n_sessions,
           _round(s.median_events_per_user, 2), _round(s.median_sessions_per_user, 2),
-          _round(s.median_minutes_per_user, 2), _round(s.median_active_days, 2)]
+          _round(s.median_minutes_per_user, 2), _round(s.median_active_days, 2),
+          s.adherence[0] if s.adherence else None,
+          s.adherence[1] if s.adherence else None,
+          # group_tests.csv 의 '사용자당 준수 주 비율(%)' 과 같은 척도(0~100)로 맞춘다 —
+          # 두 표에 1.0 과 100.0 이 나란히 놓이면 원고에 옮겨 적을 때 틀리기 쉽다.
+          None if s.median_adherence_rate is None else _round(s.median_adherence_rate * 100, 2)]
          for s in g.arms],
     )
     rows = []
