@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "longistat"
+version = "1.0.0"
+description = "반복측정(전-후·다시점) 임상 자료 분석기 — RM/혼합 ANOVA, 구형성 보정, 사후비교, 기저대비 변화량, MCID 반응자, RCI"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "hyeonjoong", email = "hyeonjoongk@gmail.com" }]
+keywords = ["statistics", "repeated-measures", "anova", "clinical-trial",
+            "mcid", "responder", "longitudinal"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+]
+dependencies = []
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[project.scripts]
+longistat = "longistat.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/hyeonjoong/weekly-tools"
+
+[tool.setuptools]
+packages = ["longistat"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
