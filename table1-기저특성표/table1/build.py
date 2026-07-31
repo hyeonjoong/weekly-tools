@@ -9,7 +9,7 @@ and accounts for missing data. The output is a structured ``Table1`` object that
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Dict, List, Optional, Sequence
 
 from . import cat_tests, smd, weights as wstats
@@ -32,6 +32,7 @@ from .effects import (
 )
 from .multiplicity import adjust_pvalues, normalize_method
 from .normality import shapiro_wilk
+from .trend import cochran_armitage, jonckheere_terpstra, linear_contrast
 from .tests_stat import (
     kruskal_wallis,
     levene,
@@ -52,23 +53,27 @@ __all__ = ["Options", "Table1", "ContinuousRow", "CategoricalRow", "build_table1
 _MSG = {
     "ko": {
         "shapiro_cap": "표본이 {n}개를 초과해 정규성 검정은 {n}개 부분표본으로 근사했습니다.",
-        "normality_untestable": "정규성 검정 불가(각 그룹 n<3 또는 상수)",
+        "normality_untestable": "정규성 검정 불가(각 그룹 n이 3 미만이거나 상수)",
         "skip_lt2": "한 그룹의 관측치가 2개 미만 → 검정 생략",
         "skip_groups_lt2": "분석 가능한 그룹이 2개 미만 → 검정 생략",
-        "anova_levene": "등분산 가정 위배(Levene p<{alpha:.2g}) → ANOVA 해석 주의 (Welch/비모수 고려)",
+        "anova_levene": "등분산 가정 위배(Levene p가 {alpha:.2g} 미만) → ANOVA 해석 주의 (Welch/비모수 고려)",
         "test_failed": "검정을 계산할 수 없습니다(자료 구조가 검정에 부적합).",
         "unparseable": ("값 {n}개를 숫자로 해석할 수 없어 요약에서 제외했습니다"
                         "(예: {ex}). 부등호·단위·백분율 기호·유럽식 콤마 소수 등을 "
                         "제거하거나 결측으로 두세요 — 이 값들은 평균/중앙값에 "
                         "반영되지 않습니다."),
         "stat_undefined": "검정 통계량이 정의되지 않음(예: 분산 0) → p값 생략",
-        "chi_expected_low": "기대빈도 <5 셀 존재 → χ² 근사 주의(Fisher 권장)",
+        "chi_expected_low": "기대빈도 5 미만 셀 존재 → χ² 근사 주의(Fisher 권장)",
         "warn_group_missing": "그룹 값이 결측이라 제외한 행: {n}개",
         "warn_group_case": ("대소문자만 다른 그룹 라벨이 별개의 군으로 처리됨: {labels}. "
                             "같은 군이면 라벨 표기를 통일하세요."),
         "warn_high_missing": ("변수 '{var}' 는 결측이 {pct:.0f}%로 많습니다 → 요약 통계가 "
                               "소수 관측에 기반하므로 해석에 주의하세요."),
         "warn_var_all_missing": "변수 '{var}' 는 값이 모두 결측이라 건너뜀",
+        "warn_var_overflow": ("변수 '{var}' 는 값의 크기가 너무 커서(예: 1e308 규모) "
+                              "계산할 수 없어 건너뛰었습니다. 단위를 바꿔 값을 "
+                              "축소한 뒤 다시 실행하세요 — 나머지 변수는 그대로 "
+                              "요약했습니다."),
         "warn_int_code": ("변수 '{var}' 는 정수값이 {n}종뿐이라 연속형으로 처리했습니다"
                           "(정규성에 따라 평균±SD 또는 중앙값[IQR]). 순서형/범주형 "
                           "코드라면 '--categorical {var}' 를 쓰세요."),
@@ -87,7 +92,7 @@ _MSG = {
                                 "다중비교 보정의 가족 크기가 부풀려집니다.)"),
         "warn_vars_is_group": ("--vars 의 '{var}' 는 그룹(--group) 열이라 "
                                "제외했습니다. 자기 자신과의 비교는 항상 "
-                               "p<0.001·SMD=∞ 가 되어 의미가 없습니다."),
+                               "p 0.001 미만·SMD=∞ 가 되어 의미가 없습니다."),
         "warn_forced_cat_identifier": (
             "변수 '{var}' 는 '--categorical' 로 지정하셔서 고유값 {n}개를 모두 "
             "표에 실었습니다. 환자ID·이름 등 식별자라면 이 표를 공유할 때 개인이 "
@@ -118,16 +123,42 @@ _MSG = {
                                "보고하세요(Austin과 Stuart 2015 권고)."),
         "warn_weighted_no_effect": ("가중 분석에서는 군간 차이(95% CI) 열을 생략했습니다"
                                     "(설계기반 분산 필요). 가중 SMD를 사용하세요."),
+        "warn_trend_weighted": ("가중 분석에서는 경향성 검정(p for trend)을 생략했습니다"
+                                "(설계기반 분산 필요)."),
+        "warn_trend_two_groups": ("군이 2개뿐이라 경향성 검정은 위의 2군 검정과 "
+                                  "사실상 같은 정보입니다. Student t·Pearson χ² 와는 "
+                                  "정확히 일치하지만, 보고된 Mann-Whitney p는 연속성 "
+                                  "보정을, Welch t는 비합동 분산을, Fisher exact는 "
+                                  "아예 다른(정확) 계산을 쓰므로 그 경우에는 값이 "
+                                  "다릅니다. 경향성 검정은 3군 "
+                                  "이상의 용량·사분위 등 순서형 군에 쓰세요."),
+        "warn_trend_order": ("경향성 검정(p for trend)은 표에 표시된 군 순서를 "
+                             "'낮음→높음'으로 가정합니다(현재 순서: {order}). "
+                             "'--group-order' 로 순서를 명시하세요."),
+        "warn_group_order_unknown": ("--group-order 에 지정한 군을 자료에서 찾을 수 "
+                                     "없어 무시했습니다: {labels}."),
+        "warn_group_order_partial": ("--group-order 에 없는 군은 뒤에 원래 순서대로 "
+                                     "붙였습니다: {labels}."),
+        "trend_nominal": ("수준이 3개 이상인 (순서 없는) 범주형이라 경향성 검정을 "
+                          "적용하지 않았습니다 — 단일 경향 방향이 정의되지 않습니다."),
+        "trend_failed": "경향성 검정을 계산할 수 없습니다(자료가 부적합).",
+        "trend_dropped_groups": ("경향성 검정에서 이 변수의 관측치가 없는 군을 "
+                                 "제외했습니다: {groups}. 실제로 사용한 순서·점수는 "
+                                 "{scores} 입니다(용량축이 표의 머리글과 다릅니다)."),
+        "trend_one_level": ("관측된 수준이 1개뿐이라 경향성 검정을 적용할 수 "
+                            "없습니다."),
+        "test_dropped_groups": ("이 변수의 관측치가 없는 군을 검정에서 제외했습니다: "
+                                "{groups}. 남은 군끼리만 비교한 p값입니다."),
     },
     "en": {
         "shapiro_cap": ("sample exceeded {n}; normality was tested on a "
                         "{n}-point subsample."),
-        "normality_untestable": ("normality not testable (each group n<3 or "
-                                 "constant)"),
-        "skip_lt2": "a group has <2 observations → test skipped",
+        "normality_untestable": ("normality not testable (each group n under 3 "
+                                 "or constant)"),
+        "skip_lt2": "a group has fewer than 2 observations → test skipped",
         "skip_groups_lt2": "fewer than 2 analyzable groups → test skipped",
         "anova_levene": ("equal-variance assumption violated (Levene "
-                         "p<{alpha:.2g}) → interpret ANOVA with caution "
+                         "p under {alpha:.2g}) → interpret ANOVA with caution "
                          "(consider Welch/nonparametric)"),
         "test_failed": ("test could not be computed (data structure unsuitable "
                         "for the test)."),
@@ -138,7 +169,7 @@ _MSG = {
                         "the mean/median."),
         "stat_undefined": ("test statistic undefined (e.g. zero variance) → "
                            "p-value omitted"),
-        "chi_expected_low": ("cells with expected count <5 → chi-square "
+        "chi_expected_low": ("cells with expected count under 5 → chi-square "
                              "approximation unreliable (Fisher recommended)"),
         "warn_group_missing": "rows excluded for a missing group value: {n}",
         "warn_group_case": ("group labels differing only in case are treated as "
@@ -148,6 +179,10 @@ _MSG = {
                               "summary rests on few observations; interpret with "
                               "caution."),
         "warn_var_all_missing": "variable '{var}' skipped: all values missing",
+        "warn_var_overflow": ("variable '{var}' was skipped: its magnitudes "
+                              "overflow the computation (e.g. 1e308 scale). "
+                              "Rescale the units and re-run — every other "
+                              "variable was summarized normally."),
         "warn_int_code": ("variable '{var}' had only {n} distinct integer "
                           "values and was treated as continuous (mean±SD or "
                           "median[IQR] by normality). If it is an "
@@ -169,7 +204,7 @@ _MSG = {
                                 "inflate the multiplicity family size.)"),
         "warn_vars_is_group": ("--vars listed '{var}', which is the --group "
                                "column, so it was dropped: comparing a column "
-                               "against itself always gives p<0.001 and "
+                               "against itself always gives p under 0.001 and "
                                "SMD=inf."),
         "warn_forced_cat_identifier": (
             "variable '{var}' was forced with '--categorical', so all {n} "
@@ -214,6 +249,40 @@ _MSG = {
                                     "column is omitted under weighting "
                                     "(design-based variances required); use "
                                     "the weighted SMD."),
+        "warn_trend_weighted": ("weighted tables omit the trend test (p for "
+                                "trend); it would need design-based variances."),
+        "warn_trend_two_groups": ("with only two groups the trend test carries "
+                                  "essentially the same information as the "
+                                  "two-group test above. It matches Student t "
+                                  "and Pearson chi-square exactly, but differs "
+                                  "from the reported Mann-Whitney p "
+                                  "(continuity-corrected), Welch t (unpooled "
+                                  "variance) and Fisher exact (a different, "
+                                  "exact calculation). Use it for 3 or "
+                                  "more ordered groups such as dose levels or "
+                                  "quartiles."),
+        "warn_trend_order": ("the trend test (p for trend) assumes the group "
+                             "columns run from low to high in the order "
+                             "shown "
+                             "(current order: {order}). Set it explicitly with "
+                             "'--group-order'."),
+        "warn_group_order_unknown": ("--group-order lists group(s) not present "
+                                     "in the data; ignored: {labels}."),
+        "warn_group_order_partial": ("group(s) missing from --group-order were "
+                                     "appended in their original order: "
+                                     "{labels}."),
+        "trend_nominal": ("no trend test for an unordered categorical with 3+ "
+                          "levels — a single direction of trend is undefined."),
+        "trend_failed": "trend test could not be computed (unsuitable data).",
+        "trend_dropped_groups": ("group(s) with no observation of this variable "
+                                 "were excluded from the trend test: {groups}. "
+                                 "The axis actually used was {scores} — it "
+                                 "differs from the table header."),
+        "trend_one_level": ("only one level was observed, so no trend test "
+                            "applies."),
+        "test_dropped_groups": ("group(s) with no observation of this variable "
+                                "were excluded from the test: {groups}. The "
+                                "p-value compares only the remaining groups."),
     },
 }
 
@@ -266,6 +335,20 @@ class Options:
                                    # Table 1: weighted summaries + weighted SMD,
                                    # with p-values/effects suppressed (they
                                    # would need design-based variances).
+    group_order: Optional[List[str]] = None  # explicit left-to-right order of
+                                   # the group columns. Journals expect
+                                   # Placebo | Low | High, not whichever arm
+                                   # happens to appear first in the file — and
+                                   # a trend test is only meaningful along a
+                                   # deliberate ordering.
+    trend: bool = False            # add a "p for trend" column across ORDERED
+                                   # groups (dose levels, exposure quartiles):
+                                   # linear ANOVA contrast / Jonckheere-Terpstra
+                                   # / Cochran-Armitage, matched to the row's
+                                   # reported test family.
+    trend_scores: Optional[List[float]] = None  # numeric scores per group for
+                                   # the trend test (e.g. 0,10,40 mg). Default
+                                   # = equally spaced 1..k.
 
 
 @dataclass
@@ -301,6 +384,11 @@ class ContinuousRow:
     kind: str = "continuous"
     effect: Optional[Effect] = None
     p_adjusted: Optional[float] = None
+    # --trend only: p for a monotone trend across ordered groups, and the name
+    # of the test that produced it (kept separate from ``pvalue``/``test_name``
+    # so the omnibus comparison is never silently replaced by the trend test).
+    trend_p: Optional[float] = None
+    trend_test: Optional[str] = None
 
 
 @dataclass
@@ -330,6 +418,8 @@ class CategoricalRow:
     kind: str = "categorical"
     effect: Optional[Effect] = None
     p_adjusted: Optional[float] = None
+    trend_p: Optional[float] = None
+    trend_test: Optional[str] = None
     # Weighted mode only (None otherwise): the per-group weight totals that act
     # as the percentage basis, and their sum.
     wdenom_per_group: Optional[List[float]] = None
@@ -546,8 +636,34 @@ def _is_nonnormal(group_vals: Sequence[Sequence[float]], alpha: float,
 # --------------------------------------------------------------------------- #
 # continuous
 # --------------------------------------------------------------------------- #
+def _fmt_score_note(x: float) -> str:
+    return str(int(x)) if float(x).is_integer() else f"{x:g}"
+
+
+def _trend_drop_note(opt: Options, group_names: Optional[Sequence[str]],
+                     kept_mask: Sequence[bool], used_scores: Sequence[float]
+                     ) -> Optional[str]:
+    """Note naming the arms an empty cell removed from the trend axis.
+
+    Dropping an empty arm together with its score is the only defensible
+    arithmetic, but it silently shortens the dose axis for THAT ROW while the
+    table-level legend still advertises the full score set. Say so on the row.
+    """
+    if all(kept_mask) or group_names is None:
+        return None
+    dropped = [g for g, keep in zip(group_names, kept_mask) if not keep]
+    if not dropped:
+        return None
+    kept = [g for g, keep in zip(group_names, kept_mask) if keep]
+    axis = ", ".join(f"{g}={_fmt_score_note(x)}"
+                     for g, x in zip(kept, used_scores))
+    return _msg(opt.lang, "trend_dropped_groups",
+                groups=", ".join(dropped), scores=axis)
+
+
 def _continuous_row(name: str, group_cells: List[List[str]], opt: Options,
-                    group_weights: Optional[List[List[float]]] = None
+                    group_weights: Optional[List[List[float]]] = None,
+                    group_names: Optional[Sequence[str]] = None
                     ) -> ContinuousRow:
     weighted = group_weights is not None
     per_vals: List[List[float]] = []
@@ -664,10 +780,27 @@ def _continuous_row(name: str, group_cells: List[List[str]], opt: Options,
                     test_name = "Welch t"
                 pvalue = res.pvalue
         else:  # k >= 3
-            if any(s < 1 for s in sizes) or sum(1 for s in sizes if s >= 1) < 2:
+            # An arm where this variable was never collected must not blank the
+            # comparison for every other arm: drop the empty arms, test the rest,
+            # and say which ones were left out. (The old guard refused the whole
+            # test AND labelled it "fewer than 2 analyzable groups", which was
+            # simply untrue when three arms had data.)
+            analyzable = [i for i, sz in enumerate(sizes) if sz >= 1]
+            if len(analyzable) < 2:
                 notes.append(_msg(opt.lang, "skip_groups_lt2"))
+                per_vals_test = []
+            else:
+                per_vals_test = [per_vals[i] for i in analyzable]
+                if len(analyzable) < k:
+                    notes.append(_msg(
+                        opt.lang, "test_dropped_groups",
+                        groups=", ".join(
+                            (group_names[i] if group_names else str(i + 1))
+                            for i in range(k) if i not in set(analyzable))))
+            if not per_vals_test:
+                pass
             elif use_nonparam:
-                res = kruskal_wallis(per_vals)
+                res = kruskal_wallis(per_vals_test)
                 test_name, pvalue = "Kruskal-Wallis", res.pvalue
             else:
                 # welch/student only alter the 2-group test; for k>=3 there is no
@@ -675,10 +808,11 @@ def _continuous_row(name: str, group_cells: List[List[str]], opt: Options,
                 # caution note is a pre-test artifact of "auto" mode — suppress it
                 # when the user has explicitly fixed the test (it would otherwise
                 # recommend the very thing they just chose).
-                res = one_way_anova(per_vals)
+                res = one_way_anova(per_vals_test)
                 test_name, pvalue = "One-way ANOVA", res.pvalue
-                if opt.test_cont == "auto" and all(s >= 2 for s in sizes):
-                    lev = levene(per_vals)
+                if opt.test_cont == "auto" and all(len(v) >= 2
+                                                   for v in per_vals_test):
+                    lev = levene(per_vals_test)
                     if lev.pvalue < opt.alpha_norm:
                         notes.append(_msg(opt.lang, "anova_levene",
                                           alpha=opt.alpha_norm))
@@ -715,10 +849,39 @@ def _continuous_row(name: str, group_cells: List[List[str]], opt: Options,
             elif test_name == "Mann-Whitney U":
                 effect_val = hodges_lehmann(per_vals[0], per_vals[1])
 
+    # p for trend across ORDERED groups. Kept in its own field so the omnibus
+    # p-value stays untouched: a reviewer must be able to see both "do the arms
+    # differ at all" and "is the difference monotone in dose".
+    trend_p: Optional[float] = None
+    trend_test: Optional[str] = None
+    if opt.trend and not weighted and k >= 2:
+        try:
+            if use_nonparam:
+                # Rank-based row -> rank-based trend. Jonckheere-Terpstra uses
+                # only the group ORDER, so --trend-scores cannot move it; the
+                # README says so rather than pretending the scores applied.
+                tr = jonckheere_terpstra(per_vals)
+                trend_test = "Jonckheere-Terpstra"
+            else:
+                tr = linear_contrast(per_vals, opt.trend_scores)
+                trend_test = "linear contrast"
+            trend_p = tr.pvalue
+            if trend_p is not None and not math.isfinite(trend_p):
+                trend_p, trend_test = None, None
+            else:
+                drop = _trend_drop_note(opt, group_names,
+                                        [len(v) > 0 for v in per_vals],
+                                        tr.scores)
+                if drop:
+                    notes.append(drop)
+        except (ValueError, ZeroDivisionError, OverflowError):
+            notes.append(_msg(opt.lang, "trend_failed"))
+
     return ContinuousRow(
         name=name, per_group=per_group, overall=overall, display=display,
         test_name=test_name, pvalue=pvalue, smd=smd_val,
-        n_missing_total=sum(per_missing), notes=notes, effect=effect_val)
+        n_missing_total=sum(per_missing), notes=notes, effect=effect_val,
+        trend_p=trend_p, trend_test=trend_test)
 
 
 # --------------------------------------------------------------------------- #
@@ -733,7 +896,8 @@ def _order_levels(labels: Sequence[str]) -> List[str]:
 
 
 def _categorical_row(name: str, group_cells: List[List[str]], opt: Options,
-                     group_weights: Optional[List[List[float]]] = None
+                     group_weights: Optional[List[List[float]]] = None,
+                     group_names: Optional[Sequence[str]] = None
                      ) -> CategoricalRow:
     weighted = group_weights is not None
     k = len(group_cells)
@@ -856,13 +1020,51 @@ def _categorical_row(name: str, group_cells: List[List[str]], opt: Options,
                 effect_val.index_level = real_levels[index]
                 effect_val.reference_level = real_levels[1 - index]
 
+    # Cochran-Armitage trend across ordered groups, for a BINARY row only.
+    # An unordered 3+ level categorical has no single direction of trend, so it
+    # gets a note instead of a number the reader would have to guess at.
+    trend_p: Optional[float] = None
+    trend_test: Optional[str] = None
+    if opt.trend and not weighted and k >= 2:
+        if n_real == 2:
+            # The index level matches the one --effect / --binary-single show,
+            # so "p for trend" refers to the proportion actually printed. (The
+            # two-sided p is identical for either level, but naming it keeps
+            # the legend honest.)
+            index = 1
+            ref_level = opt.ref.get(name)
+            if ref_level is not None and ref_level == real_levels[1]:
+                index = 0
+            events = [counts[index][gi] for gi in range(k)]
+            totals = [sum(counts[li][gi] for li in test_levels)
+                      for gi in range(k)]
+            try:
+                tr = cochran_armitage(events, totals, opt.trend_scores)
+                trend_p, trend_test = tr.pvalue, "Cochran-Armitage"
+                if not math.isfinite(trend_p):
+                    trend_p, trend_test = None, None
+                else:
+                    drop = _trend_drop_note(opt, group_names,
+                                            [t > 0 for t in totals], tr.scores)
+                    if drop:
+                        notes.append(drop)
+            except (ValueError, ZeroDivisionError, OverflowError):
+                notes.append(_msg(opt.lang, "trend_failed"))
+        elif n_real > 2:
+            notes.append(_msg(opt.lang, "trend_nominal"))
+        else:
+            # 0 or 1 observed level: no trend exists, and staying silent would
+            # leave a blank cell the reader has to guess at.
+            notes.append(_msg(opt.lang, "trend_one_level"))
+
     return CategoricalRow(
         name=name, levels=cat_levels, denom_per_group=denom_per_group,
         overall_denom=overall_denom, missing_per_group=missing_per_group,
         test_name=test_name, pvalue=pvalue, smd=smd_val,
         n_missing_total=sum(missing_per_group), pct=opt.pct, notes=notes,
         effect=effect_val, wdenom_per_group=wdenom_per_group,
-        woverall_denom=woverall_denom)
+        woverall_denom=woverall_denom,
+        trend_p=trend_p, trend_test=trend_test)
 
 
 # --------------------------------------------------------------------------- #
@@ -964,6 +1166,7 @@ def build_table1(frame: Frame, opt: Options) -> Table1:
                     if not weighted or i in weight_by_row]
         group_order = [overall_label]
         row_index_by_group = {overall_label: list(keep_idx)}
+        order_is_explicit = False
     else:
         # Retain rows with a non-missing group; record group order (first-seen).
         group_raw = frame.column(opt.group_col)
@@ -1019,11 +1222,89 @@ def build_table1(frame: Frame, opt: Options) -> Table1:
                 warnings.append(_msg(opt.lang, "warn_group_case",
                                      labels=", ".join(variants)))
 
+        # Explicit column order. Journals print Placebo | Low | High, and the
+        # trend test reads the columns left-to-right as the dose axis, so
+        # "whichever arm happens to be on row 1 of the CSV" is the wrong
+        # default to be stuck with. Unlisted arms are appended (never dropped:
+        # silently omitting a study arm from Table 1 is far worse than an
+        # unexpected column order) and both mismatch directions warn.
+        # Whether the user's list ends up fully determining the column order.
+        # Only then may the "--trend assumes this order" nag be suppressed: a
+        # typo that matched nothing, or a list that covered only some arms,
+        # leaves part (or all) of the dose axis at the mercy of CSV row order.
+        order_is_explicit = False
+        if opt.group_order:
+            wanted = [g.strip() for g in opt.group_order if g.strip()]
+            known = set(group_order)
+            unknown = [g for g in wanted if g not in known]
+            if unknown:
+                warnings.append(_msg(opt.lang, "warn_group_order_unknown",
+                                     labels=", ".join(unknown)))
+            ordered = list(dict.fromkeys(g for g in wanted if g in known))
+            leftover = [g for g in group_order if g not in set(ordered)]
+            if leftover and ordered:
+                warnings.append(_msg(opt.lang, "warn_group_order_partial",
+                                     labels=", ".join(leftover)))
+            if ordered:
+                group_order = ordered + leftover
+            order_is_explicit = bool(ordered) and not leftover
+            if ordered and leftover and opt.trend:
+                # Half-specified axis: the arms the user did name are placed,
+                # the rest land wherever the CSV happened to put them — and the
+                # p for trend would be computed on that mixture. Ask for the
+                # full list rather than print a number on a half-guessed axis.
+                raise ValueError(
+                    "'--trend' 와 '--group-order' 를 함께 쓸 때는 모든 군을 "
+                    f"순서대로 적어야 합니다. 빠진 군: {', '.join(leftover)} "
+                    f"(자료의 군: {', '.join(group_order)}).")
+            if not ordered and opt.trend:
+                # Nothing matched, so the trend axis would silently be the CSV's
+                # incidental row order — with the user's --trend-scores bound to
+                # arbitrary columns. Same class of error as a score-count
+                # mismatch, so fail the same way instead of reporting a number
+                # computed on an axis nobody asked for.
+                raise ValueError(
+                    "'--group-order' 에 적은 군이 자료에 하나도 없습니다"
+                    f"(지정: {', '.join(wanted)} / 자료: {', '.join(group_order)}). "
+                    "'--trend' 는 이 순서를 용량축으로 쓰므로, 오타를 고치거나 "
+                    "'--group-order' 를 빼고 실행하세요.")
+
         row_index_by_group = {g: [] for g in group_order}
         for i in keep_idx:
             row_index_by_group[group_raw[i].strip()].append(i)
     group_sizes = [len(row_index_by_group[g]) for g in group_order]
     overall_size = sum(group_sizes)
+
+    # --trend gating, decided ONCE here so every row and every renderer agrees.
+    trend_on = bool(opt.trend) and not single_group
+    if opt.trend:
+        if single_group:
+            raise ValueError(
+                "'--trend' 는 순서형 군 비교용입니다 — '--group' 열을 지정하세요.")
+        if opt.trend_scores is not None and \
+                len(opt.trend_scores) != len(group_order):
+            # Misaligned scores would silently test the wrong dose axis, so this
+            # is a hard error rather than a warning.
+            raise ValueError(
+                f"'--trend-scores' 의 개수({len(opt.trend_scores)})가 군의 개수"
+                f"({len(group_order)}: {', '.join(group_order)})와 다릅니다. "
+                "표에 나오는 군 순서대로 같은 개수의 점수를 주세요.")
+        if weighted:
+            trend_on = False
+            warnings.append(_msg(opt.lang, "warn_trend_weighted"))
+        else:
+            if len(group_order) == 2:
+                warnings.append(_msg(opt.lang, "warn_trend_two_groups"))
+            if not order_is_explicit:
+                # Nag whenever any part of the ordering is incidental (first-seen
+                # in the file). Someone whose --group-order covered every arm has
+                # already made the dose axis explicit; a partial list has not.
+                warnings.append(_msg(opt.lang, "warn_trend_order",
+                                     order=" → ".join(group_order)))
+    # Rows read opt.trend; honour the gate without mutating the caller's
+    # Options object (it is reused across renders and by library callers).
+    if bool(opt.trend) != trend_on:
+        opt = replace(opt, trend=trend_on)
 
     forced_cont = set(opt.continuous)
     forced_cat = set(opt.categorical)
@@ -1129,13 +1410,21 @@ def build_table1(frame: Frame, opt: Options) -> Table1:
                         float(x).is_integer() for x in distinct):
                     warnings.append(_msg(opt.lang, "warn_int_code",
                                          var=var, n=len(distinct)))
-            crow = _continuous_row(var, group_cells, opt, group_weights)
+            try:
+                crow = _continuous_row(var, group_cells, opt, group_weights,
+                                       group_order)
+            except OverflowError:
+                # One 1e300 cell in one column must not cost the researcher the
+                # whole table — skip that variable and say why.
+                warnings.append(_msg(opt.lang, "warn_var_overflow", var=var))
+                continue
             _warn_high_missing(crow)
             rows.append(crow)
         else:
             # ID-like columns are already filtered out above (_identifier_skip),
             # before any warning that could quote their raw cells.
-            crow = _categorical_row(var, group_cells, opt, group_weights)
+            crow = _categorical_row(var, group_cells, opt, group_weights,
+                                    group_order)
             # If a --ref level was given for this column but never appears in the
             # data, warn instead of silently falling back to the default
             # reference (a typo would otherwise pick the unintended level).
@@ -1190,6 +1479,11 @@ def build_table1(frame: Frame, opt: Options) -> Table1:
         "effect": (bool(opt.effect) and not weighted
                    and (len(group_order) == 2 or single_group)),
         "weighted": weighted,
+        # A trend column exists only when --trend survived the gates above
+        # (grouped, unweighted). Renderers read this rather than re-deriving it.
+        "trend": trend_on,
+        "trend_scores": (list(opt.trend_scores)
+                         if (trend_on and opt.trend_scores) else None),
         "weight_col": opt.weight_col,
         "weight_sums": wsums,
         "ess": esss,

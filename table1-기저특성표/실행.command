@@ -9,14 +9,16 @@ echo "   · 변수별 연속형/범주형 자동 판별 (평균±SD 또는 중�
 echo "   · 정규성·등분산 점검 후 알맞은 검정 자동 선택 (t/Welch/MWU/ANOVA/KW,"
 echo "     범주형은 카이제곱/Fisher)"
 echo "   · 두 군 표준화 평균차(SMD)·차이(95% CI)·다중비교 보정 + 결측 정리,"
-echo "     Markdown/CSV/TSV/JSON/HTML 출력 (군 열 없이 전체 코호트 요약도 가능)"
+echo "     Markdown/CSV/TSV/JSON/HTML/LaTeX 출력 (군 열 없이 전체 코호트 요약도 가능)"
 echo "   · 엑셀(.xlsx) 입력, IPTW/성향점수 가중표(--weights: 가중 SMD·ESS)"
+echo "   · 용량·사분위 같은 순서형 군의 경향성 p값(--trend: p for trend)"
 echo ""
 echo "  내 데이터로 실행:"
 echo "    python3 -m table1.cli 내파일.csv --group 군열이름"
 echo "    python3 -m table1.cli 내파일.csv --group arm --format csv -o 표1.csv"
 echo "    python3 -m table1.cli 내파일.xlsx --group arm            # 엑셀 그대로"
 echo "    python3 -m table1.cli 내파일.csv --group arm -w iptw     # IPTW 가중표"
+echo "    python3 -m table1.cli 내파일.csv -g dose --group-order placebo,low,high --trend"
 echo "=================================================================="
 echo ""
 
@@ -38,6 +40,14 @@ echo "### 예제) 성향점수(IPTW) 가중표 — 가중 SMD로 균형 확인"
 echo "\$ table1 examples/psm_weighted.csv --group cohort --weights iptw --vars age,sex,bmi,copd"
 echo ""
 run examples/psm_weighted.csv --group cohort --weights iptw --vars age,sex,bmi,copd
+
+echo ""
+echo "### 예제) 용량군(placebo<low<high) 경향성 p값 — 순서를 이용해 검정력 향상"
+echo "\$ table1 examples/dose_trend.csv --group dose --group-order placebo,low,high --trend --trend-scores 0,10,40 --nonnormal crp"
+echo ""
+run examples/dose_trend.csv --group dose --group-order placebo,low,high \
+    --trend --trend-scores 0,10,40 --nonnormal crp \
+    --vars age,sex,bmi,sbp,crp,ae_serious
 
 echo ""
 echo "### 같은 표를 CSV로 저장하려면:"

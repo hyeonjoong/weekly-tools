@@ -140,7 +140,8 @@ def _sniff_delimiter(sample: str) -> str:
 
 
 def load_frame(path: str, delimiter: Optional[str] = None,
-               sheet: Optional[str] = None) -> Frame:
+               sheet: Optional[str] = None,
+               encoding: Optional[str] = None) -> Frame:
     """Load a CSV or .xlsx worksheet into a Frame. Raises ValueError / OSError.
 
     ``path == "-"`` reads the CSV from standard input, so the tool can sit in a
@@ -152,6 +153,10 @@ def load_frame(path: str, delimiter: Optional[str] = None,
     rejected rather than silently ignored.
     """
     if path != "-" and is_xlsx(path):
+        if encoding is not None:
+            raise ValueError(
+                "--encoding 은 CSV 전용입니다. 엑셀(.xlsx) 파일에는 쓸 수 "
+                "없습니다(워크북은 인코딩이 파일 안에 정의되어 있습니다).")
         if delimiter is not None:
             raise ValueError(
                 "--delimiter 는 CSV 전용입니다. 엑셀(.xlsx) 파일에는 쓸 수 "
@@ -176,21 +181,27 @@ def load_frame(path: str, delimiter: Optional[str] = None,
         # non-UTF-8 message as for a file.
         raw = sys.stdin.buffer.read()
         try:
-            text = raw.decode("utf-8-sig")
+            text = raw.decode(encoding or "utf-8-sig")
         except UnicodeDecodeError:
             raise ValueError(
-                "표준입력(stdin)을 UTF-8로 읽을 수 없습니다. "
-                "'CSV UTF-8'로 인코딩해 전달하세요.")
+                f"표준입력(stdin)을 {encoding or 'UTF-8'}로 읽을 수 없습니다. "
+                "'CSV UTF-8'로 인코딩해 전달하거나 --encoding 으로 지정하세요.")
+        except LookupError:
+            raise ValueError(_bad_encoding_msg(encoding))
     else:
         try:
-            with open(path, "r", newline="", encoding="utf-8-sig") as fh:
+            with open(path, "r", newline="",
+                      encoding=encoding or "utf-8-sig") as fh:
                 text = fh.read()
         except (FileNotFoundError, IsADirectoryError, PermissionError):
             raise
+        except LookupError:
+            raise ValueError(_bad_encoding_msg(encoding))
         except UnicodeDecodeError:
             raise ValueError(
-                f"'{path}' 을(를) UTF-8로 읽을 수 없습니다. 엑셀에서 "
-                "'CSV UTF-8'로 다시 저장한 뒤 실행하세요.")
+                f"'{path}' 을(를) {encoding or 'UTF-8'}로 읽을 수 없습니다. "
+                "엑셀에서 'CSV UTF-8'로 다시 저장하거나, 한국어 윈도우 엑셀의 "
+                "기본 저장 형식이라면 '--encoding cp949' 를 붙여 실행하세요.")
     if not text.strip():
         raise ValueError(f"'{path}' 이(가) 비어 있습니다.")
 
@@ -208,6 +219,11 @@ def load_frame(path: str, delimiter: Optional[str] = None,
     if not all_rows:
         raise ValueError(f"'{path}' 에 데이터 행이 없습니다.")
     return _frame_from_rows(all_rows, path)
+
+
+def _bad_encoding_msg(encoding: Optional[str]) -> str:
+    return (f"알 수 없는 인코딩입니다: {encoding!r}. "
+            "예: utf-8, utf-8-sig, cp949, euc-kr, latin-1.")
 
 
 def _frame_from_rows(all_rows: List[List[str]], path: str) -> Frame:
@@ -241,6 +257,17 @@ def _frame_from_rows(all_rows: List[List[str]], path: str) -> Frame:
     data = all_rows[1:]
     if not data:
         raise ValueError("데이터 행이 없습니다 (헤더만 있습니다).")
+    # A row with MORE fields than the header loses its tail silently
+    # (Frame.column indexes by header position), which is exactly the shape an
+    # unquoted comma inside a free-text cell produces — and it shifts nothing,
+    # it just drops data. Short rows are legitimately padded as missing.
+    over = sum(1 for r in data if len(r) > len(header))
+    if over:
+        raise ValueError(
+            f"열 개수가 헤더({len(header)}개)보다 많은 행이 {over}개 있습니다. "
+            "값 안에 구분자(예: 쉼표)가 따옴표 없이 들어 있을 가능성이 "
+            "큽니다 — 해당 셀을 따옴표로 감싸거나 구분자를 바꾼 뒤 다시 "
+            "실행하세요(그대로 두면 뒤쪽 값이 조용히 버려집니다).")
     return Frame(header, data)
 
 

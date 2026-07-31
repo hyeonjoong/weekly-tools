@@ -1,0 +1,30 @@
+<table class="table1">
+  <caption>표 1. 기저 특성 (Table 1. Baseline characteristics)</caption>
+  <thead>
+    <tr><th scope="col">특성 (Characteristic)</th><th scope="col">전체 (N=48)</th><th scope="col">device (n=24)</th><th scope="col">sham (n=24)</th><th scope="col">차이 (95% CI)</th><th scope="col">p값</th><th scope="col">SMD</th><th scope="col">검정</th></tr>
+  </thead>
+  <tbody>
+    <tr><th scope="row">age — 평균(SD)</th><td>53.6 (9.6)</td><td>55.7 (8.2)</td><td>51.4 (10.5)</td><td>4.4 (-1.1, 9.8)</td><td>0.116</td><td>0.463</td><td>Student t</td></tr>
+    <tr><th scope="row">sex — n(%) · 결측 1 (device 1)</th><td></td><td></td><td></td><td>M: 23.6 (-4.6, 47.0) %p</td><td>0.106</td><td>0.486</td><td>Pearson χ²</td></tr>
+    <tr class="level"><th scope="row">&#160;F</th><td>22 (46.8)</td><td>8 (34.8)</td><td>14 (58.3)</td><td></td><td></td><td></td><td></td></tr>
+    <tr class="level"><th scope="row">&#160;M</th><td>25 (53.2)</td><td>15 (65.2)</td><td>10 (41.7)</td><td></td><td></td><td></td><td></td></tr>
+    <tr><th scope="row">bmi — 중앙값[IQR] · 결측 1 (device 1)</th><td>26.1 [24.4, 27.7]</td><td>26.2 [25.6, 27.5]</td><td>25.6 [23.8, 28.0]</td><td>0.8 (-1.1, 2.6)</td><td>0.431</td><td>0.242</td><td>Mann-Whitney U</td></tr>
+    <tr><th scope="row">isi — 평균(SD)</th><td>18.7 (3.2)</td><td>19.0 (2.8)</td><td>18.3 (3.5)</td><td>0.7 (-1.1, 2.6)</td><td>0.431</td><td>0.229</td><td>Student t</td></tr>
+    <tr><th scope="row">rmssd_ms — 평균(SD) · 결측 4 (device 2, sham 2)</th><td>26.4 (8.9)</td><td>25.0 (8.3)</td><td>27.8 (9.5)</td><td>-2.8 (-8.2, 2.6)</td><td>0.302</td><td>0.315</td><td>Student t</td></tr>
+    <tr><th scope="row">ahi — 평균(SD)</th><td>6.5 (2.7)</td><td>6.3 (3.1)</td><td>6.7 (2.3)</td><td>-0.4 (-2.0, 1.2)</td><td>0.628</td><td>0.141</td><td>Student t</td></tr>
+    <tr><th scope="row">site — n(%)</th><td></td><td></td><td></td><td></td><td>0.776</td><td>0.207</td><td>Pearson χ²</td></tr>
+    <tr class="level"><th scope="row">&#160;A</th><td>16 (33.3)</td><td>8 (33.3)</td><td>8 (33.3)</td><td></td><td></td><td></td><td></td></tr>
+    <tr class="level"><th scope="row">&#160;B</th><td>18 (37.5)</td><td>10 (41.7)</td><td>8 (33.3)</td><td></td><td></td><td></td><td></td></tr>
+    <tr class="level"><th scope="row">&#160;C</th><td>14 (29.2)</td><td>6 (25.0)</td><td>8 (33.3)</td><td></td><td></td><td></td><td></td></tr>
+    <tr><th scope="row">chronic — n(%)</th><td></td><td></td><td></td><td>1: 4.2 (-19.4, 27.2) %p</td><td>0.731</td><td>0.099</td><td>Pearson χ²</td></tr>
+    <tr class="level"><th scope="row">&#160;0</th><td>11 (22.9)</td><td>5 (20.8)</td><td>6 (25.0)</td><td></td><td></td><td></td><td></td></tr>
+    <tr class="level"><th scope="row">&#160;1</th><td>37 (77.1)</td><td>19 (79.2)</td><td>18 (75.0)</td><td></td><td></td><td></td><td></td></tr>
+  </tbody>
+</table>
+<p class="legend"><strong>표기</strong>: 연속형 = 평균(표준편차) 또는 중앙값[IQR] (정규성에 따라 자동), 범주형 = n(%). % 는 열 기준(그룹 내 비결측 %).</p>
+<p class="legend"><strong>차이 (95% CI)</strong>: 첫 군 − 둘째 군(양수면 첫 군이 큼). 연속형은 모수 검정 시 평균차(보고한 검정과 같은 SE의 t-CI), 비모수 시 Hodges–Lehmann 중앙값 이동량(쌍별 차의 중앙값이라 표시된 두 중앙값의 차와 다를 수 있음). 이진형은 표시된 수준(예: 'M:')의 위험차(%p, Newcombe 점수구간 — 범주형 검정과는 다른 방법이라 p값의 유의성과 어긋날 수 있음).</p>
+<p class="legend"><strong>p값</strong>: 연속형은 정규성·등분산 점검 후 t/Welch/Mann-Whitney (≥3군: ANOVA/Kruskal-Wallis), 범주형은 Pearson χ² 또는 Fisher exact.</p>
+<p class="legend"><strong>SMD</strong>: 표준화 평균차(절대값). |SMD|&gt;0.1 이면 두 군 간 불균형을 시사(범주형은 Yang–Dalton 다변량 SMD).</p>
+<ul class="warnings">
+  <li>변수 &#x27;subject_id&#x27; 는 고유값이 48개로 너무 많아 건너뜀(ID·자유텍스트이거나, 단위·기호가 섞인 수치일 수 있음). 수치라면 단위·기호를 제거해 &#x27;--continuous subject_id&#x27;, 범주라면 &#x27;--categorical subject_id&#x27; 또는 &#x27;--max-levels&#x27; 를 쓰세요.</li>
+</ul>
