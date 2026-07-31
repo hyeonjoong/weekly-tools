@@ -298,10 +298,136 @@ logic all verified correct. R2 edge: `--at` overflow + markdown parity (fixed).
 R3 verification: **CLEAN**. R3 docs: only a stale test count (fixed).
 
 ---
+---
+
+## Round 7 — 2026-07-31  (multi-rater feature + 1 bounded review round)
+
+**Baseline:** 419 tests. **After:** 561 tests, all offline, ~11 s.
+
+### Added — agreement among 3+ raters, and long/tidy input
+The tool only handled "method A vs method B". Clinical work just as often has
+*k* readers grading the same images, and exports arrive one-row-per-measurement.
+
+- **`--raters "A,B,C"` (continuous)** — the full ICC family ICC(1,1)/(1,k),
+  ICC(2,1)/(2,k), ICC(3,1)/(3,k) with CIs, a between-rater systematic-difference
+  F test, SEM (absolute-agreement **and** consistency), MDC95, within-subject SD
+  and the reproducibility coefficient, plus a pairwise bias/LoA/CCC table.
+- **`--raters "A,B,C" --categorical`** — Fleiss' kappa (overall + per category,
+  with the Fleiss 1971 H0 z test), Gwet's AC1, Krippendorff's alpha
+  (nominal/ordinal, tolerant of partially-rated units), pairwise Cohen's kappa
+  and Light's kappa. CIs come from a subject-level percentile bootstrap.
+- **`--long --id-col --method-col --value-col`** — tidy input pivoted to wide;
+  2 levels route to the ordinary A-vs-B report, 3+ to the multi-rater one.
+  A repeated `(id, method)` pair is a hard error, never a silent average.
+- New modules `multirater.py` / `multireport.py`, new loaders in `dataio.py`,
+  two example datasets, README/사용법.md/실행.command updated (examples 7-8).
+- The bootstrap groups subjects by distinct rating pattern, so a resample costs
+  O(n) draws instead of O(n·q²) — 20 000 subjects × 3 raters went 10 s → 3 s
+  with *all three* CIs, and the fast path is pinned to the naive one by test.
+
+### Fixed — correctness (panel: 4 parallel reviewers, 1 round)
+- **Fleiss' kappa H0 standard error was wrong.** The implementation used an
+  m-dependent expression; Fleiss (1971) / R `irr::kappam.fleiss` use
+  `[S² − Σp_jq_j(q_j−p_j)]/S²` with `S = 1−P̄e`, which has no m term. On skewed
+  marginals (0.9/0.1, N=200, m=4) the SE was 0.0986 against a Monte-Carlo truth
+  of 0.0287 — a 3.4× inflation that could turn a significant kappa
+  non-significant. Now matches simulation and the published z ≈ 17.7 example.
+- **SEM/MDC95 used √MSE (consistency) while sitting next to ICC(2,1)
+  (absolute agreement).** For three raters offset by a constant 10 units the
+  report printed `MDC95 = 0` — "any change is detectable". SEM is now √MSW
+  (absolute agreement, `MSW = MSE + (MSC−MSE)/n`); the consistency SEM is shown
+  separately and labelled.
+- **ICC(2,k) CI could print reversed and out of range.** Spearman–Brown is only
+  monotone while `1+(k−1)r > 0`, and the ICC(2,1) Satterthwaite bound has no
+  such floor: one 4×3 table printed `ICC(2,3) −2.661 [95% CI 8.134, 0.852]`
+  (18% of random small tables were affected). The transform now returns NaN past
+  the pole and the interval is dropped unless it brackets the point estimate.
+- **The bootstrap discarded unanimous resamples**, truncating every CI at
+  exactly the perfect-agreement end (12% of resamples in one case). `P̄e = 1`
+  implies `P̄a = 1`, so kappa is 1 by continuity — now recorded, not dropped.
+  Conversely, data with only **one observed category** is refused outright
+  instead of emitting three mutually contradictory coefficients.
+- **Krippendorff's alpha CI bootstrapped a different set of units than its point
+  estimate** (complete cases vs every unit with ≥2 ratings) — 0.370 reported
+  with a CI centred on 0.259. The two now resample the same universe.
+- **Gwet's π_k averaged over units with ≥2 ratings**; Gwet defines it over every
+  rated unit. Fixed (reachable through the public function).
+- `--min-kappa` reported "미충족" when the CI was undefined — now a third state,
+  "판정 불가". n<4 tables and zero-within-subject-variance tables are flagged.
+
+### Fixed — data integrity, robustness, DoS/PII
+- **`csv.reader(text.splitlines())` tore records apart.** `str.splitlines()`
+  also breaks on `\x0b \x0c \x1c-\x1e \x85 \u2028 \u2029`, so a vertical tab or a
+  NEL byte inside a cell dropped one subject and invented a phantom one (exit 0,
+  only a vague "제외 1행"); quoted multi-line labels silently lost their newline
+  and merged with a distinct category. Now parsed via `io.StringIO`.
+  **This affected every input path, not just the new ones.**
+- **Two quadratic scans.** `reshape_long` did `sid not in order` on a list
+  (60 000-subject long CSV: 53 s → 0.65 s) and `_require_unique_header` did
+  `header.count()` per column (60 000 columns: 43 s → 0.08 s).
+- **Uncapped pairwise kappa** — 100 raters × 200 categories is 4 950 pairs of
+  200×200 matrices, minutes of CPU from a 30 KB file. Now budgeted: the table is
+  skipped with an explicit warning. The wide path also honours the 100-rater cap
+  the long path already had, and labels over 64 chars are refused.
+- **PII in error messages.** The duplicate-`(id, method)` error echoed the raw
+  identifier (`'홍길동-8801011234567'`) — the message users hit first and paste
+  into bug reports; it now reports **row numbers**. `--categories` mismatches
+  dumped up to 200 raw cells and a `--raters` typo dumped the whole header
+  (an MRN and a resident-registration number in one repro). All truncated now,
+  and category labels are truncated in the JSON/Markdown files too.
+- `--raters ""` silently disabled multi-rater routing *and* the mutual-exclusion
+  checks (an unset shell variable would do it); a blank first line is reported
+  rather than silently promoting a data row to header.
+
+### Fixed — docs honesty
+- **"정확(exact) CI" was an overclaim.** Only ICC(1,1)/ICC(3,1) have exact
+  F-based intervals; ICC(2,1) is McGraw & Wong's Satterthwaite approximation and
+  ICC(·,k) is a Spearman–Brown transform. Corrected in README, 사용법.md and the
+  `agreement.py` docstring.
+- The multi-rater reports lost the CI-lower-bound grading rule the two-rater
+  reports enforce — the paste-ready sentence graded a `[0.375, 0.980]` interval
+  as "excellent". Both reports now carry the Koo & Li / Landis & Koch legends,
+  flag when the point grade overstates the CI-lower grade, and grade the
+  sentence from the lower bound. NaN CIs render as "신뢰구간 계산 불가", never
+  as `NaN–NaN`.
+- **`--accept` judged interchangeability on the LoA point estimates** while
+  printing an LoA CI that crossed the limit four lines above. The verdict now
+  carries an explicit caveat and the paper sentence says "확정할 수 없었다".
+- `--ordinal` leaves the headline Fleiss kappa **unweighted** (weighted kappa is
+  not defined for Fleiss) — now labelled, explained, and stated in the
+  `--min-kappa` verdict. The sentence names the alpha metric, the weighting and
+  the category order.
+- Stale README output block regenerated; RC relabelled as a **reproducibility**
+  (between-rater) coefficient, not Bland–Altman repeatability; pairwise LoA
+  header carries the confidence level; small-n warning raised to n<20; example
+  echo lines in 실행.command match the commands actually run.
+
+### Tests (419 → 561)
+`tests/test_multirater.py`, `tests/test_multi_cli_io.py`,
+`tests/test_hardening_multirater.py` (one test per finding above), and
+`tests/test_multirater_reference.py` — which pins **only** independently-sourced
+numbers: the Fleiss (1971) 10×14×5 table (κ=0.210, P̄=0.378, P̄e=0.213), the
+Shrout & Fleiss (1979) published ICC CIs (.019–.761, .342–.946), and the m=2
+collapse of Fleiss/AC1/alpha onto this repo's *separate* two-rater
+implementations. Cross-checks added against `pingouin` (all six ICCs and CIs),
+`statsmodels` (Fleiss), the `krippendorff` package (nominal + ordinal), and a
+Monte-Carlo simulation of the Fleiss H0 SE. Tautological "by hand" tests that
+re-derived the module's own formula were replaced with structural invariants.
+Guardrail tests cover the PII redactions, the DoS caps, the line-break
+lookalikes, and wall-clock budgets for the two de-quadratified scans.
+
+**Round verdict.** One review round, four parallel reviewers (correctness /
+edge cases / docs honesty / tests+security). Every material finding above was
+fixed and pinned by a regression test. Not fixed (recorded deliberately):
+output files are opened without `O_NOFOLLOW` and overwrite without `--force`
+(user-supplied path, no privilege boundary); `--json --markdown` together
+silently prefers markdown (pre-existing, consistent across all paths); the
+whole input file is read into memory with no size ceiling (pre-existing).
+
 
 ## Status
 
-Two sessions, six clean adversarial rounds total. Session 1 verified the core
+Three sessions, seven adversarial rounds total. Session 1 verified the core
 agreement statistics (Bland–Altman, ICC, CCC, repeatability, repeated-measures &
 regression LoA, interchangeability, precision/required-n) correct from first
 principles and hardened every messy-input path. Session 2 added the CLSI EP09
@@ -309,5 +435,13 @@ method-comparison regressions (Deming + Passing–Bablok) and the decision-point
 predicted-bias number a clinician actually uses, fixed a genuine λ-convention
 correctness bug plus a cluster of overflow/robustness edges, and re-verified the
 new math against scipy.odr, an exact ML minimizer, an independent Passing–Bablok
-reimplementation, and a bootstrap. 209 offline tests. The tool now covers the
-full "can method A replace method B?" workflow for paired continuous data.
+reimplementation, and a bootstrap. Session 3 added agreement among **three or more** raters (the full ICC family
+with SEM/MDC95, and Fleiss' kappa / Gwet AC1 / Krippendorff alpha with bootstrap
+CIs) plus long/tidy CSV input, then ran one bounded four-reviewer round that
+caught a wrong Fleiss standard-error formula, a SEM built from the wrong mean
+square, a reversible ICC(2,k) interval, a bootstrap truncated at the
+perfect-agreement end, a CSV record-splitting bug affecting **every** input
+path, two quadratic scans, and several PII leaks in error messages — all fixed
+and pinned. 561 offline tests. The tool now covers "can method A replace
+method B?" for paired continuous and categorical data, and "do these k readers
+agree?" for both scales.

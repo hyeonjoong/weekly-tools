@@ -280,3 +280,105 @@ def test_quadratic_weighted_kappa_approximates_icc_on_scores():
     kq = Cat.kappa(cm, "quadratic").value
     i21, _i31, _ms = A.icc([[float(x), float(y)] for x, y in zip(a, b)])
     assert abs(kq - i21.value) < 0.05
+
+
+# --------------------------------------------------------------------------
+# Multi-rater (3+ raters) cross-checks
+# --------------------------------------------------------------------------
+def _multi_counts():
+    from agreestat import multirater as MR
+    rows = [["mild", "mild", "moderate"], ["severe", "severe", "severe"],
+            ["mild", "moderate", "mild"], ["moderate", "moderate", "moderate"],
+            ["severe", "moderate", "severe"], ["mild", "mild", "mild"],
+            ["moderate", "severe", "moderate"], ["severe", "severe", "moderate"],
+            ["mild", "mild", "mild"], ["moderate", "moderate", "severe"]]
+    cats = ["mild", "moderate", "severe"]
+    return MR, rows, cats, [[r.count(c) for c in cats] for r in rows]
+
+
+def test_fleiss_kappa_matches_statsmodels():
+    ir = pytest.importorskip("statsmodels.stats.inter_rater")
+    MR, _rows, _cats, counts = _multi_counts()
+    ours = MR.fleiss_kappa(counts)[0]
+    assert abs(ours - ir.fleiss_kappa(np.array(counts))) < 1e-12
+
+
+def test_fleiss_h0_se_matches_irr_formula():
+    """R irr::kappam.fleiss's SE, written in its own (p_j q_j) form."""
+    MR, _rows, _cats, counts = _multi_counts()
+    _kap, _pbar, _pe, se, m, p_j = MR.fleiss_kappa(counts)
+    n = len(counts)
+    pj = np.array(p_j)
+    qj = 1.0 - pj
+    s = float((pj * qj).sum())
+    var = (2.0 / (n * m * (m - 1))) * (s ** 2 - float((pj * qj * (qj - pj)).sum())) / s ** 2
+    assert abs(se - np.sqrt(var)) < 1e-14
+
+
+def test_fleiss_h0_se_matches_monte_carlo_under_independence():
+    """Independent raters (H0) -> the analytic SE must match the simulated SD.
+
+    Deliberately uses *skewed* marginals, where an m-dependent (wrong) variance
+    formula is off by a factor of ~1.5-3.
+    """
+    import random as _random
+
+    from agreestat.multirater import fleiss_kappa as fk
+    rng = _random.Random(20260731)
+    probs, n_subj, m = (0.7, 0.3), 60, 4
+    counts0 = []
+    for _ in range(n_subj):          # one table just to get the analytic SE
+        c = [0, 0]
+        for _r in range(m):
+            c[0 if rng.random() < probs[0] else 1] += 1
+        counts0.append(c)
+    draws = []
+    for _ in range(3000):
+        tbl = []
+        for _s in range(n_subj):
+            c = [0, 0]
+            for _r in range(m):
+                c[0 if rng.random() < probs[0] else 1] += 1
+            tbl.append(c)
+        draws.append(fk(tbl)[0])
+    mc_sd = float(np.std(draws, ddof=1))
+    analytic = fk(counts0)[3]
+    assert abs(analytic - mc_sd) < 0.15 * mc_sd
+
+
+def test_krippendorff_alpha_multi_matches_reference_package():
+    kd = pytest.importorskip("krippendorff")
+    MR, rows, cats, counts = _multi_counts()
+    code = {c: i for i, c in enumerate(cats)}
+    rel = np.array([[code[r[j]] for r in rows] for j in range(3)], dtype=float)
+    for metric in ("nominal", "ordinal"):
+        ours = MR.krippendorff_alpha_multi(counts, cats, metric)
+        ref = kd.alpha(reliability_data=rel, level_of_measurement=metric)
+        assert abs(ours - ref) < 1e-12, metric
+
+
+def test_icc_family_matches_pingouin():
+    pg = pytest.importorskip("pingouin")
+    pd = pytest.importorskip("pandas")
+    from agreestat import multirater as MR
+    rng = np.random.default_rng(7)
+    subj = rng.normal(0, 2, 20)
+    tab = np.array([[subj[i] + rng.normal(0, 0.5) + off
+                     for off in (0.0, 0.3, -0.2)] for i in range(20)])
+    fam = MR.icc_family(tab.tolist())
+    df = pd.DataFrame({"s": np.repeat(np.arange(20), 3),
+                       "r": np.tile(np.arange(3), 20),
+                       "v": tab.reshape(-1)})
+    ref = pg.intraclass_corr(data=df, targets="s", raters="r", ratings="v")
+    order = ["ICC(1,1)", "ICC(A,1)", "ICC(C,1)", "ICC(1,k)", "ICC(A,k)",
+             "ICC(C,k)"]
+    ours = [fam.single[0], fam.single[1], fam.single[2],
+            fam.average[0], fam.average[1], fam.average[2]]
+    ci_col = next((c for c in ref.columns if str(c).startswith("CI")), None)
+    for name, mine in zip(order, ours):
+        row = ref[ref["Type"] == name].iloc[0]
+        assert abs(mine.value - float(row["ICC"])) < 1e-9, name
+        if ci_col is not None:            # column name varies across versions
+            lo, hi = row[ci_col]
+            assert abs(mine.ci_lower - lo) < 5e-3, name
+            assert abs(mine.ci_upper - hi) < 5e-3, name

@@ -7,7 +7,9 @@ Implements, from first principles:
   (differences on means); and an optional percentage variant.
 * **ICC(2,1)** (two-way random, absolute agreement) and **ICC(3,1)** (two-way
   mixed, consistency), single measures, from the two-way ANOVA mean squares,
-  each with an exact F-based 95% CI (Shrout & Fleiss 1979; McGraw & Wong 1996).
+  ICC(3,1)'s CI is the exact F-based interval (Shrout & Fleiss 1979); ICC(2,1)'s
+  is McGraw & Wong's (1996) ICC(A,1) interval, which uses a Satterthwaite
+  synthesised denominator df and is therefore an approximation.
 * **Lin's concordance correlation coefficient (CCC)** with its
   z-transform confidence interval (Lin 1989, 2000).
 * **Within-subject CV** and the **repeatability coefficient** from replicate
