@@ -137,5 +137,62 @@ class TestEdfExample(unittest.TestCase):
             self.assertLess(rms, 200.0, label)
 
 
+
+
+class TestDoseSessionExample(unittest.TestCase):
+    """dose_session.csv: 2 min baseline, then slow-wave amplitude x2, plus 60 Hz mains.
+
+    This is the recording 실행.command demonstrates, so the claims it prints on screen
+    ("60 Hz contaminates gamma", "--notch removes it", "SWA rises ~+250%") are locked
+    in here rather than trusted.
+    """
+    BANDS = [("delta", 0.5, 4.0), ("theta", 4.0, 8.0), ("alpha", 8.0, 13.0),
+             ("beta", 13.0, 30.0), ("gamma", 30.0, 90.0)]
+
+    @classmethod
+    def setUpClass(cls):
+        cls.path = os.path.join(EX, "dose_session.csv")
+        cls.sig = load_signal(cls.path)
+
+    def _analyze(self, **kw):
+        return analyze(self.sig.values, fs=200.0, bands=self.BANDS,
+                       times=self.sig.times, **kw)
+
+    def test_file_exists_and_parses(self):
+        self.assertTrue(os.path.exists(self.path))
+        self.assertEqual(len(self.sig.values), 48000)
+
+    def test_sixty_hz_mains_is_detected_in_gamma(self):
+        res = self._analyze()
+        lnr = res.overall.line_noise
+        self.assertTrue(lnr.detected)
+        self.assertEqual(lnr.f0, 60.0)
+        self.assertGreater(lnr.excess_in(30.0, 90.0), 0.0)
+
+    def test_notch_removes_most_of_gamma_power(self):
+        raw = self._analyze()
+        fixed = self._analyze(notch=True)
+
+        def gamma(r):
+            return next(b.absolute for b in r.overall.band_powers
+                        if b.name == "gamma")
+        self.assertLess(gamma(fixed), 0.5 * gamma(raw))
+
+    def test_baseline_contrast_finds_the_injected_swa_rise(self):
+        res = self._analyze(epoch_sec=30.0, baseline_sec=120.0, notch=True)
+        self.assertEqual((res.n_baseline, res.n_post), (4, 4))
+        cr = res.baseline_contrasts["swa_absolute_uv2"]
+        # Injected: amplitude x2 -> power x4 (+300%), diluted by the 1/f background.
+        self.assertGreater(cr.pct_change, 150.0)
+        self.assertLess(cr.pct_change, 350.0)
+        self.assertLess(cr.q, 0.05)
+
+    def test_alpha_is_unchanged_across_the_dose(self):
+        res = self._analyze(epoch_sec=30.0, baseline_sec=120.0, notch=True)
+        cr = res.baseline_contrasts["alpha_absolute_uv2"]
+        self.assertLess(abs(cr.pct_change), 15.0)
+        self.assertGreater(cr.q, 0.05)
+
+
 if __name__ == "__main__":
     unittest.main()

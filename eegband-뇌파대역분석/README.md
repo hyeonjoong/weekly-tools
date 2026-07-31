@@ -4,12 +4,14 @@ EEG 시계열을 주면 **Welch PSD**로 표준 대역(delta/theta/alpha/beta/ga
 **절대·상대 파워**, **슬로우파 활동(SWA = delta)**, **스펙트럼 에지 주파수(SEF95)**,
 **피크 주파수**, **대역별 피크(알파 피크 = IAF)**, **스펙트럼 엔트로피**, **총 파워**,
 **대역비**, 그리고 **1/f 비주기(aperiodic) 배경**(지수·오프셋·R²와 **배경을 제거한
-진동성 대역파워**)을 계산합니다. **신호 품질/아티팩트 지표**(클리핑·평탄·보간 비율, RMS)도
-함께 냅니다.
+진동성 대역파워**)을 계산합니다. **신호 품질/아티팩트 지표**(클리핑·평탄·보간 비율, RMS)와
+**전원(50/60 Hz) 잡음 진단**(배경 대비 비율·µV² 초과분·오염 대역, 에일리어싱 포함)도
+함께 내고, `--notch` 로 그 잡음을 스펙트럼에서 제거한 뒤 계산할 수 있습니다.
 
 필요하면 신호를 **에폭(epoch)** 으로 잘라 에폭별 표 + 요약(mean±SD, SEM, 95% CI,
 **자기상관 보정 CI**, 중앙값·IQR)과 **시간 추세 검정**(Mann–Kendall + Theil–Sen 기울기)을
-냅니다. 입력은 **CSV/TSV**(구분자 자동 감지, 유럽식 소수점 쉼표 허용)와
+냅니다. `--baseline` 을 주면 투약 전 구간을 그 피험자 자신의 기저로 삼아 **지표별 기저 대비
+변화**(Δ·Δ%·95% CI·Hedges' g·Welch t·**BH-FDR 보정 q**)를 냅니다 — 약력학 분석의 표준 형식. 입력은 **CSV/TSV**(구분자 자동 감지, 유럽식 소수점 쉼표 허용)와
 **EDF/EDF+/BDF**(임상 수면검사 표준 포맷)를 지원하고, **다채널·여러 파일 일괄 분석**과
 채널/파일 **비교표**를 냅니다. **FFT(radix-2 Cooley–Tukey)와 EDF 파서까지 전부 표준
 라이브러리로 자체 구현** — numpy/scipy 없이 어디서나 돕니다.
@@ -88,8 +90,10 @@ eeg_uv
 
 ```
 [0] 신호 품질 / Signal quality
-    amplitude: min = -81.510  max = 76.997  ptp = 158.506  mean = -0.000  RMS = 33.673 µV
-    interpolated = 0/5120 (0.0%),  clipped(rail) = 0 (0.0%),  flat-run = 0 (0.0%)
+    amplitude: min = -81.510  max = 76.997  ptp = 158.506  mean = -2.734e-09  RMS = 33.673 µV
+    interpolated = 0/5120 (0.0%),  clipped(rail) = 0 (0.0%),  flat-run(≥13) = 0 (0.0%, longest 1)
+    quantisation step = 0.0007 µV (227739 levels across the range)
+    전원잡음 / mains line noise: none detected at 60 Hz (auto-detected); peak/background ≤ 1.4× (threshold 3×)
 
 [1] 대역파워 / Band power  (absolute µV², relative %, prominent in-band peak Hz)
     band    range(Hz)         abs(µV²)    rel(%)  peak(Hz)
@@ -100,23 +104,30 @@ eeg_uv
     gamma   30–45                0.628       0.1       n/a
     total   0.5–45            1086.536     100.0
 
-[2] 슬로우파 활동 / Slow-wave activity (SWA = delta 0.5–4 Hz) — key sleep endpoint
-    SWA absolute  = 1072.564 µV²   SWA relative = 98.7 %
+[2] 슬로우파 활동 / Slow-wave activity (SWA = 0.5–4 Hz) — key sleep endpoint
+    SWA absolute  = 1072.564 µV²
+    SWA relative  = 98.7 %
     dominant band = delta   ← slow-wave/delta dominant
 
 [3] 스펙트럼 요약 / Spectral summary
-    peak frequency = 1.50 Hz   SEF95 = 1.89 Hz
-    spectral entropy (norm) = 0.313   alpha peak (IAF) = 11.00 Hz
-    total power (0.5–45) = 1086.536 µV²
+    peak frequency          = 1.50 Hz
+    SEF95 (spectral edge freq) = 1.89 Hz
+    spectral entropy (norm) = 0.313   (1=flat/white, 0=single rhythm)
+    alpha peak (IAF)        = 11.00 Hz
+    total power (0.5–45 Hz) = 1086.536 µV²
 
 [4] 비주기(1/f) 배경 + 진동성 파워 / Aperiodic background & oscillatory power
     fit = 0.50–45.00 Hz, mode = robust, bins used = 164/179
-    exponent (χ, 기울기) = 1.854 ± 0.024 (SE)   ← 클수록 급한 1/f
+    model: PSD(f) = 10^offset · f^(−exponent)   (exponent > 0 = falling with f)
+    exponent (χ) = 1.854 ± 0.024 (SE, 낙관적 하한 / optimistic: neighbouring Welch bins are not independent)
     offset (log10 µV²/Hz @1 Hz) = 1.458
-    fit R² = 0.973 (적합에 쓴 빈), 0.865 (전체 빈, 진동 포함)
-    band          osc(µV²)   osc(%)  peak(Hz)   height
-    delta         1020.311     99.4      1.50     2.21
-    alpha            4.702      0.5     11.00     1.55
+    fit R² = 0.973 (적합에 쓴 빈 / fitted bins), 0.865 (전체 빈, 진동 포함 / all bins)
+    slope by half-range: 2.65 (lower half) vs 1.85 (upper half)   ⚠ knee/bend — a single exponent is an average
+    band          osc(µV²)  osc(%osc)  peak(Hz)   height
+    delta         1020.311       99.4      1.50     2.21
+    theta            0.759        0.1       n/a      n/a
+    alpha            4.702        0.5     11.00     1.55
+    beta             0.098   9.57e-03       n/a      n/a
     ...
 ```
 
@@ -141,17 +152,17 @@ eegband study.csv --list-channels                   # 어떤 열이 있는지 �
 ```
 
 ```
-==========================================================================
+================================================================================================================================
   [비교 / Series comparison]  n = 3
-==========================================================================
-    series                fs   dur(s)   total(µV²)  delta%  theta%  alpha%   beta%  gamma%  dominant     SEF   expo    R²
-    Fp1                  128     20.0      104.044   33.4%    6.2%   52.7%    5.5%    2.2%     alpha   18.86   1.30  0.98
-    Cz                   128     20.0      857.355   98.7%    0.6%    0.3%    0.3%    0.1%     delta    1.87   1.71  0.99
-    O1                   128     20.0      215.916   12.3%    2.9%   81.1%    2.6%    1.1%     alpha   10.94   1.20  0.98
+================================================================================================================================
+    series        fs    fs_src   dur(s)   total(µV²)  delta%  theta%  alpha%   beta%  gamma%  dominant     SEF   expo    R²
+    Fp1          128  inferred     20.0      104.044   33.4%    6.2%   52.7%    5.5%    2.2%     alpha   18.86   1.31  0.98
+    Cz           128  inferred     20.0      857.355   98.7%    0.6%    0.3%    0.3%    0.1%     delta    1.87   1.72  0.99
+    O1           128  inferred     20.0      215.916   12.3%    2.9%   81.1%    2.6%    1.1%     alpha   10.94   1.20  0.98
 ```
 
-이 예제는 **실제 1/f 지수를 1.3 / 1.7 / 1.2 로 합성**한 데이터입니다 — 표의 `expo`가
-그 값을 복원하는지 확인할 수 있습니다(`examples/generate_examples.py` 참고).
+이 예제는 **실제 1/f 지수를 1.3 / 1.7 / 1.2 로 합성**한 데이터입니다 — 표의 `expo`
+(1.31 / 1.72 / 1.20)가 그 값을 복원하는지 확인할 수 있습니다(`examples/generate_examples.py` 참고).
 
 ### 4) EDF / EDF+ / BDF 기록 (임상 표준 포맷)
 
@@ -184,23 +195,27 @@ stderr에 보고하고 **나머지는 정상 처리**하며 종료코드 1(전�
 ### 6) 에폭별 분석 + 시간 추세
 
 ```bash
-eegband examples/delta_deep_sleep.csv --fs 128 --epoch 20
+eegband examples/dose_session.csv --epoch 20
 ```
 
 ```
-[6] 에폭별 / Per-epoch  (epoch = 20 s, n_epochs = 2)
+[6] 에폭별 / Per-epoch  (epoch = 20 s, n_epochs = 12)
      ep   t0(s)   t1(s)   delta   theta   alpha    beta   gamma    peak     SEF   expo  dominant
-      0     0.0    20.0   98.6%    0.5%    0.6%    0.2%    0.1%    1.50    1.90   1.83  delta
-      1    20.0    40.0   98.8%    0.4%    0.6%    0.1%    0.1%    1.50    1.90   1.87  delta
-    SWA density (delta-dominant epochs) = 2/2  (100 %)
-    relative delta across epochs = 98.7 ± 0.2 % (SD, n-1),  SEM 0.1 %,  95% CI [97.3, 100.1] %  (n=2)
-      median 98.7 %, IQR [98.7, 98.8], range [98.6, 98.8]
-    SWA absolute across epochs = 1068.946 ± 132.626 µV² (SD, n-1),  SEM 93.781 µV², ...
-      자기상관 보정 / autocorr-adjusted: ρ₁ = ..., n_eff = ..., 95% CI [...]
-      (에폭은 자기상관 — 기록 내 분포이며 피험자간 추론 CI 아님)
-    시간 추세 / Trend across epochs (Mann–Kendall 검정 + Theil–Sen 기울기, per s)
-      endpoint                 slope/s          95% CI (slope/s)     tau         p
-      SWA absolute               5.397         [-12.017, 23.355]   0.667    0.3082   µV²/s
+      0     0.0    20.0   86.0%    1.2%   10.8%    1.3%    0.7%    1.56   10.13   1.09  delta
+      1    20.0    40.0   85.7%    1.4%   10.8%    1.3%    0.8%    1.56   10.13   1.14  delta
+      2    40.0    60.0   86.9%    1.4%    9.7%    1.4%    0.7%    1.56   10.11   1.13  delta
+      3    60.0    80.0   86.8%    1.4%    9.8%    1.3%    0.7%    1.56   10.11   1.12  delta
+      ...
+    delta-dominant epochs = 12/12  (100 %)   (a.k.a. 'SWA density'; NOT slow-wave events per minute)
+    relative SWA across epochs = 91.1 ± 5.0 % (SD, n-1),  SEM 1.4 %,  95% CI [88.0, 94.3] %  (n=12)
+      자기상관 보정 / autocorr-adjusted: ρ₁ = 0.74, n_eff = 2.0, 95% CI [46.5, 135.8] %
+      자기상관 보정 / autocorr-adjusted: ρ₁ = 0.75, n_eff = 2.0, 95% CI [-5108.859, 7455.835] µV²
+      자기상관 보정 / autocorr-adjusted: ρ₁ = 0.76, n_eff = 2.0, 95% CI [0.350, 5.619] log10 µV²
+      자기상관 보정 / autocorr-adjusted: ρ₁ = 0.75, n_eff = 2.0, 95% CI [-5026.442, 7532.422] µV²
+      자기상관 보정 / autocorr-adjusted: ρ₁ = -0.13, n_eff = 12.0, 95% CI [1.085, 1.127]
+    시간 추세 / Trend across epochs (Mann–Kendall 검정 + Theil–Sen 기울기, per min)
+      endpoint               slope/min        95% CI (slope/min)     tau         p
+      relative SWA               3.121           [-0.017, 4.558]   0.424    0.0641   %/min
 ```
 
 - **자기상관 보정 CI**: 연속 에폭은 서로 강하게 상관되어 있어 순진한 CI는 지나치게 좁습니다.
@@ -238,6 +253,107 @@ eegband examples/delta_deep_sleep.csv --fs 128 --epoch 20 --csv --no-comment > e
 파라미터를 담아 자기재현이 가능하며, `--no-comment` 로 이 행을 끄면 base-R/SAS가
 옵션 없이 바로 읽는 깔끔한 사각형이 됩니다.
 
+### 9) 전원(50/60 Hz) 잡음 진단·제거
+
+동봉된 예제로 바로 확인할 수 있습니다 (`examples/dose_session.csv` — 합성 기록,
+60 Hz 전원잡음 포함):
+
+```bash
+eegband examples/dose_session.csv --bands 'delta:0.5-4,theta:4-8,alpha:8-13,beta:13-30,gamma:30-90'
+eegband examples/dose_session.csv --notch --bands 'delta:0.5-4,theta:4-8,alpha:8-13,beta:13-30,gamma:30-90'   # gamma 56.0 → 14.2 µV²
+```
+
+내 데이터에 쓸 때:
+
+```bash
+eegband rec.csv --fs 256                  # 기본: 50/60 자동 판별 후 "보고만"
+eegband rec.csv --fs 256 --notch          # 검출된 기본파+고조파를 스펙트럼에서 제거
+eegband rec.csv --fs 256 --line-freq 60   # 자동 판별 대신 직접 지정
+eegband rec.csv --fs 256 --line-bw 2      # 창 반폭 ±2 Hz (기본 1.0)
+eegband rec.csv --fs 256 --line-freq off  # 검사 자체를 끄기
+```
+
+`[0] 신호 품질` 절에 이런 표가 붙습니다:
+
+```
+    전원잡음 / mains line noise @ 60 Hz (auto-detected) — 검출됨 (제거 안 함) / detected, NOT removed — add --notch
+      harmonic      freq(Hz)   peak/bg   excess(µV²)   bands affected
+      ×1                  60     473.7        41.858   ← gamma
+      ×2 (aliased)        80       1.1         0.000   -
+      ×3 (aliased)        20       1.2         0.000   -
+      전기잡음 비율 / share that is electrical: gamma 74.7%
+```
+
+- **검출**: 각 고조파의 ±`--line-bw` 창 안 최고 PSD를 **주변 배경의 중앙값**과 비교해
+  `RATIO_THRESHOLD`(3×) 이상이면 전원잡음으로 판정합니다. `excess(µV²)`는 그 창에서
+  배경을 뺀 초과 파워 — 진폭 A의 정현파면 정확히 **A²/2** 입니다(손 검산 가능).
+- **제거(`--notch`)**: 해당 빈들을 양옆 빈 사이의 **log-선형 보간**으로 대체(스펙트럼
+  보간)한 뒤 대역파워·SEF·엔트로피·1/f 적합을 계산합니다. PSD 위에서 처리하므로
+  시간영역 노치 필터의 **링잉·위상 왜곡·경계 효과가 없습니다**.
+- **에일리어싱**: `fs/2 < f₀` 이면 전원 성분은 사라지지 않고 `|f₀ − k·fs|` 로 접혀
+  들어옵니다. fs=100 Hz에서 60 Hz는 **40 Hz** — gamma 한가운데 — 에 나타납니다.
+  이 경우에도 리포트는 침묵하지 않고 접힌 위치를 찾아 다음처럼 알려줍니다:
+
+  ```
+      전원잡음 / mains line noise: none detected at 60 Hz (auto-detected); 이 fs 에서는 대역 내 기본파가 없습니다 / no in-band fundamental at fs=100 Hz
+        ⓘ 에일리어싱 의심 / suspected mains alias at 40 Hz (150×, 60 Hz 접힘) — 자동 판정에서 제외했습니다(그 자리에서는 전원 접힘과 진짜 리듬이 같은 측정값). 제거하려면 --line-freq 60 를 명시하세요.
+  ```
+- **접힌 성분은 절대 자동 제거하지 않습니다.** 접혀 들어온 위치에는 그것이 전원인지 진짜
+  리듬인지 구별할 정보가 **없습니다**(fs=80 Hz에서 50 Hz의 3고조파는 정확히 **10 Hz —
+  알파 한가운데** 에 떨어집니다). 그래서 `auto` 는 접힌 고조파를 `ⓘ 에일리어싱 의심` 으로
+  **보고만** 하고 `--notch` 대상에서 제외합니다(알파가 지워지지 않습니다). 정말 제거하려면
+  `--line-freq 50` 처럼 전원 주파수를 **명시**해야 하며, 그 경우 그 자리의 진짜 활동도 함께
+  지워진다는 것을 리포트가 다시 경고합니다.
+- 기본파(`auto`)는 **전체 기록 스펙트럼에서 한 번만** 결정하고 모든 에폭에 같은 값을
+  씁니다 — 조용한 에폭이 몰래 50↔60을 바꿔 다른 주파수를 제거하는 일이 없습니다.
+
+### 10) 기저 대비 변화 (`--baseline`) — 약력학 종말점
+
+```bash
+eegband examples/dose_session.csv --epoch 30 --baseline 120 --notch
+```
+
+(예제는 0–120초가 기저, 이후 슬로우파 진폭이 2배 = 파워 4배가 되도록 합성했습니다.)
+
+처음 120초(투약 전)를 기저로 잡고, 이후 에폭을 지표별로 대조합니다:
+
+```
+[7] 기저 대비 변화 / Change from baseline  (baseline = 0–120 s)
+    baseline epochs = 4,  post epochs = 4,  BH-FDR family m = 15
+      endpoint                baseline        post           Δ       Δ%                95% CI (Δ)        g       n_eff     df           p      q(FDR)
+      relative SWA              86.774      95.863       9.089     10.5            [8.471, 9.706]    25.38     4.0/4.0    3.9    2.70e-06    1.02e-05*  %
+      SWA absolute             513.798    1823.618    1309.820    254.9      [1203.779, 1415.860]    22.27     4.0/4.0    3.5    1.17e-05    2.52e-05*  µV²
+      SWA absolute (log10)       2.711       3.261       0.550     20.3            [0.521, 0.580]    28.17     4.0/4.0    6.0    7.76e-09    9.78e-08*  log10 µV²
+      ...
+```
+
+- 대상 지표는 에폭 요약과 **같은 목록**(SWA 상대/절대/log10, 총파워, 1/f 지수, SEF,
+  엔트로피, 그리고 `--bands` 로 정의된 **모든 대역의 절대·상대 파워**)입니다.
+- **Welch 부등분산 t-검정**을 쓰되, 각 군의 분산을 **AR(1) 유효표본수**
+  `n_eff = n(1−ρ̂)/(1+ρ̂)` 로 나눕니다 — 즉 **SE·95% CI·자유도가 모두** 보정됩니다.
+  연속 에폭은 독립 관측이 아니기 때문입니다. 다만 보정 폭은 ρ̂ 와 에폭 수에 달려 있어,
+  ρ̂ ≤ 0 이거나 창이 짧으면 **거의 0** 일 수 있습니다(`n_eff` 는 2 미만으로 내려가지
+  않습니다). 표의 `n_eff` 열이 `n` 과 같으면 보정이 실제로는 일어나지 않은 것입니다.
+- **Hedges' g** 는 원자료 합동 SD에 소표본 보정 `1 − 3/(4·df−1)` 를 적용합니다(효과크기는
+  분포의 성질이므로 자기상관 보정을 하지 않습니다). ⚠ 이 g는 **한 기록의 에폭간 변동**으로
+  표준화한 값이라 문헌의 **피험자간 g와 직접 비교할 수 없습니다** — 에폭 변동이 작으면
+  g가 수십까지 나옵니다.
+- 한 번에 여러 지표를 검정하므로 **Benjamini–Hochberg FDR** q를 함께 냅니다(`*` = q<0.05).
+  기본 대역에서는 SWA가 곧 delta 대역이라 `swa_*` 와 `delta_*` 는 **같은 검정**입니다.
+  이런 구조적 중복은 FDR 가족(m)에서 **한 번만** 세고 서로 q를 공유합니다(표의
+  `BH-FDR family m` 이 실제 m). 대역파워끼리는 강하게 상관되므로 BH는 근사임을 유념하세요.
+- 아티팩트로 제외된 에폭(`--max-amp`/`--max-grad`)은 양쪽 창 어디에도 들어가지 않습니다.
+- 한쪽 창의 에폭이 2개 미만이면 계산하지 않고 **경고**합니다(조용히 0을 내지 않습니다).
+
+> **한계**: 이것은 **한 기록 안의 전·후 비교**입니다. 위약 대조가 아니며, 약효와 시간에
+> 따른 자연 변화(각성도 저하·수면 진행)를 구분하지 못합니다.
+>
+> **집단 결론을 내는 방법**: 피험자별로 한 번씩 돌려 `--csv-summary` 를 모은 뒤,
+> `swa_absolute_uv2_base_pct_change`(또는 `..._base_delta`) 열을 피험자 단위 관측치로
+> 삼아 군간 비교를 별도 도구에서 하세요. 각 지표마다
+> `<endpoint>_base_mean / _base_post_mean / _base_delta / _base_pct_change /
+> _base_ci_lo / _base_ci_hi / _base_hedges_g / _base_p / _base_q_fdr` 열이 나옵니다.
+
 ### 옵션
 
 | 옵션 | 의미 |
@@ -256,12 +372,19 @@ eegband examples/delta_deep_sleep.csv --fs 128 --epoch 20 --csv --no-comment > e
 | `--noverlap N` | 세그먼트 겹침(표본). 기본 nperseg//2 (50%) |
 | `--detrend {constant,linear,none}` | 세그먼트 디트렌드. `linear`는 드리프트의 delta 누설을 막음 |
 | `--average {mean,median}` | Welch 세그먼트 평균. `median`은 일시적 아티팩트에 강건 |
+| `--line-freq auto\|off\|HZ` | 전원잡음 주파수. 기본 `auto`(50/60 자동 판별 후 보고만) |
+| `--notch` | 검출된 전원잡음과 고조파를 스펙트럼 보간으로 제거한 뒤 계산 |
+| `--line-bw 1.0` | 전원잡음 창의 반폭(Hz). 기본 1.0 |
+| `--baseline 600` | 처음 600초를 기저로 삼아 이후 에폭과 지표별 대조 (`--epoch` 필요) |
 | `--aperiodic {robust,ols,off}` | 1/f 배경 적합 방식 (기본 robust) |
 | `--fit-range 2-45` | 1/f 적합 주파수 범위 (기본: 분석 대역 전체) |
 | `--bands ...` | 대역 재정의, 예: `delta:0.5-4,theta:4-8,alpha:8-13,beta:13-30,gamma:30-45` |
 | `--sef 95` | 스펙트럼 에지 주파수 백분위 (기본 95 → SEF95) |
+| `--swa-band 0.5-4` | SWA 대역을 명시 (커스텀 `--bands` 에 `delta` 가 없을 때) |
 | `--json` | JSON 출력 (다계열이면 `series` 배열) |
 | `--csv` | 대역파워 표를 CSV로 출력 (R/SAS/Prism 용) |
+| `--csv-summary` | 계열당 한 줄 요약표 (전원잡음 열 + `--baseline` 사용 시 대조 열) |
+| `--psd-csv` | 스펙트럼 자체를 CSV로 (`--notch` 적용분 반영) |
 | `--no-comment` | `--csv` 출력에서 맨 앞 `#` 주석 행 생략 |
 
 ---
@@ -365,12 +488,12 @@ eegband examples/delta_deep_sleep.csv --fs 128 --epoch 20 --csv --no-comment > e
 ## Tests
 
 ```bash
-python3 -m pytest -q                      # 282 tests, 전부 오프라인
+python3 -m pytest -q                      # 506 tests, 전부 오프라인
 python3 -m unittest discover -s tests -q  # 같은 스위트를 unittest로도 실행
 ```
 
 FFT는 O(n²) DFT와 ~1e-9, Welch PSD는 scipy와 ~1e-9로 대조하고, 1/f 지수·Mann–Kendall·
-Theil–Sen·Student-t 분위는 numpy/scipy와 대조합니다(numpy/scipy가 없으면 해당 교차검증만
+Theil–Sen·Student-t 분위·**Welch t/BH-FDR**은 numpy/scipy와 대조합니다(numpy/scipy가 없으면 해당 교차검증만
 skip되고 순수 표준 라이브러리 테스트는 그대로 통과). EDF 리더는 테스트 안에서 **독립
 구현된 EDF/BDF 작성기**(`tests/edf_fixtures.py`)가 만든 파일로 검증하므로 리더·작성기가
 같은 실수를 공유할 수 없습니다.

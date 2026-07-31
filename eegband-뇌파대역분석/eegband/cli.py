@@ -29,6 +29,7 @@ import sys
 from typing import List, Optional, Sequence, Tuple
 
 from . import __version__
+from . import linenoise as ln
 from .analyze import AnalysisResult, analyze, resolve_fs
 from .dataio import SignalData, list_columns, load_signal, load_signals
 from .edf import is_edf_path, looks_like_edf, read_edf_channel, read_edf_info
@@ -80,6 +81,24 @@ def _parse_range(text: str, opt: str) -> Tuple[float, float]:
     if hi <= lo:
         raise ValueError(f"{opt} 상한({hi})이 하한({lo})보다 커야 합니다.")
     return lo, hi
+
+
+def _parse_line_freq(text: Optional[str]):
+    """'--line-freq' -> 'auto' | None (off) | float Hz."""
+    if text is None:
+        return "auto"
+    t = str(text).strip().lower()
+    if t in ("auto", ""):
+        return "auto"
+    if t in ("off", "none", "no"):
+        return None
+    try:
+        val = float(t)
+    except ValueError:
+        raise ValueError(f"--line-freq 는 auto / off / 숫자(Hz) 여야 합니다: '{text}'")
+    if not math.isfinite(val) or val <= 0:
+        raise ValueError(f"--line-freq 는 0보다 큰 유한한 수여야 합니다: '{text}'")
+    return val
 
 
 def _parse_channels(text: Optional[str]) -> Optional[List[str]]:
@@ -149,6 +168,18 @@ def _build_parser() -> argparse.ArgumentParser:
                         "beta:13-30,gamma:30-45'")
     p.add_argument("--sef", type=float, default=95.0,
                    help="스펙트럼 에지 주파수 백분위 (기본 95 → SEF95)")
+    p.add_argument("--line-freq", dest="line_freq", metavar="HZ", default="auto",
+                   help="전원(mains) 잡음 주파수: auto(기본, 50/60 자동판별·보고만) | "
+                        "off | 숫자(예: 60)")
+    p.add_argument("--line-bw", dest="line_bw", type=float, default=None,
+                   metavar="HZ",
+                   help=f"전원잡음 창의 반폭(Hz), 기본 {ln.DEFAULT_BW:g}")
+    p.add_argument("--notch", action="store_true",
+                   help="검출된 전원잡음(및 고조파)을 스펙트럼에서 보간 제거한 뒤 "
+                        "대역파워를 계산")
+    p.add_argument("--baseline", type=float, default=None, metavar="SEC",
+                   help="처음 SEC초를 기저(baseline)로 잡아 이후 에폭과 지표별 비교 "
+                        "(Welch t·Hedges' g·BH-FDR). --epoch 필요")
     p.add_argument("--swa-band", dest="swa_band", metavar="LO-HI",
                    help="슬로우파(SWA) 대역을 명시 (기본: 'delta' 대역). 예: 0.5-4 "
                         "— 커스텀 --bands에 delta가 없을 때 필요")
@@ -359,7 +390,10 @@ def _analyse_input(path: str, args, bands, sef_frac: float,
                       detrend=args.detrend, average=args.average,
                       n_filled=sig.n_filled, max_amp=args.max_amp,
                       max_grad=args.max_grad, aperiodic_mode=ap_mode,
-                      fit_range=fit_range, swa_band=swa_band, label=label)
+                      fit_range=fit_range, swa_band=swa_band, label=label,
+                      line_freq=getattr(args, "line_freq_resolved", "auto"),
+                      line_bw=getattr(args, "line_bw_resolved", ln.DEFAULT_BW),
+                      notch=args.notch, baseline_sec=args.baseline)
         res.source_file = path
         res.input_encoding = sig.encoding
         res.start_offset_sec = float(args.start or 0.0)
@@ -367,7 +401,8 @@ def _analyse_input(path: str, args, bands, sef_frac: float,
     return results
 
 
-_NUMERIC_OPTS = ("fs", "start", "duration", "epoch", "sef", "max_amp", "max_grad")
+_NUMERIC_OPTS = ("fs", "start", "duration", "epoch", "sef", "max_amp", "max_grad",
+                 "baseline", "line_bw")
 
 
 def _recompute_psd(res: AnalysisResult):
@@ -381,6 +416,12 @@ def _recompute_psd(res: AnalysisResult):
     freqs, psd, _ = welch_psd(res.samples, res.fs, nperseg=res.nperseg,
                               noverlap=res.noverlap, detrend=res.detrend,
                               average=res.average)
+    # The report's band powers were derived from the notched spectrum, so the exported
+    # PSD must be notched too — otherwise the CSV and the report disagree about the
+    # very spectrum they both claim to describe.
+    lnr = res.overall.line_noise
+    if res.notch and lnr is not None and lnr.removed and lnr.targets():
+        psd, _n = ln.notch_psd(freqs, psd, lnr.targets(), lnr.bandwidth)
     return freqs, psd
 
 
@@ -438,6 +479,29 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print("입력 오류: --fit-range 는 --aperiodic off 와 함께 쓸 수 없습니다.",
               file=sys.stderr)
         return 2
+    try:
+        line_freq = _parse_line_freq(args.line_freq)
+    except ValueError as exc:
+        print(f"입력 오류: {exc}", file=sys.stderr)
+        return 2
+    if args.notch and line_freq is None:
+        print("입력 오류: --notch 는 --line-freq off 와 함께 쓸 수 없습니다 "
+              "(제거할 주파수를 찾지 않기 때문). --line-freq auto 또는 숫자를 쓰세요.",
+              file=sys.stderr)
+        return 2
+    line_bw = ln.DEFAULT_BW if args.line_bw is None else args.line_bw
+    if not (math.isfinite(line_bw) and line_bw > 0):
+        print("입력 오류: --line-bw 는 0보다 큰 유한한 수여야 합니다.", file=sys.stderr)
+        return 2
+    if args.baseline is not None and args.baseline <= 0:
+        print("입력 오류: --baseline 은 0보다 커야 합니다.", file=sys.stderr)
+        return 2
+    if args.baseline is not None and args.epoch is None:
+        print("입력 오류: --baseline 은 --epoch 과 함께 써야 합니다 "
+              "(기저/이후 비교는 에폭 단위로 계산됩니다).", file=sys.stderr)
+        return 2
+    args.line_freq_resolved = line_freq
+    args.line_bw_resolved = line_bw
 
     # ---- load + analyse every input ------------------------------------------
     multi_input = len(args.inputs) > 1
