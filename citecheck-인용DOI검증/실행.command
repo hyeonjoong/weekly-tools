@@ -11,12 +11,14 @@ echo
 echo "  ※ 인터넷 연결이 필요합니다 (Crossref/doi.org 조회)."
 echo
 echo "[사용법]"
-echo "  python3 -m citecheck <참고문헌파일>          # .bib/.ris/.json/.csv/텍스트 (자동 인식)"
+echo "  python3 -m citecheck <참고문헌파일>          # .bib/.ris/.json/.csv/.xlsx/.docx/텍스트 (자동 인식)"
 echo "  python3 -m citecheck refs.bib --json         # 기계용 JSON 출력"
 echo "  python3 -m citecheck refs.bib --report csv   # 엑셀로 열 CSV (공동저자 공유)"
 echo "  python3 -m citecheck refs.bib --pubmed       # PubMed로 철회/PMID↔DOI 교차검증"
 echo "  python3 -m citecheck refs.bib --suggest-doi  # DOI 없는 항목의 DOI를 찾아서 제안"
 echo "  python3 -m citecheck refs.bib --cache        # 조회 캐시 (재실행이 즉시 끝남)"
+echo "  python3 -m citecheck refs.bib --profile      # 참고문헌 목록 통계 (중앙 나이·Price 지수·저널 분포)"
+echo "  python3 -m citecheck included_studies.xlsx   # 엑셀 문헌표를 변환 없이 그대로 검사"
 echo "  python3 -m citecheck refs.bib --strict --ignore no-doi  # 제출 전 게이트"
 echo "  python3 -m citecheck --list-checks          # 끌 수 있는 검사 코드 보기"
 echo "  python3 -m citecheck refs.bib --verbose    # 정상 항목까지 표시"
@@ -30,9 +32,9 @@ echo
 
 # 설치돼 있으면 citecheck 명령, 아니면 모듈로 폴백
 if command -v citecheck >/dev/null 2>&1; then
-  citecheck examples/sample.bib --verbose --no-color
+  citecheck examples/sample.bib --verbose --no-color --profile
 else
-  python3 -m citecheck examples/sample.bib --verbose --no-color
+  python3 -m citecheck examples/sample.bib --verbose --no-color --profile
 fi
 
 echo

@@ -29,6 +29,19 @@ OK = "ok"
 WARNING = "warning"
 ERROR = "error"
 
+# C0/C1 control characters (incl. ESC). Any externally sourced text — a BibTeX
+# title, a Crossref journal name, a spreadsheet cell — is stripped of these
+# before it reaches a report, so it cannot inject ANSI/terminal escapes into the
+# user's terminal or into a file a co-author opens. It lives here, not in
+# cli.py, so every module that renders untrusted text uses the *same* control
+# (citecheck.profile does too); two copies would be one copy waiting to drift.
+CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+
+
+def sanitize_text(text: str) -> str:
+    """Strip C0/C1 control characters from externally sourced *text*."""
+    return CONTROL_CHARS_RE.sub("", text)
+
 # Transport failures worth retrying. ``socket.timeout`` is listed explicitly
 # because it only became an alias of ``TimeoutError`` in Python 3.10 (bpo-42413)
 # — on 3.9, which pyproject.toml still supports, a read timeout would otherwise
