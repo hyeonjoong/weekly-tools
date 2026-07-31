@@ -79,9 +79,25 @@ def test_invalid_inputs_raise():
         power.required_total_n({"type": "nonsense"})
 
 
-def test_unsupported_alpha_raises():
+def test_arbitrary_alpha_is_supported():
+    # Non-tabulated alpha/power used to be rejected; they are now computed from
+    # the inverse-normal CDF, which is what Bonferroni planning requires.
+    assert power.n_for_correlation(0.30, alpha=0.123) < power.n_for_correlation(0.30)
+    assert power.n_for_correlation(0.30, power=0.85) > power.n_for_correlation(0.30)
+    # alpha = 0.05/7 (7 primary comparisons) must still be a real number.
+    assert power.n_for_correlation(0.30, alpha=0.05 / 7) > power.n_for_correlation(0.30)
+
+
+def test_out_of_range_alpha_power_raise():
+    for bad in (0.0, 1.0, -0.1, 1.5):
+        with pytest.raises(ValueError):
+            power.n_for_correlation(0.30, alpha=bad)
+        with pytest.raises(ValueError):
+            power.n_for_correlation(0.30, power=bad)
     with pytest.raises(ValueError):
-        power.n_for_correlation(0.30, alpha=0.123)
+        power.norm_ppf(0.0)
+    with pytest.raises(ValueError):
+        power.norm_ppf(1.0)
 
 
 def test_paired_needs_far_fewer_than_two_group():

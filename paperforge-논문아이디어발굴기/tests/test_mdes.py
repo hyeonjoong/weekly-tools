@@ -62,9 +62,15 @@ def test_mdes_guards_small_samples():
         power.mdes_regression(4, 3)  # need n >= k + 2 = 5
 
 
-def test_mdes_unsupported_alpha_raises():
+def test_mdes_accepts_arbitrary_alpha_rejects_out_of_range():
+    # Arbitrary alpha now works (a stricter alpha means a larger detectable
+    # effect); only genuinely impossible values raise.
+    assert power.mdes_correlation(90, alpha=0.01) > power.mdes_correlation(90)
+    assert power.mdes_correlation(90, alpha=0.123) < power.mdes_correlation(90)
     with pytest.raises(ValueError):
-        power.mdes_correlation(90, alpha=0.123)
+        power.mdes_correlation(90, alpha=0.0)
+    with pytest.raises(ValueError):
+        power.mdes_correlation(90, alpha=1.0)
 
 
 def test_detectable_effect_dispatch():

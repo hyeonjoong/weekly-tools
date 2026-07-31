@@ -6,3 +6,7 @@ study,name,modality,n,variables,sampling_hz,notes
 ,호흡밴드,호흡밴드,92,resp_rate;rsa;resp_variability,50,
 ,수면/스트레스 설문,설문,95,psqi_total;stress_score;recovery_score,,
 ,MoA 반응 라벨,moa,90,responder_flag;response_magnitude,,
+# 아래 두 줄은 '연결 표본수' 선언입니다: modality 칸에 '+'로 여러 모달리티를 적으면
+# 그 모달리티를 모두 가진 피험자 수로 해석됩니다(데이터셋 행이 아님).
+,EEG×워치 연결,뇌파+워치,84,,,두 기기를 모두 착용한 인원
+,EEG×호흡 연결,뇌파+호흡밴드,88,,,

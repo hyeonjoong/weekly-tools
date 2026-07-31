@@ -14,23 +14,46 @@ from paperforge import power
 
 # --- Closed-form checks that bypass _ncf_cdf entirely -----------------------
 
+# Full-precision standard-normal quantiles (Phi^-1(0.975), Phi^-1(0.80)). These
+# are the published values; the 10-digit constants in power.py's docstring are
+# the same numbers truncated, so we compare against these at 1e-12.
+Z_ALPHA_05, Z_POWER_80 = 1.9599639845400545, 0.8416212335729143
+
+
+def test_norm_ppf_matches_published_quantiles():
+    # Anchors the inverse-normal implementation itself against known values
+    # (independent of every sample-size formula that consumes it).
+    assert math.isclose(power.norm_ppf(0.975), Z_ALPHA_05, rel_tol=1e-13)
+    assert math.isclose(power.norm_ppf(0.80), Z_POWER_80, rel_tol=1e-13)
+    assert math.isclose(power.norm_ppf(0.995), 2.5758293035489004, rel_tol=1e-13)
+    assert math.isclose(power.norm_ppf(0.95), 1.6448536269514722, rel_tol=1e-13)
+    assert math.isclose(power.norm_ppf(0.5), 0.0, abs_tol=1e-15)
+    # Deep tails must stay finite and monotone.
+    assert power.norm_ppf(1e-12) < power.norm_ppf(1e-6) < 0 < power.norm_ppf(1 - 1e-6)
+
+
+def test_norm_ppf_round_trips_through_cdf():
+    for p_ in (1e-9, 1e-4, 0.01, 0.2, 0.5, 0.7, 0.975, 0.999, 1 - 1e-9):
+        assert math.isclose(power.norm_cdf(power.norm_ppf(p_)), p_, rel_tol=1e-11)
+
+
 def test_two_group_mdes_closed_form():
     # Independent recomputation (not a loose bound): d = (za+zb)/sqrt(N*p*(1-p)).
-    za, zb = 1.959963985, 0.841621234
+    za, zb = Z_ALPHA_05, Z_POWER_80
     for n in (40, 126, 300):
         expected = (za + zb) / math.sqrt(n * 0.5 * 0.5)
         assert math.isclose(power.mdes_two_group(n), expected, rel_tol=1e-12)
 
 
 def test_paired_mdes_closed_form():
-    za, zb = 1.959963985, 0.841621234
+    za, zb = Z_ALPHA_05, Z_POWER_80
     for n in (20, 33, 200):
         expected = (za + zb) / math.sqrt(n - 1)
         assert math.isclose(power.mdes_paired(n), expected, rel_tol=1e-12)
 
 
 def test_correlation_mdes_closed_form():
-    za, zb = 1.959963985, 0.841621234
+    za, zb = Z_ALPHA_05, Z_POWER_80
     for n in (50, 85, 400):
         expected = math.tanh((za + zb) / math.sqrt(n - 3))
         assert math.isclose(power.mdes_correlation(n), expected, rel_tol=1e-12)

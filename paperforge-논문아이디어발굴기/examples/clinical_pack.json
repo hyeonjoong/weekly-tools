@@ -1,0 +1,59 @@
+{
+  "pack": "clinical-trial-addons",
+  "note": "임상/제약 맥락의 사용자 템플릿 예시. `paperforge <매니페스트> --templates examples/clinical_pack.json` 로 내장 템플릿에 더해 사용합니다. 필드 의미는 README '사용자 템플릿 팩' 절 참고.",
+  "templates": [
+    {
+      "id": "adherence_physio_signal",
+      "title": "복약 순응도와 생리신호: 착용형 지표로 본 순응 패턴",
+      "required": ["watch", "questionnaire"],
+      "optional": ["behavior"],
+      "hypothesis": "자기보고 복약 순응도가 낮은 참가자는 야간 HR/HRV 회복 패턴이 둔화돼 있다.",
+      "predictors": ["자기보고 순응도 점수", "복약 시점 기록"],
+      "outcomes": ["야간 HR 저하폭", "RMSSD 회복 기울기"],
+      "analysis": "순응도(연속)와 생리지표의 부분상관 → 연령·기저 HR 보정 위계적 회귀.",
+      "design": "correlational / predictive",
+      "effect": {"type": "correlation", "r": 0.25},
+      "journal": "Journal of Medical Internet Research / Patient Preference and Adherence",
+      "novelty": "순응도 연구는 대부분 자기보고에 의존 — 착용형 생리지표로 객관화하면 기여가 명확.",
+      "caveats": [
+        "가정 효과 r=0.25는 순응도-생리 연구의 전형적 상한에 가깝습니다. 더 작을 가능성이 크므로 --effect-scale 0.7 로 함께 확인하세요."
+      ]
+    },
+    {
+      "id": "placebo_responder_split",
+      "title": "위약 반응자 판별: 기저 생리 프로파일로 본 반응 이질성",
+      "required": ["moa", "watch"],
+      "optional": ["eeg", "questionnaire"],
+      "hypothesis": "위약군 내 반응자와 비반응자는 기저 자율신경 프로파일(HRV)에서 차이를 보인다.",
+      "predictors": ["기저 RMSSD", "기저 평균 HR", "기저 LF/HF"],
+      "outcomes": ["위약 반응 여부(이분)"],
+      "analysis": "두 군 비교(Welch t / Mann–Whitney + Hedges g) → 로지스틱 회귀 + ROC; 부트스트랩 내부검증.",
+      "design": "two-group comparison",
+      "effect": {"type": "two_group", "d": 0.45, "allocation": 0.35},
+      "journal": "Contemporary Clinical Trials / Journal of Psychosomatic Research",
+      "novelty": "위약 반응 이질성은 임상시험 설계에 직접 영향 — 사전 층화 근거가 됨.",
+      "caveats": [
+        "반응자 비율 35:65 가정으로 사이징했습니다(allocation=0.35). 실제 반응률이 다르면 필요한 N이 달라집니다.",
+        "표본수는 t검정 근사입니다. 로지스틱 회귀/ROC의 최종 검정력은 별도 확인하세요."
+      ]
+    },
+    {
+      "id": "dose_response_within",
+      "title": "용량-반응 within-subject 검증: 조건별 생리 변화",
+      "required": ["eeg", "watch"],
+      "optional": ["respiration", "questionnaire"],
+      "hypothesis": "동일 참가자 내에서 용량/조건이 올라갈수록 각성 관련 생리지표가 단조적으로 변한다.",
+      "predictors": ["용량/조건 수준"],
+      "outcomes": ["EEG 베타/알파 비", "HR/HRV 변화량"],
+      "analysis": "반복측정 혼합효과모형(조건 고정효과, 참가자 랜덤절편) + 선형 추세 대비; 다중비교 보정.",
+      "design": "within-subject (반복측정)",
+      "effect": {"type": "paired", "d": 0.45},
+      "journal": "Psychopharmacology / British Journal of Clinical Pharmacology",
+      "novelty": "within-subject 교차설계는 적은 표본으로도 검정력이 높아 초기 탐색에 적합.",
+      "caveats": [
+        "권장 N은 인접 두 조건의 대응비교(d_z=0.45) 기준입니다 — 전체 추세검정은 보통 더 적게 필요합니다.",
+        "이월효과(carry-over)가 있으면 within-subject 가정이 깨집니다. 세척기간을 확인하세요."
+      ]
+    }
+  ]
+}
