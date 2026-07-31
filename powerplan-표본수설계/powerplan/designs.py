@@ -1,4 +1,4 @@
-"""설계별 검정력 함수 — 계획 단계에서 실제로 쓰는 15가지 검정력 기반 설계.
+"""설계별 검정력 함수 — 계획 단계에서 실제로 쓰는 17가지 검정력 기반 설계.
 
 각 설계는 같은 인터페이스를 따른다:
 
@@ -10,7 +10,8 @@
 **정확 계산**: 비중심 t/F — ``ttest2`` ``paired`` ``onesample`` ``repeated``
 ``crossover``, 연속형 ``noninf``·``equiv``, ``anova``. 정확 이항검정 — ``prop1``.
 **정규근사**: ``prop2``(z), ``corr``(Fisher z), 이분형 ``noninf``·``equiv``(위험차 z),
-``mcnemar``(Connor), ``survival``(Schoenfeld/Freedman).
+``mcnemar``(Connor), ``survival``(Schoenfeld/Freedman), ``count``(음이항 log 발생률비),
+``ordinal``(Whitehead 비례오즈).
 어느 쪽인지는 각 설계의 ``notes()``에 반드시 적는다 — 과대주장하지 않는 것이 이 툴의
 원칙이다.
 
@@ -47,6 +48,9 @@ __all__ = [
     "LogRankSurvival",
     "OneSampleProportion",
     "CrossoverT",
+    "CountRateRatio",
+    "OrdinalProportionalOdds",
+    "po_shift",
     "exponential_event_prob",
     "binomial_sf",
     "DESIGN_KEYS",
@@ -2218,6 +2222,575 @@ class CrossoverT(Design):
         ]
 
 
+# --------------------------------------------------------------------------
+# 16) 반복사건 계수(발생률) 비교 — 음이항/포아송 발생률비
+# --------------------------------------------------------------------------
+@dataclass(frozen=True)
+class CountRateRatio(Design):
+    """반복사건 계수 결과(연간 악화 횟수·발작 횟수·재입원 횟수)의 발생률비 비교.
+
+    COPD 악화, 천식 악화, 뇌전증 발작, 재입원처럼 **한 사람이 여러 번 겪는 사건**은
+    "사건을 겪었는가(이분형)"나 "첫 사건까지의 시간(생존)"으로 바꾸면 정보를 버린다.
+    실제 1차 분석은 거의 언제나 **음이항 회귀의 발생률비(rate ratio)** 이고,
+    표본수도 거기에 맞춰야 한다.
+
+    분산 모형: Y_ij ~ NB(평균 λ_i·t, 분산 λ_i·t + k(λ_i·t)²).
+    log 발생률 추정치의 분산은 대상자 1명당 ``1/(λ_i·t) + k`` 이고(Zhu & Lakkis 2014),
+    따라서
+
+        Var(log RR) = (1/n1)(1/(λ1·t) + k) + (1/n2)(1/(λ2·t) + k)
+
+    k = 0이면 포아송이 된다. ``t``는 1인당 **평균 관찰기간**(노출량)이다.
+    """
+
+    rate1: float                 # 대조군 사건 발생률 (단위 시간당)
+    rate_ratio: float            # 중재/대조 발생률비
+    dispersion: float = 0.0      # 음이항 과산포 k (0 = 포아송)
+    exposure: float = 1.0        # 1인당 평균 관찰기간 t
+    alpha: float = 0.05
+    sides: int = 2
+    ratio: float = 1.0
+    variance: str = "alt"        # alt = 대립가설 하 분산 · null = 귀무가설 하 합동분산
+    time_unit: str = "년"
+
+    key = "count"
+    name_kr = "반복사건 발생률 비교 (음이항/포아송)"
+    name_en = "Event rate ratio (negative binomial / Poisson)"
+    unit_kr = "1군 n"
+    min_unit = 2
+
+    _VARIANCE_KINDS = ("alt", "null")
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "alpha", _check_alpha(self.alpha))
+        object.__setattr__(self, "sides", _check_sides(self.sides))
+        object.__setattr__(self, "ratio", _check_ratio(self.ratio))
+        if not (math.isfinite(self.rate1) and self.rate1 > 0.0):
+            raise PowerPlanError(
+                f"--rate1: 0보다 큰 유한한 발생률이어야 합니다 (받은 값: {self.rate1!r})")
+        if not (math.isfinite(self.rate_ratio) and self.rate_ratio > 0.0):
+            raise PowerPlanError(
+                f"--rr(발생률비): 0보다 큰 유한한 값이어야 합니다 (받은 값: {self.rate_ratio!r})")
+        if self.rate_ratio == 1.0:
+            raise PowerPlanError(
+                "--rr이 1이면(두 군의 발생률이 같으면) 어떤 표본수로도 목표 검정력에 "
+                "도달할 수 없습니다")
+        if not (math.isfinite(self.dispersion) and self.dispersion >= 0.0):
+            raise PowerPlanError(
+                "--dispersion(과산포 k): 0 이상의 유한한 값이어야 합니다 "
+                f"(0 = 포아송; 받은 값: {self.dispersion!r})")
+        if not (math.isfinite(self.exposure) and self.exposure > 0.0):
+            raise PowerPlanError(
+                f"--exposure(1인당 평균 관찰기간): 0보다 커야 합니다 (받은 값: {self.exposure!r})")
+        if self.variance not in self._VARIANCE_KINDS:
+            raise PowerPlanError(
+                f"--variance: alt 또는 null이어야 합니다 (받은 값: {self.variance!r})")
+        # 각 값이 유한하고 0보다 커도 **곱**은 0으로 언더플로하거나 inf로 넘칠 수 있다.
+        # 검정력은 λ·t로만 들어가므로 여기서 막지 않으면 0으로 나누게 된다.
+        rate2 = self.rate1 * self.rate_ratio
+        for label, value in (("--rate1 × --rr(= 중재군 발생률)", rate2),
+                             ("--rate1 × --exposure", self.rate1 * self.exposure),
+                             ("--rate1 × --rr × --exposure", rate2 * self.exposure)):
+            if not (math.isfinite(value) and value > 0.0):
+                raise PowerPlanError(
+                    f"{label}가 계산할 수 있는 범위를 벗어났습니다 ({value!r}). "
+                    "발생률과 관찰기간은 곱으로만 들어가므로, 둘을 같은 시간 단위로 "
+                    "맞춰 현실적인 크기로 적어 주세요 (예: --rate1 1.2 --exposure 1)")
+        object.__setattr__(self, "time_unit", _clean_label(str(self.time_unit), 12) or "년")
+
+    @property
+    def test_kr(self) -> str:
+        # k = 0이면 그건 포아송이다. "음이항 회귀, 과산포 k = 0"이라고 쓴 프로토콜
+        # 문장은 심사에서 "왜 과산포를 0으로 고정했나"를 부르는 자기모순이다.
+        if self.dispersion == 0.0:
+            return "포아송 회귀 발생률비 검정 (로그 링크·log 관찰기간 오프셋)"
+        return "음이항 회귀 발생률비 검정 (로그 링크·log 관찰기간 오프셋)"
+
+    @property
+    def test_en(self) -> str:
+        model = "Poisson" if self.dispersion == 0.0 else "negative binomial"
+        return (f"{model} regression on the event rate ratio "
+                "(log link, log exposure offset)")
+
+    @property
+    def rate2(self) -> float:
+        return self.rate1 * self.rate_ratio
+
+    @property
+    def log_rr(self) -> float:
+        return math.log(self.rate_ratio)
+
+    def _unit_var(self, rate: float) -> float:
+        """대상자 1명이 기여하는 log 발생률의 분산 (1/(λt) + k)."""
+        return 1.0 / (rate * self.exposure) + self.dispersion
+
+    def _power(self, n1: float, n2: float) -> float:
+        if n1 <= 0.0 or n2 <= 0.0:
+            return 0.0
+        var_alt = self._unit_var(self.rate1) / n1 + self._unit_var(self.rate2) / n2
+        if self.variance == "null":
+            # 귀무가설 하 합동 발생률 — 노출량 가중 평균 (분산 = 두 군 공통)
+            pooled = ((n1 * self.rate1 + n2 * self.rate2) / (n1 + n2))
+            unit = self._unit_var(pooled)
+            var_null = unit / n1 + unit / n2
+        else:
+            var_null = var_alt
+        if var_alt <= 0.0 or var_null <= 0.0:  # pragma: no cover - 방어
+            return 0.0
+        delta = abs(self.log_rr)
+        zc = norm_ppf(1.0 - self.alpha / self.sides)
+        bound = zc * math.sqrt(var_null)
+        se = math.sqrt(var_alt)
+        upper = norm_cdf((delta - bound) / se)
+        lower = norm_cdf((-delta - bound) / se) if self.sides == 2 else 0.0
+        return min(1.0, upper + lower)
+
+    def power(self, unit: float) -> float:
+        return self._power(float(unit), self.ratio * float(unit))
+
+    def allocation(self, unit: float) -> dict:
+        n1 = max(self.min_unit, math.ceil(unit - 1e-9))
+        n2 = max(self.min_unit, math.ceil(self.ratio * n1 - 1e-9))
+        return {"n1": n1, "n2": n2, "total": n1 + n2}
+
+    def power_of_allocation(self, alloc: dict) -> float:
+        return self._power(float(alloc["n1"]), float(alloc["n2"]))
+
+    def effect(self) -> dict:
+        return {
+            "name": "발생률비 (rate ratio)",
+            "name_en": "rate ratio",
+            "value": self.rate_ratio,
+            "label": (f"대조 {self.rate1:g}/{self.time_unit} → 중재 "
+                      f"{self.rate2:g}/{self.time_unit}"),
+            "rate1": self.rate1,
+            "rate2": self.rate2,
+            "dispersion": self.dispersion,
+            "exposure": self.exposure,
+            "time_unit": self.time_unit,
+            "variance": self.variance,
+        }
+
+    def scaled(self, factor: float) -> "CountRateRatio":
+        # log 발생률비를 factor배 — RR = 1(효과 없음)이 되지 않도록 막는다
+        try:
+            rr = math.exp(self.log_rr * factor)
+        except OverflowError:
+            raise PowerPlanError(
+                "민감도 분석: 발생률비가 계산 범위를 벗어났습니다 — "
+                "--rr을 현실적인 크기로 줄이세요") from None
+        if abs(rr - 1.0) < 1e-9:
+            raise PowerPlanError("민감도 분석: 발생률비가 1이 되어 계산할 수 없습니다")
+        return CountRateRatio(self.rate1, rr, self.dispersion, self.exposure,
+                              self.alpha, self.sides, self.ratio, self.variance,
+                              self.time_unit)
+
+    def sensitivity_value(self, factor: float) -> str:
+        try:
+            return f"{self.scaled(factor).rate_ratio:.3g}"
+        except PowerPlanError:
+            return f"×{factor:g}"
+
+    @staticmethod
+    def _events(value: float) -> str:
+        """사건 수 표기 — 자릿수가 터무니없이 크면 지수 표기로 바꾼다."""
+        return f"{value:.1f}" if abs(value) < 1e6 else f"{value:.3g}"
+
+    def plan_lines(self, alloc: dict) -> list[tuple[str, str]]:
+        e1 = alloc["n1"] * self.rate1 * self.exposure
+        e2 = alloc["n2"] * self.rate2 * self.exposure
+        lines = [
+            ("기대 사건 수",
+             f"{self._events(e1 + e2)}건 (대조 {self._events(e1)} + 중재 "
+             f"{self._events(e2)}) · 1인당 관찰 {self.exposure:g}{self.time_unit}"),
+            ("1인당 평균 사건 수",
+             f"대조 {self.rate1 * self.exposure:.3g}건 · 중재 "
+             f"{self.rate2 * self.exposure:.3g}건"),
+        ]
+        if self.dispersion > 0.0:
+            var1 = self.rate1 * self.exposure * (1.0 + self.dispersion
+                                                 * self.rate1 * self.exposure)
+            lines.append(
+                ("과산포 영향",
+                 f"k = {self.dispersion:g} → 대조군 개인별 사건 수의 분산/평균 = "
+                 f"{var1 / (self.rate1 * self.exposure):.2f}배 (포아송이면 1.00배)"))
+        return lines
+
+    def information(self, alloc: dict) -> dict:
+        base = Design.information(self, alloc)
+        base["caveat"] = (
+            "'누적 N'은 **계획된 관찰기간을 마친** 인원입니다. 계수 결과의 정보량은 "
+            f"인원 수가 아니라 **누적 관찰량(person-{self.time_unit})** 에 가까우므로, "
+            "중간분석 시점은 등록 인원이 아니라 '등록 인원 × 관찰기간'으로 프로토콜에 "
+            "적으세요 (짧게 관찰된 사람이 많으면 인원 기준 50%가 정보 50%가 아닙니다).")
+        return base
+
+    def notes(self) -> list[str]:
+        expected1 = self.rate1 * self.exposure
+        out = [
+            "음이항(과산포 포아송) 회귀의 log 발생률비에 대한 **정규근사**입니다 "
+            "(비중심 t 같은 정확계산이 아닙니다).",
+            f"1인당 평균 관찰기간 t = {self.exposure:g}{self.time_unit}로 계산했습니다. "
+            "실제로는 사람마다 관찰기간이 다르며, 이 계산은 그 **평균**만 반영합니다 — "
+            "관찰기간이 크게 흩어지면(예: 절반이 중도 이탈) 검정력이 더 떨어집니다.",
+        ]
+        if self.dispersion > 0.0:
+            out.append(
+                f"과산포 k = {self.dispersion:g} (음이항 분산 = μ + k·μ²). 사전연구가 "
+                "있으면 1인당 사건 수의 평균과 분산으로 k = (분산 − 평균) / 평균² 로 "
+                "추정하세요. k를 낙관적으로(작게) 잡으면 표본수가 크게 과소해집니다.")
+            out.append(
+                "⚠ **문헌의 값이 k의 역수일 수 있습니다.** R `glm.nb`의 `theta`, "
+                "`rnbinom`의 `size`, SAS `PROC GENMOD`의 표기 등은 분산을 "
+                "μ + μ²/θ 로 쓰므로 그 θ는 여기서 넣을 k의 **역수**입니다"
+                f" (θ = 0.7이면 --dispersion {1 / 0.7:.2f}). 어느 모수인지 확인하지 않고 "
+                "그대로 넣으면 표본수가 수십 % 어긋납니다.")
+        else:
+            out.append(
+                "⚠ --dispersion 0 = **포아송**(분산 = 평균)을 가정했습니다. 임상 계수 "
+                "자료는 거의 항상 과산포되어 있어(자주 악화되는 사람이 따로 있다) 이 "
+                "가정은 표본수를 크게 과소평가합니다. 사전연구가 있으면 k를 추정해 "
+                "--dispersion으로 꼭 넣으세요.")
+        if expected1 < 0.5:
+            out.append(
+                f"⚠ 대조군의 1인당 기대 사건 수가 {expected1:.3g}건으로 매우 적습니다 — "
+                "이 영역에서는 정규근사가 낙관적입니다. 관찰기간(--exposure)을 늘리거나 "
+                "모의실험으로 확인하세요.")
+        if self.variance == "null":
+            # 방향을 말로 단정하지 않는다. 1:1에서는 1/λ의 볼록성 때문에 합동 분산이
+            # 항상 더 작지만, 배분비가 다르면(큰 군의 발생률이 낮을 때) 뒤집힌다.
+            # 실제로 같은 n에서 두 분산을 비교해 **계산된 방향**을 적는다.
+            direction = self._null_vs_alt_direction()
+            out.append(
+                "--variance null: 기각역을 **귀무가설 하 합동 발생률**(총 사건 수 / "
+                "총 관찰량 — 포아송에서 H0의 최대우도추정치)로 잡았습니다(점수검정 "
+                f"계열). 이 설정에서는 기본값(alt)보다 표본수가 {direction}. "
+                "실제 1차 분석이 음이항 회귀의 Wald 검정이면 기본값(alt)이 더 잘 "
+                "맞습니다.")
+        else:
+            direction = CountRateRatio(
+                self.rate1, self.rate_ratio, self.dispersion, self.exposure,
+                self.alpha, self.sides, self.ratio, "null", self.time_unit,
+            )._null_vs_alt_direction()
+            out.append(
+                "--variance alt(기본): 대립가설 하 분산으로 기각역을 잡았습니다 — "
+                "음이항 회귀의 Wald 검정(대부분의 1차 분석)과 맞는 선택입니다. "
+                f"--variance null(점수검정 계열)로 바꾸면 표본수가 {direction}")
+        out.append(
+            "--cluster-size/--cluster-icc의 설계효과 1 + (m−1)·ICC는 **평균·비율**을 "
+            "위해 유도된 식입니다. 발생률에 그대로 쓰면 근사의 근사이니, 군집 무작위배정 "
+            "계수 결과에는 여유를 두거나 모의실험으로 확인하세요.")
+        out.append(
+            "--dropout은 '분석 대상에서 빠지는 인원'만 보정합니다. 계수 결과에서는 "
+            "중도 이탈이 **관찰기간 단축**으로도 작용하므로(그 사람도 분석에는 남는다), "
+            "이탈이 많으면 --exposure를 실제 평균 관찰기간으로 낮춰 잡는 편이 정직합니다.")
+        return out
+
+    def _null_vs_alt_direction(self) -> str:
+        """같은 n에서 합동(null) 분산과 대립가설(alt) 분산의 크기를 실제로 비교."""
+        n1, n2 = 1.0, self.ratio
+        var_alt = self._unit_var(self.rate1) / n1 + self._unit_var(self.rate2) / n2
+        pooled = (n1 * self.rate1 + n2 * self.rate2) / (n1 + n2)
+        unit = self._unit_var(pooled)
+        var_null = unit / n1 + unit / n2
+        if var_null < var_alt * (1.0 - 1e-12):
+            return "**작아집니다**(보수적인 쪽이 아닙니다)"
+        if var_null > var_alt * (1.0 + 1e-12):
+            return "**커집니다**(더 보수적입니다)"
+        return "거의 같습니다"
+
+    def references(self) -> list[str]:
+        return [
+            "Zhu H, Lakkis H. Sample size calculation for comparing two negative "
+            "binomial rates. Stat Med. 2014;33:376-387.",
+            "Keene ON, Jones MRK, Lane PW, Anderson J. Analysis of exacerbation "
+            "rates in asthma and chronic obstructive pulmonary disease: example "
+            "from the TRISTAN study. Pharm Stat. 2007;6:89-97.",
+            "Signorini DF. Sample size for Poisson regression. "
+            "Biometrika. 1991;78:446-450. (k = 0 포아송 특수경우)",
+        ]
+
+
+# --------------------------------------------------------------------------
+# 17) 순서형 결과 — 비례오즈(proportional odds) / Wilcoxon–Mann–Whitney
+# --------------------------------------------------------------------------
+def po_shift(probs: tuple, odds_ratio: float) -> tuple:
+    """비례오즈 모형에서 OR만큼 이동한 두 번째 군의 범주 확률.
+
+    누적확률 γ_i를 로짓 척도에서 log(OR)만큼 옮긴다:
+    logit(γ2_i) = logit(γ1_i) + log(OR).
+    OR > 1이면 **낮은 범주 쪽으로** 확률이 몰린다 (누적확률이 커진다).
+    """
+    log_or = math.log(odds_ratio)
+    out = []
+    prev = 0.0
+    cum = 0.0
+    for i, p in enumerate(probs[:-1]):
+        cum += p
+        if not (0.0 < cum < 1.0):
+            # 누적확률이 0이나 1에 닿으면 로짓이 ±무한대가 된다. 예전에는 여기서
+            # 0으로 나누며 트레이스백으로 죽었다 (--probs 0.2,0.3,0.5,0.0000001).
+            raise PowerPlanError(
+                f"--probs: {i + 1}번째 범주까지의 누적확률이 {cum:.6g}입니다 — "
+                "0이나 1이 되면 오즈비를 정의할 수 없습니다. 사실상 아무도 들어가지 "
+                "않는 범주는 이웃 범주와 합쳐서 적으세요")
+        # exp/1+exp를 로짓 척도에서 안정적으로 — 오즈를 직접 곱하면 큰 OR에서
+        # inf/(1+inf) = nan이 되어 '중재군 분포: nan'이 출력됐다.
+        z = math.log(cum / (1.0 - cum)) + log_or
+        g = 1.0 / (1.0 + math.exp(-z)) if z >= 0.0 else math.exp(z) / (1.0 + math.exp(z))
+        g = min(1.0, max(prev, g))       # 누적확률은 단조 — 반올림으로도 뒤집히지 않게
+        out.append(g - prev)
+        prev = g
+    out.append(max(0.0, 1.0 - prev))
+    return tuple(out)
+
+
+@dataclass(frozen=True)
+class OrdinalProportionalOdds(Design):
+    """순서형 결과(등급 척도)의 두 군 비교 — 비례오즈 / Wilcoxon–Mann–Whitney.
+
+    mRS, WHO 임상개선척도, NRS 통증등급, Likert 만족도, CTCAE 등급처럼 결과가
+    **순서 있는 범주**일 때 쓴다. 실무에서 흔한 "0~2 vs 3~6으로 묶어 비율 비교"는
+    정보를 버리는 선택이며, 같은 자료로 순서형 분석을 하면 표본수가 줄어든다.
+
+    Whitehead(1993)의 표본수 공식과 같은 근거를 쓴다 — 비례오즈 모형의 log OR에
+    대한 Fisher 정보량은 총 N명·배분비 q1:q2에서
+
+        I = N·q1·q2·(1 − Σ p̄_i³) / 3        (p̄_i = 배분 가중 평균 범주확률)
+
+    이며, 검정력은 Var(log ÔR) = 1/I 의 정규근사로 구한다.
+    """
+
+    probs: tuple                 # 대조군의 범주 확률 (합 1)
+    odds_ratio: float
+    alpha: float = 0.05
+    sides: int = 2
+    ratio: float = 1.0
+
+    key = "ordinal"
+    name_kr = "순서형 결과 두 군 비교 (비례오즈)"
+    name_en = "Ordinal outcome, two groups (proportional odds)"
+    test_kr = "비례오즈 순서형 로지스틱 회귀 (= Wilcoxon–Mann–Whitney 계열)"
+    test_en = ("proportional-odds ordinal logistic regression "
+               "(Wilcoxon-Mann-Whitney family)")
+    unit_kr = "1군 n"
+    min_unit = 2
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "alpha", _check_alpha(self.alpha))
+        object.__setattr__(self, "sides", _check_sides(self.sides))
+        object.__setattr__(self, "ratio", _check_ratio(self.ratio))
+        probs = tuple(float(p) for p in self.probs)
+        if len(probs) < 3:
+            raise PowerPlanError(
+                f"--probs: 순서형 범주가 3개 이상이어야 합니다 (받은 개수: {len(probs)}). "
+                "2개면 이분형이므로 prop2를 쓰세요")
+        if len(probs) > 30:
+            raise PowerPlanError(
+                f"--probs: 범주가 너무 많습니다 ({len(probs)}개). 30개 이하로 묶으세요 "
+                "— 그 이상이면 연속형으로 보고 ttest2를 쓰는 편이 낫습니다")
+        for p in probs:
+            if not (math.isfinite(p) and p > 0.0):
+                raise PowerPlanError(
+                    f"--probs: 모든 범주 확률이 0보다 커야 합니다 (받은 값: {p!r}). "
+                    "아무도 들어가지 않는 범주는 이웃 범주와 합치세요")
+        total = math.fsum(probs)
+        if abs(total - 1.0) > 1e-6:
+            if total <= 0.0:  # pragma: no cover - 위에서 걸러짐
+                raise PowerPlanError("--probs: 확률의 합이 0입니다")
+            if abs(total - 100.0) < 1e-3:
+                raise PowerPlanError(
+                    "--probs: 합이 100입니다 — 퍼센트가 아니라 비율(합 1)로 적으세요 "
+                    "(예: 0.1,0.2,0.7)")
+            raise PowerPlanError(
+                f"--probs: 확률의 합이 1이어야 합니다 (받은 합: {total:.12g}, "
+                f"차이 {total - 1.0:+.3g}). 합이 1이 아니면 정규화 결과가 의도와 "
+                "다를 수 있어 그대로 거절합니다")
+        # 허용오차(1e-6) 안이어도 **부분** 누적확률이 1에 닿을 수 있다
+        # (0.2,0.3,0.5,1e-7). 그러면 로짓이 무한대가 되므로 여기서 막는다.
+        cum = 0.0
+        for i, p in enumerate(probs[:-1]):
+            cum += p
+            if not (0.0 < cum < 1.0):
+                raise PowerPlanError(
+                    f"--probs: {i + 1}번째 범주까지의 누적확률이 {cum:.12g}입니다 — "
+                    "0이나 1이 되면 오즈비를 정의할 수 없습니다. 사실상 아무도 "
+                    "들어가지 않는 범주는 이웃 범주와 합쳐서 적으세요")
+        object.__setattr__(self, "probs", probs)
+        if not (math.isfinite(self.odds_ratio) and self.odds_ratio > 0.0):
+            raise PowerPlanError(
+                f"--or(오즈비): 0보다 큰 유한한 값이어야 합니다 (받은 값: {self.odds_ratio!r})")
+        if self.odds_ratio == 1.0:
+            raise PowerPlanError(
+                "--or이 1이면(두 군의 분포가 같으면) 어떤 표본수로도 목표 검정력에 "
+                "도달할 수 없습니다")
+
+    @property
+    def probs2(self) -> tuple:
+        """비례오즈 가정에서 유도한 중재군 범주 확률."""
+        return po_shift(self.probs, self.odds_ratio)
+
+    @property
+    def log_or(self) -> float:
+        return math.log(self.odds_ratio)
+
+    def mean_probs(self, ratio: float | None = None) -> tuple:
+        """두 군의 배분 가중 평균 범주확률 p̄ (1:1이면 단순 평균)."""
+        r = self.ratio if ratio is None else ratio
+        q1, q2 = 1.0 / (1.0 + r), r / (1.0 + r)
+        return tuple(q1 * a + q2 * b for a, b in zip(self.probs, self.probs2))
+
+    @staticmethod
+    def tie_factor_of(mean_probs) -> float:
+        """1 − Σ p̄_i³ — 범주가 한쪽에 몰릴수록 작아지고 표본수가 커진다.
+
+        검정력 계산과 **화면에 찍히는 값**이 같은 식을 쓰도록 여기 한 곳에만 둔다.
+        예전에는 이 식이 두 군데에 복사돼 있어서, 한쪽만 바꾸면 출력된 보정계수와
+        실제로 쓰인 보정계수가 조용히 어긋날 수 있었다.
+        """
+        return 1.0 - math.fsum(p ** 3 for p in mean_probs)
+
+    @property
+    def tie_factor(self) -> float:
+        return self.tie_factor_of(self.mean_probs())
+
+    def win_probability(self) -> float:
+        """P(중재군 > 대조군) + ½P(동점) — Mann–Whitney 확률(공통언어 효과크기).
+
+        범주가 '높을수록 좋다'는 방향은 정하지 않는다. 여기서는 **범주 번호가 클수록**
+        큰 값으로 보고 계산하며, OR > 1이면 중재군이 낮은 범주로 몰리므로 0.5보다
+        작아진다.
+        """
+        p1, p2 = self.probs, self.probs2
+        greater = 0.0
+        for j, b in enumerate(p2):
+            greater += b * math.fsum(p1[:j])
+        ties = math.fsum(a * b for a, b in zip(p1, p2))
+        return greater + 0.5 * ties
+
+    def _power(self, n1: float, n2: float) -> float:
+        n = n1 + n2
+        if n <= 0.0:
+            return 0.0
+        # 실제 배분(n1:n2)으로 p̄를 다시 계산한다 — 정수 올림으로 배분비가
+        # 조금 달라져도 정보량과 일관되게 유지하기 위해서.
+        r = n2 / n1
+        tie = self.tie_factor_of(self.mean_probs(r))
+        # `tie <= 0.0`은 NaN을 통과시킨다 (NaN 비교는 항상 False) — 그러면 검정력이
+        # NaN이 되고 min(1.0, NaN)이 1.0을 돌려주어 "n = 2, 검정력 100%"가 찍혔다.
+        if not (tie > 0.0):
+            return 0.0
+        info = n * (n1 / n) * (n2 / n) * tie / 3.0
+        se = math.sqrt(1.0 / info)
+        delta = abs(self.log_or)
+        zc = norm_ppf(1.0 - self.alpha / self.sides)
+        upper = norm_cdf(delta / se - zc)
+        lower = norm_cdf(-delta / se - zc) if self.sides == 2 else 0.0
+        return min(1.0, upper + lower)
+
+    def power(self, unit: float) -> float:
+        return self._power(float(unit), self.ratio * float(unit))
+
+    def allocation(self, unit: float) -> dict:
+        n1 = max(self.min_unit, math.ceil(unit - 1e-9))
+        n2 = max(self.min_unit, math.ceil(self.ratio * n1 - 1e-9))
+        return {"n1": n1, "n2": n2, "total": n1 + n2}
+
+    def power_of_allocation(self, alloc: dict) -> float:
+        return self._power(float(alloc["n1"]), float(alloc["n2"]))
+
+    def effect(self) -> dict:
+        return {
+            "name": "오즈비 (비례오즈)",
+            "name_en": "odds ratio (proportional odds)",
+            "value": self.odds_ratio,
+            "label": (f"범주 {len(self.probs)}개 · 동점보정 1−Σp̄³ = "
+                      f"{self.tie_factor:.4f}"),
+            "categories": len(self.probs),
+            "probs1": self.probs,
+            "probs2": self.probs2,
+            "mean_probs": self.mean_probs(),
+            "tie_factor": self.tie_factor,
+            "win_probability": self.win_probability(),
+        }
+
+    def scaled(self, factor: float) -> "OrdinalProportionalOdds":
+        # log OR을 factor배 (OR = 1은 계산 불가)
+        try:
+            odds = math.exp(self.log_or * factor)
+        except OverflowError:
+            raise PowerPlanError(
+                "민감도 분석: 오즈비가 계산 범위를 벗어났습니다 — "
+                "--or을 현실적인 크기로 줄이세요") from None
+        if abs(odds - 1.0) < 1e-9:
+            raise PowerPlanError("민감도 분석: 오즈비가 1이 되어 계산할 수 없습니다")
+        return OrdinalProportionalOdds(self.probs, odds, self.alpha, self.sides,
+                                       self.ratio)
+
+    def sensitivity_value(self, factor: float) -> str:
+        try:
+            return f"{self.scaled(factor).odds_ratio:.3g}"
+        except PowerPlanError:
+            return f"×{factor:g}"
+
+    def plan_lines(self, alloc: dict) -> list[tuple[str, str]]:
+        fmt = lambda ps: " / ".join(f"{p:.3f}" for p in ps)  # noqa: E731
+        lines = [
+            ("대조군 범주 분포", fmt(self.probs)),
+            ("중재군 범주 분포 (비례오즈 가정)", fmt(self.probs2)),
+            ("동점 보정계수 1 − Σp̄³",
+             f"{self.tie_factor:.4f} (1에 가까울수록 효율적 — 한 범주에 몰리면 작아짐)"),
+            ("Mann–Whitney 확률",
+             f"{self.win_probability():.4f} = P(중재 > 대조) + ½P(동점), "
+             "범주 번호가 클수록 큰 값이라고 볼 때"),
+        ]
+        expected_min = min(min(self.probs), min(self.probs2)) * min(alloc["n1"],
+                                                                   alloc["n2"])
+        lines.append(("가장 드문 범주의 기대 인원", f"군당 약 {expected_min:.1f}명"))
+        return lines
+
+    def notes(self) -> list[str]:
+        out = [
+            "**비례오즈(proportional odds)** 를 가정합니다 — 어느 절단점에서 잘라도 "
+            "오즈비가 같다는 뜻입니다. 이 가정이 심하게 깨지면(예: 중간 범주만 움직이면) "
+            "이 표본수는 맞지 않습니다.",
+            "Whitehead(1993)의 정규근사입니다(비중심 t 같은 정확계산이 아닙니다). "
+            "군당 20~30명 미만에서는 여유를 두세요.",
+            f"동점 보정계수 1 − Σp̄³ = {self.tie_factor:.4f}입니다. 한 범주에 사람이 "
+            "몰릴수록 작아지고 표본수는 그만큼 커집니다 — 범주 확률은 문헌이 아니라 "
+            "**우리 기관의 실제 분포**로 넣으세요.",
+            "이 검정은 오즈비가 1에 가까울 때 Wilcoxon–Mann–Whitney(순위합) 검정과 "
+            "국소적으로 같은 검정력을 가집니다. 1차 분석을 순위합으로 계획해도 이 "
+            "표본수를 쓸 수 있습니다.",
+            "순서형 그대로 분석하면, 같은 자료를 이분형으로 묶어(예: '0~2 vs 3~6') "
+            "비율 비교하는 것보다 대개 표본수가 적게 듭니다. 묶어서 분석할 계획이면 "
+            "prop2로 따로 계산해 큰 쪽을 쓰세요.",
+        ]
+        out.append(
+            "--cluster-size/--cluster-icc의 설계효과 1 + (m−1)·ICC는 **평균·비율**을 "
+            "위해 유도된 식이고, 순서형의 ICC는 잠재변수 척도에서 정의됩니다. "
+            "군집 무작위배정 순서형 연구에는 여유를 두세요.")
+        smallest = min(min(self.probs), min(self.probs2))
+        if smallest < 0.02:
+            out.append(
+                f"⚠ 가장 드문 범주의 확률이 {smallest:.3g}입니다 — 기대 인원이 한 자리면 "
+                "이웃 범주와 합쳐서 계획하는 편이 안전합니다(근사가 무너집니다).")
+        if self.ratio != 1.0:
+            out.append(
+                f"배분비 1:{self.ratio:g} — 같은 총 N이면 1:1이 가장 높은 검정력을 줍니다.")
+        return out
+
+    def references(self) -> list[str]:
+        return [
+            "Whitehead J. Sample size calculations for ordered categorical data. "
+            "Stat Med. 1993;12:2257-2271.",
+            "Walters SJ, Campbell MJ, Machin D. Medical Statistics: A Textbook for "
+            "the Health Sciences. 5th ed. Wiley; 2021. (순서형 결과의 표본수)",
+            "McCullagh P. Regression models for ordinal data. "
+            "J R Stat Soc Series B. 1980;42:109-142. (비례오즈 모형)",
+        ]
+
+
 DESIGN_KEYS = (
     TwoSampleT.key,
     PairedT.key,
@@ -2234,4 +2807,6 @@ DESIGN_KEYS = (
     LogRankSurvival.key,
     OneSampleProportion.key,
     CrossoverT.key,
+    CountRateRatio.key,
+    OrdinalProportionalOdds.key,
 )

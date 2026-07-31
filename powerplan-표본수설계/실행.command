@@ -7,11 +7,12 @@ echo "=================================================================="
 echo "  \"이 연구 몇 명 필요한가?\"를 계산하고, 프로토콜/IRB에 붙일"
 echo "  한국어·영어 문장까지 만들어 줍니다. (외부 의존성 0)"
 echo "   · 두 군/전후/3군 이상/반복측정(MMRM)/비율/상관/생존분석 설계"
+echo "   · 반복사건 횟수(음이항 발생률비)·순서형 등급(비례오즈) 설계"
 echo "   · 비열등성·동등성(TOST) — 연속형과 이분형 모두 · 대응 비율(McNemar)"
 echo "   · 중간분석(군차별설계): α 소비함수 경계·표본수 팽창계수·기대 표본수"
 echo "   · 무익성(futility) 중단 경계: β 소비함수, 비구속적 — DSMB 헌장용"
 echo "   · 평균·ANOVA 계열은 비중심 t·F 분포로 정확 계산 (G*Power 값과 일치)"
-echo "     비율은 정규근사 z, 상관은 Fisher z, ICC·LoA는 근사식 (한계는 결과에 표시)"
+echo "     비율은 정규근사 z, 상관은 Fisher z, ICC·LoA·발생률(음이항)·순서형(비례오즈)은 근사식 (한계는 결과에 표시)"
 echo "   · 분석 표본수 → 설계효과(군집) → 탈락 보정 → 모집 표본수를 구분해 제시"
 echo "   · 신뢰도 연구(ICC)·Bland-Altman·범주형 일치도(kappa)는 '정밀도 기준'"
 echo "   · 기저값이 있으면 ANCOVA 보정(--analysis ancova)으로 표본수를 크게 줄임"
@@ -96,7 +97,19 @@ echo ""
 run ttest2 --d 0.5 --power 0.9 --interim 1 --futility obf
 
 echo ""
-echo "### 예제 9) 확보 가능한 인원이 군당 30명뿐이라면? (검정력 역산)"
+echo "### 예제 9) 결과가 '연간 악화 횟수'라면 (반복사건 계수 · 음이항)"
+echo "\$ powerplan count --rate1 1.2 --rr 0.75 --dispersion 0.7 --power 0.9"
+echo ""
+run count --rate1 1.2 --rr 0.75 --dispersion 0.7 --power 0.9
+
+echo ""
+echo "### 예제 10) 결과가 순서 있는 등급이라면 (mRS·CTCAE·Likert · 비례오즈)"
+echo "\$ powerplan ordinal --probs 0.1,0.2,0.4,0.2,0.1 --or 1.8 --power 0.9"
+echo ""
+run ordinal --probs 0.1,0.2,0.4,0.2,0.1 --or 1.8 --power 0.9
+
+echo ""
+echo "### 예제 11) 확보 가능한 인원이 군당 30명뿐이라면? (검정력 역산)"
 echo "\$ powerplan ttest2 --d 0.5 --n 30 --power 0.8"
 echo ""
 run ttest2 --d 0.5 --n 30 --power 0.8

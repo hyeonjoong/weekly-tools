@@ -23,6 +23,7 @@ import sys
 from . import __version__
 from .designs import (
     CorrelationTest,
+    CountRateRatio,
     CrossoverT,
     EquivalenceProportions,
     EquivalenceT,
@@ -33,6 +34,7 @@ from .designs import (
     OneSampleProportion,
     OneSampleT,
     OneWayAnova,
+    OrdinalProportionalOdds,
     PairedT,
     RepeatedMeasuresT,
     TwoProportions,
@@ -60,6 +62,8 @@ _EPILOG = """
   powerplan mcnemar --p01 0.05 --p10 0.15 --power 0.8   # 같은 사람의 두 판정
   powerplan prop1 --p1 0.60 --p0 0.45 --power 0.8   # 단일군 vs 성능목표치(기기 확증시험)
   powerplan crossover --diff 3 --sd-within 6 --power 0.8   # 2x2 교차설계
+  powerplan count --rate1 1.2 --rr 0.75 --dispersion 0.7 --power 0.9  # 연간 악화 횟수
+  powerplan ordinal --probs 0.1,0.2,0.4,0.2,0.1 --or 1.8 --power 0.9  # 순서형 등급척도
   powerplan diag --sens 0.9 --spec 0.85 --prevalence 0.2 --half-width 0.05
   powerplan noninf --margin 3 --sd 8 --power 0.8    # 비열등성 (연속형)
   powerplan noninf --margin 0.1 --p1 0.7 --p2 0.7 --power 0.8   # 비열등성 (비율)
@@ -75,6 +79,8 @@ _EPILOG = """
   두 군 평균 비교 → ttest2 | 전후(같은 사람) → paired | 기준값 대비 → onesample
   같은 지표를 여러 번 측정 → repeated | 반응률(예/아니오) → prop2 | 3군 이상 → anova
   두 변수 관계 → corr | 사건까지의 시간(재발·사망) → survival
+  한 사람이 여러 번 겪는 사건의 **횟수**(악화·발작·재입원) → count
+  순서 있는 등급(mRS·CTCAE·Likert) → ordinal
   같은 사람의 두 이분형 판정 → mcnemar
   "더 나쁘지 않다" → noninf | "같다" → equiv  (둘 다 연속형·이분형 모두 지원)
   단일군 vs 성능목표치 → prop1 | 같은 사람이 두 처치를 다 받음 → crossover
@@ -275,6 +281,31 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="전체 대상자 중 '방법2만 양성'인 비율")
     _add_common(p, cluster=False)
 
+    p = sub.add_parser("count", help="반복사건 발생률 비교 (음이항/포아송 — 악화·발작·재입원 횟수)")
+    p.add_argument("--rate1", type=float, required=True,
+                   help="대조군 발생률 (예: 연 1.2회면 1.2, --time-unit 년)")
+    p.add_argument("--rr", type=float, default=None,
+                   help="목표 발생률비 (중재/대조; 예: 0.75 = 25%% 감소)")
+    p.add_argument("--rate2", type=float, default=None,
+                   help="중재군 발생률 (--rr 대신 직접 지정)")
+    p.add_argument("--dispersion", type=float, default=0.0,
+                   help="음이항 과산포 k (분산 = μ + k·μ²; 0 = 포아송, 기본 0)")
+    p.add_argument("--exposure", type=float, default=1.0,
+                   help="1인당 평균 관찰기간 t (--time-unit 단위, 기본 1)")
+    p.add_argument("--variance", default="alt", choices=("alt", "null"),
+                   help="기각역의 분산: alt(대립가설 하, 기본) · null(귀무가설 하 합동)")
+    p.add_argument("--time-unit", default="년", help="발생률의 시간 단위 표기 (기본 '년')")
+    _add_common(p, ratio=True)
+
+    p = sub.add_parser("ordinal", help="순서형 결과 두 군 비교 (비례오즈 — mRS·등급척도·Likert)")
+    p.add_argument("--probs", required=True,
+                   help="**대조군**의 범주 확률, 낮은 범주부터 (예: 0.1,0.2,0.4,0.2,0.1 — 합 1)")
+    p.add_argument("--or", dest="odds_ratio", type=float, default=None,
+                   help="목표 비례오즈비 (>1이면 중재군이 **낮은 범주** 쪽으로 이동)")
+    p.add_argument("--probs2", default=None,
+                   help="중재군 범주 확률 (--or 대신; 누적로짓 차이의 평균으로 OR을 추정)")
+    _add_common(p, ratio=True)
+
     p = sub.add_parser("kappa", help="범주형 일치도 κ 연구 (신뢰구간 폭 기준)")
     p.add_argument("--kappa", type=float, required=True, help="예상 κ (0~1)")
     p.add_argument("--width", type=float, required=True, help="목표 CI 전체 폭 (예: 0.2 = ±0.1)")
@@ -350,11 +381,6 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="군 라벨·관측 범위를 결과에서 가립니다 (출력물을 공유할 때)")
     _add_common(p)
     return parser
-
-
-#: 재현 정보에서 값을 가려야 하는 옵션 (--redact를 켰을 때)
-_REDACT_OPTIONS = frozenset({"--filter", "--groups", "--value", "--group", "--baseline",
-                             "--pre", "--post"})
 
 
 def unit_from_total(design, total: int) -> int:
@@ -557,7 +583,8 @@ def _validate_common(args) -> None:
                  "margin", "diff", "r", "p1", "p2", "f", "icc", "width", "half_width",
                  "baseline_r", "ratio", "hr", "median1", "accrual", "followup",
                  "event_rate", "rho", "p01", "p10", "kappa", "prevalence",
-                 "p0", "sd_within", "sens", "spec"):
+                 "p0", "sd_within", "sens", "spec",
+                 "rate1", "rate2", "rr", "dispersion", "exposure", "odds_ratio"):
         value = getattr(args, name, None)
         if value is not None:
             as_float(f"--{name.replace('_', '-')}", value)
@@ -748,7 +775,148 @@ def _make_design(args, alpha: float):
         return OneSampleProportion(args.p1, args.p0, alpha, args.sides)
     if key == "crossover":
         return CrossoverT(args.diff, args.sd_within, alpha, args.sides)
+    if key == "count":
+        if args.rr is None and args.rate2 is None:
+            raise PowerPlanError(
+                "--rr(발생률비) 또는 --rate2(중재군 발생률) 중 하나를 지정하세요")
+        if args.rr is not None and args.rate2 is not None:
+            raise PowerPlanError(
+                "--rr 과 --rate2 는 함께 쓸 수 없습니다 (하나만 지정하세요)")
+        if args.rate2 is not None:
+            if not (math.isfinite(args.rate2) and args.rate2 > 0.0):
+                raise PowerPlanError(
+                    f"--rate2: 0보다 큰 유한한 발생률이어야 합니다 (받은 값: {args.rate2!r})")
+            if not (math.isfinite(args.rate1) and args.rate1 > 0.0):
+                raise PowerPlanError(
+                    f"--rate1: 0보다 큰 유한한 발생률이어야 합니다 (받은 값: {args.rate1!r})")
+            rr = args.rate2 / args.rate1
+            if rr == 1.0:
+                raise PowerPlanError(
+                    "--rate2가 --rate1과 같습니다(발생률비 1) — 어떤 표본수로도 "
+                    "목표 검정력에 도달할 수 없습니다")
+        else:
+            rr = args.rr
+        return CountRateRatio(args.rate1, rr, args.dispersion, args.exposure,
+                              alpha, args.sides, args.ratio, args.variance,
+                              args.time_unit)
+    if key == "ordinal":
+        probs = _parse_probs("--probs", args.probs)
+        if args.odds_ratio is None and args.probs2 is None:
+            raise PowerPlanError(
+                "--or(비례오즈비) 또는 --probs2(중재군 범주 확률) 중 하나를 지정하세요")
+        if args.odds_ratio is not None and args.probs2 is not None:
+            raise PowerPlanError(
+                "--or 과 --probs2 는 함께 쓸 수 없습니다 (하나만 지정하세요)")
+        if args.probs2 is not None:
+            probs2 = _parse_probs("--probs2", args.probs2)
+            if len(probs2) != len(probs):
+                raise PowerPlanError(
+                    f"--probs2의 범주 개수({len(probs2)})가 --probs({len(probs)})와 "
+                    "다릅니다 — 두 군의 범주는 같아야 합니다")
+            _check_distribution("--probs2", probs2)
+            odds_ratio, cut_ors = _or_from_two_distributions(probs, probs2)
+            if odds_ratio == 1.0:
+                raise PowerPlanError(
+                    "--probs2에서 유도한 오즈비가 1입니다(두 군의 분포가 사실상 "
+                    "같습니다) — 어떤 표본수로도 목표 검정력에 도달할 수 없습니다")
+            args._ordinal_cut_ors = cut_ors
+            args._ordinal_probs2 = probs2
+        else:
+            odds_ratio = args.odds_ratio
+        return OrdinalProportionalOdds(probs, odds_ratio, alpha, args.sides, args.ratio)
     raise PowerPlanError(f"알 수 없는 설계: {key}")  # pragma: no cover
+
+
+def _parse_probs(option: str, raw: str) -> tuple:
+    """'0.1,0.2,0.7' → (0.1, 0.2, 0.7). 값의 범위 검증은 설계가 맡는다."""
+    parts = [p.strip() for p in str(raw).replace(" ", ",").split(",") if p.strip()]
+    if not parts:
+        raise PowerPlanError(
+            f"{option}: 범주 확률을 쉼표로 적으세요 (예: {option} 0.1,0.2,0.4,0.2,0.1)")
+    out = []
+    for part in parts:
+        try:
+            out.append(float(part))
+        except ValueError:
+            raise PowerPlanError(
+                f"{option}: 숫자여야 합니다 (받은 값: {part!r}). "
+                f"예: {option} 0.1,0.2,0.4,0.2,0.1"
+            ) from None
+    return tuple(out)
+
+
+def _check_distribution(option: str, probs: tuple) -> None:
+    """범주 확률의 기본 검증 — `--probs`가 받는 것과 **같은 기준**을 적용한다.
+
+    예전에는 `--probs2`가 개수만 맞으면 통과했다. 그래서 `0.1,0.1,0.1`(합 0.3)이
+    조용히 오즈비 0.333으로 읽혀 표본수가 절반이 되고, 마지막 원소는 아예 쓰이지도
+    않아 `0.1,0.2,0.6`과 `0.1,0.2,0.9`가 같은 결과를 냈다. 한쪽만 엄격한 검증은
+    검증이 아니다.
+    """
+    for p in probs:
+        if not (math.isfinite(p) and p > 0.0):
+            raise PowerPlanError(
+                f"{option}: 모든 범주 확률이 0보다 커야 합니다 (받은 값: {p!r}). "
+                "아무도 들어가지 않는 범주는 이웃 범주와 합치세요")
+    total = math.fsum(probs)
+    if abs(total - 1.0) > 1e-6:
+        if abs(total - 100.0) < 1e-3:
+            raise PowerPlanError(
+                f"{option}: 합이 100입니다 — 퍼센트가 아니라 비율(합 1)로 적으세요 "
+                "(예: 0.1,0.2,0.7)")
+        raise PowerPlanError(
+            f"{option}: 확률의 합이 1이어야 합니다 (받은 합: {total:.12g}, "
+            f"차이 {total - 1.0:+.3g})")
+
+
+def _or_from_two_distributions(probs1: tuple, probs2: tuple) -> tuple[float, list]:
+    """두 군의 범주 분포 → 누적 절단점마다의 오즈비와 그 (기하)평균.
+
+    비례오즈 모형이 정확히 맞으면 K−1개 절단점의 오즈비가 모두 같다. 실제 분포를
+    넣으면 대개 조금씩 다르므로, **로그 척도의 단순 평균**(= 기하평균)을 계획값으로
+    쓰고 절단점별 값을 함께 보여 준다. 흩어짐이 크면 비례오즈 가정 자체를 의심해야
+    하므로 감추지 않는다.
+    """
+    cut_ors = []
+    cum1 = cum2 = 0.0
+    for a, b in zip(probs1[:-1], probs2[:-1]):
+        cum1 += a
+        cum2 += b
+        if not (0.0 < cum1 < 1.0) or not (0.0 < cum2 < 1.0):
+            raise PowerPlanError(
+                "--probs2: 누적확률이 0 또는 1이 되는 절단점이 있어 오즈비를 정의할 수 "
+                "없습니다 — 그 범주를 이웃과 합치거나 --or로 직접 지정하세요")
+        cut_ors.append((cum2 / (1.0 - cum2)) / (cum1 / (1.0 - cum1)))
+    if not cut_ors:  # pragma: no cover - 범주 3개 이상이면 항상 2개 이상
+        raise PowerPlanError("--probs2: 절단점이 없습니다")
+    mean_log = math.fsum(math.log(o) for o in cut_ors) / len(cut_ors)
+    return math.exp(mean_log), cut_ors
+
+
+def _ordinal_probs2_notes(args, plan: dict) -> None:
+    """--probs2로 OR을 유도했을 때, 그 유도 과정을 숨기지 않고 결과에 적는다.
+
+    절단점마다의 오즈비가 흩어져 있으면 비례오즈 가정 자체가 의심스럽다. 계획값
+    하나만 보여 주면 사용자는 그 사실을 영영 모른다.
+    """
+    cut_ors = getattr(args, "_ordinal_cut_ors", None)
+    if not cut_ors:
+        return
+    given = getattr(args, "_ordinal_probs2", ())
+    shown = ", ".join(f"{o:.3g}" for o in cut_ors)
+    plan["notes"].append(
+        f"--probs2로 준 중재군 분포에서 절단점별 오즈비 [{shown}]를 구하고, 그 "
+        f"기하평균 {plan['design']['effect']['value']:.4g}을 계획값으로 썼습니다.")
+    lo, hi = min(cut_ors), max(cut_ors)
+    if lo > 0 and hi / lo > 1.5:
+        plan["notes"].append(
+            f"⚠ 절단점별 오즈비가 {lo:.3g}~{hi:.3g}로 크게 흩어져 있습니다 — "
+            "비례오즈 가정이 의심스럽습니다. 이럴 때는 하나의 오즈비로 요약한 이 "
+            "표본수가 낙관적일 수 있으니, 가장 보수적인 절단점의 오즈비를 --or로 "
+            "직접 넣어 다시 계산해 보세요.")
+    plan["notes"].append(
+        "출력의 '중재군 범주 분포'는 계획 오즈비로 다시 만든 **비례오즈 모형 값**이라 "
+        "입력한 분포(" + " / ".join(f"{p:.3f}" for p in given) + ")와 조금 다릅니다.")
 
 
 def _units_for(design, target_power: float) -> str:
@@ -971,6 +1139,7 @@ def main(argv: list[str] | None = None) -> int:
                              alpha_adjustment=alpha_info)
             if total_note:
                 plan["notes"].append(total_note)
+            _ordinal_probs2_notes(args, plan)
         plan["provenance"] = _provenance(raw_argv)
         if args.format == "json":
             text = render_json(plan)
