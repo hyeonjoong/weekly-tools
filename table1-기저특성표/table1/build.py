@@ -77,6 +77,21 @@ _MSG = {
                                  "수치라면 단위·기호를 제거해 '--continuous {var}', "
                                  "범주라면 '--categorical {var}' 또는 '--max-levels' 를 "
                                  "쓰세요."),
+        "warn_near_unique": ("변수 '{var}' 는 관측 {total}개 중 고유값이 {n}개로 "
+                             "거의 모든 행이 서로 달라 건너뜀(환자ID·이름·생년월일·"
+                             "자유텍스트일 가능성). 표에 그대로 실으면 개인이 식별될 "
+                             "수 있습니다. 정말 필요하면 '--categorical {var}' 로 "
+                             "명시하세요."),
+        "warn_vars_duplicate": ("--vars 에 같은 열이 두 번 이상 있어 한 번만 "
+                                "요약했습니다: {vars}. (중복을 그대로 두면 "
+                                "다중비교 보정의 가족 크기가 부풀려집니다.)"),
+        "warn_vars_is_group": ("--vars 의 '{var}' 는 그룹(--group) 열이라 "
+                               "제외했습니다. 자기 자신과의 비교는 항상 "
+                               "p<0.001·SMD=∞ 가 되어 의미가 없습니다."),
+        "warn_forced_cat_identifier": (
+            "변수 '{var}' 는 '--categorical' 로 지정하셔서 고유값 {n}개를 모두 "
+            "표에 실었습니다. 환자ID·이름 등 식별자라면 이 표를 공유할 때 개인이 "
+            "식별될 수 있으니 확인하세요."),
         "warn_type_conflict": ("변수 '{var}' 가 --continuous 와 --categorical 에 "
                                "모두 지정됨 → 연속형으로 처리했습니다."),
         "warn_ref_missing": ("--ref '{var}={level}' 의 수준 '{level}' 이(가) 자료에 "
@@ -143,6 +158,23 @@ _MSG = {
                                  "If numeric, strip units/symbols and use "
                                  "'--continuous {var}'; if categorical, use "
                                  "'--categorical {var}' or '--max-levels'."),
+        "warn_near_unique": ("variable '{var}' has {n} distinct values across "
+                             "{total} observations — nearly every row differs, "
+                             "so it was skipped (likely a patient ID, name, "
+                             "date of birth or free text). Printing it would "
+                             "risk re-identifying individuals. Use "
+                             "'--categorical {var}' if you really need it."),
+        "warn_vars_duplicate": ("--vars repeated column(s) {vars}; each was "
+                                "summarized once. (Leaving duplicates in would "
+                                "inflate the multiplicity family size.)"),
+        "warn_vars_is_group": ("--vars listed '{var}', which is the --group "
+                               "column, so it was dropped: comparing a column "
+                               "against itself always gives p<0.001 and "
+                               "SMD=inf."),
+        "warn_forced_cat_identifier": (
+            "variable '{var}' was forced with '--categorical', so all {n} "
+            "distinct values are printed. If this is an identifier (patient "
+            "ID, name), sharing this table could re-identify individuals."),
         "warn_type_conflict": ("variable '{var}' was given to both --continuous "
                                "and --categorical → treated as continuous."),
         "warn_ref_missing": ("--ref '{var}={level}': level '{level}' is not "
@@ -321,6 +353,49 @@ class Table1:
 # zero numbers, so it looks categorical. Warn above this share of number-ish
 # cells.
 _NUM_ISH_WARN_FRAC = 0.8
+
+# A near-unique categorical (almost one level per patient) is an identifier, not
+# a characteristic — printing it would list every patient individually. The
+# absolute --max-levels cap misses this in a small cohort, so these thresholds
+# add the relative test. Requires a few observations so that a genuine 3-level
+# variable measured on 3 patients is not mistaken for an ID.
+_NEAR_UNIQUE_FRAC = 0.9
+_NEAR_UNIQUE_MIN_OBS = 5
+
+# Upper bound on study arms / cohorts a Table 1 can compare side by side. Well
+# above any real design (a 6-arm dose-finding trial is already unusual), low
+# enough that pointing --group at an identifier column fails loudly instead of
+# emitting one column per patient.
+_MAX_GROUPS = 20
+
+
+def _identifier_skip(var: str, col: Sequence[str], opt: "Options"
+                     ) -> Optional[str]:
+    """Warning text if this auto-detected categorical looks like an identifier.
+
+    Two criteria, both needed:
+
+    * ABSOLUTE — more distinct levels than ``--max-levels``. Catches an ID or
+      free-text column in a normal-sized cohort.
+    * RELATIVE — nearly one distinct level per observation. The absolute cap is
+      structurally unable to fire in a small cohort (a 12-patient pilot cannot
+      have 20 distinct names), which is precisely where every level is one
+      identifiable patient. Without this, a name / MRN / date-of-birth column
+      renders one row per patient in exactly the studies where that is most
+      disclosive.
+
+    Returns None when the column is a legitimate characteristic.
+    """
+    n_levels = len({c.strip() for c in col if not is_missing(c)})
+    if n_levels > opt.max_display_levels:
+        return _msg(opt.lang, "warn_too_many_levels", var=var, n=n_levels)
+    n_obs = sum(1 for c in col if not is_missing(c))
+    if (n_obs >= _NEAR_UNIQUE_MIN_OBS
+            and n_levels >= _NEAR_UNIQUE_FRAC * n_obs
+            and n_levels > max(1, opt.cat_max_levels)):
+        return _msg(opt.lang, "warn_near_unique", var=var, n=n_levels,
+                    total=n_obs)
+    return None
 
 # Labels that mark a spreadsheet SUMMARY row (a "합계"/Total line pasted under
 # the data). Such a row is not a patient: it inflates N and drags every summary
@@ -849,6 +924,30 @@ def build_table1(frame: Frame, opt: Options) -> Table1:
             if not frame.has(v):
                 raise ValueError(f"변수 열 '{v}' 을(를) 찾을 수 없습니다. "
                                  f"헤더: {frame.header}")
+        # A repeated column would render an identical row twice AND count twice
+        # toward the multiplicity family size, silently changing every adjusted
+        # p-value in the table. De-duplicate (first mention wins) and say so.
+        seen_vars: set = set()
+        deduped = []
+        dupe_vars = []
+        for v in var_cols:
+            if v in seen_vars:
+                if v not in dupe_vars:
+                    dupe_vars.append(v)
+                continue
+            seen_vars.add(v)
+            deduped.append(v)
+        if dupe_vars:
+            warnings.append(_msg(opt.lang, "warn_vars_duplicate",
+                                 vars=", ".join(dupe_vars)))
+        # Summarizing the grouping column against itself is a degenerate
+        # comparison: it yields p<0.001 and SMD=inf by construction, and it
+        # joins the multiplicity family, distorting every other adjusted p.
+        if opt.group_col is not None and opt.group_col in seen_vars:
+            deduped = [v for v in deduped if v != opt.group_col]
+            warnings.append(_msg(opt.lang, "warn_vars_is_group",
+                                 var=opt.group_col))
+        var_cols = deduped
     else:
         # The weight column is a design variable, not a baseline characteristic:
         # keep it out of the auto-detected variable list (an explicit --vars
@@ -888,6 +987,26 @@ def build_table1(frame: Frame, opt: Options) -> Table1:
                 f"그룹이 2개 미만입니다(발견: {group_order or '없음'}). "
                 "'--group' 열에 2개 이상의 그룹 라벨이 필요합니다. "
                 "(전체 코호트를 요약하려면 '--group' 없이 실행하세요.)")
+        # A grouping column with a huge number of levels is an identifier
+        # (--group mrn), not a study arm. Unchecked it renders ONE COLUMN PER
+        # PATIENT, turning Table 1 into a re-identifiable line listing of every
+        # other variable — the group column is excluded from var_cols, so it is
+        # the one column no other guard can see. Report the COUNT only; echoing
+        # the labels would print the very identifiers we are refusing to show.
+        # Two criteria, mirroring _identifier_skip: the absolute cap catches an
+        # ID column in a normal cohort, the relative one catches it in a small
+        # cohort where the absolute cap structurally cannot fire.
+        near_unique_groups = (
+            len(keep_idx) >= _NEAR_UNIQUE_MIN_OBS
+            and len(group_order) >= _NEAR_UNIQUE_FRAC * len(keep_idx))
+        if len(group_order) > _MAX_GROUPS or near_unique_groups:
+            raise ValueError(
+                f"'--group {opt.group_col}' 의 서로 다른 값이 "
+                f"{len(group_order)}개({len(keep_idx)}행)로 너무 많습니다"
+                f"(최대 {_MAX_GROUPS}개, 그리고 행 수보다 충분히 적어야 함). "
+                "환자ID처럼 행마다 다른 열을 그룹으로 지정하면 표에 환자별 열이 "
+                "생겨 개인이 식별될 수 있습니다. 시험군·코호트처럼 값이 몇 개뿐인 "
+                "열을 지정하세요.")
 
         # Warn on group labels that differ only in case (e.g. "Device" vs
         # "device"): almost always one arm split by a data-entry inconsistency,
@@ -954,6 +1073,24 @@ def build_table1(frame: Frame, opt: Options) -> Table1:
             warnings.append(_msg(opt.lang, "warn_var_all_missing", var=var))
             continue
 
+        # Decide identifier-like SKIPS before any warning that quotes example
+        # cells: a date-of-birth / name column would otherwise be skipped for
+        # privacy while a preceding warning printed two of its raw values into
+        # the same output file.
+        if kind == "categorical":
+            skip = _identifier_skip(var, col, opt)
+            if skip is not None:
+                if var not in forced_cat:
+                    warnings.append(skip)
+                    continue
+                # --categorical is a deliberate override and stays honoured,
+                # but silently printing one row per patient is not something a
+                # researcher should discover only after sharing the table.
+                warnings.append(_msg(opt.lang, "warn_forced_cat_identifier",
+                                     var=var,
+                                     n=len({c.strip() for c in col
+                                            if not is_missing(c)})))
+
         # A column that is mostly numbers but carries a few censored / unit-
         # bearing cells (">100", "12 kg") is the classic silent-corruption
         # shape: treated as a category it renders one level per patient and
@@ -996,15 +1133,8 @@ def build_table1(frame: Frame, opt: Options) -> Table1:
             _warn_high_missing(crow)
             rows.append(crow)
         else:
-            # Guard against ID-like columns: an auto-detected categorical with a
-            # huge number of levels is almost always an identifier or free text.
-            # (A user who really wants it can name it in --vars/--categorical.)
-            n_levels = len({c.strip() for c in col if not is_missing(c)})
-            auto = var not in forced_cat
-            if auto and n_levels > opt.max_display_levels:
-                warnings.append(_msg(opt.lang, "warn_too_many_levels",
-                                     var=var, n=n_levels))
-                continue
+            # ID-like columns are already filtered out above (_identifier_skip),
+            # before any warning that could quote their raw cells.
             crow = _categorical_row(var, group_cells, opt, group_weights)
             # If a --ref level was given for this column but never appears in the
             # data, warn instead of silently falling back to the default

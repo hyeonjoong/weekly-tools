@@ -25,8 +25,8 @@ python3 -m pip install -e .      # 'table1' 명령이 등록됩니다(PATH에 �
 # 모든 변수 자동 판별, arm(군)별로 비교
 table1 examples/serene_baseline.csv --group arm
 
-# 특정 변수만, 코드형 열은 범주형으로 강제
-table1 examples/serene_baseline.csv --group arm --vars age,sex,isi,bmi --categorical sex
+# 특정 변수만 골라서 (F/M 같은 문자열 열은 지정 없이도 범주형으로 자동 판별)
+table1 examples/serene_baseline.csv --group arm --vars age,sex,isi,bmi
 
 # 원고에 붙일 CSV로 저장
 table1 examples/serene_baseline.csv --group arm --format csv -o table1.csv
@@ -47,12 +47,19 @@ table1 examples/serene_baseline.csv --vars age,sex,bmi,isi
 # 성향점수(IPTW) 가중표 — 가중 요약 + 가중 SMD + 군별 Kish 유효표본수(ESS)
 table1 examples/psm_weighted.csv --group cohort --weights iptw --vars age,sex,bmi,copd
 
-# 엑셀(.xlsx) 파일을 바로 — CSV로 다시 저장할 필요 없음 (--sheet 로 시트 선택)
-table1 기저자료.xlsx --group arm --sheet 기저
-
 # 왜곡된 변수를 분석자가 직접 지정(사전검정 대신) → 항상 중앙값[IQR] + 순위검정
 table1 examples/serene_baseline.csv --group arm --nonnormal ahi,rmssd_ms
 ```
+
+아래 두 줄은 **내 파일 이름으로 바꿔 쓰는 예시**입니다(저장소에 해당 파일은 없습니다).
+
+```bash
+# 엑셀(.xlsx) 파일을 바로 — CSV로 다시 저장할 필요 없음 (--sheet 로 시트 선택)
+table1 내파일.xlsx --group arm --sheet 기저
+
+# 정수 코드 열(예: NYHA 1~4, ISI 중증도 밴드)은 범주형으로 강제
+#   — 기본값(--cat-max-levels 2)에서는 0/1 이진 플래그만 자동으로 범주형이 됩니다
+table1 내데이터.csv --group arm --categorical nyha
 
 ### 실제 출력 예 (examples/serene_baseline.csv, 합성 데이터)
 
@@ -121,7 +128,7 @@ table1 examples/psm_weighted.csv --group cohort --weights iptw --vars age,sex,bm
 | `--test-cont auto\|welch\|student\|nonparam` | 연속형 **검정** 선택: auto(사전검정, 기본)·welch(항상 Welch t)·student(항상 Student t)·nonparam(항상 Mann-Whitney/Kruskal). 분산 사전검정을 피하려면 `welch` 권장(Delacre 2017). **welch·student 는 2군 비교에만 적용**되며 ≥3군은 일원배치 ANOVA(비모수는 Kruskal) |
 | `--pct col\|row` | 범주형 % 기준(기본 col = 그룹 내) |
 | `--pct-decimals N` | 범주형 % 소수 자릿수(기본 1, 0~10) |
-| `--binary-single` | 2수준(이진) 범주형을 한 줄로 축약(예: `sex = M — n(%)`) — 저널 관례. **md·csv·tsv 에만 적용**(JSON은 구조화 데이터라 모든 수준 유지) |
+| `--binary-single` | 2수준(이진) 범주형을 한 줄로 축약(예: `sex = M — n(%)`) — 저널 관례. **md·csv·tsv·html 에 적용**(JSON은 구조화 데이터라 모든 수준 유지) |
 | `--ref COL=수준` | 이진 축약 시 기준(참조) 수준 지정 → 표엔 반대 수준 표시(예: `--ref sex=F` → M 행) |
 | `--alpha-norm A` | 정규성·등분산 판정 유의수준(기본 0.05). 검정 자동선택에 영향 |
 | `--fisher` | 2×2 범주형에 항상 Fisher exact |
@@ -129,7 +136,7 @@ table1 examples/psm_weighted.csv --group cohort --weights iptw --vars age,sex,bm
 | `--no-overall` | '전체' 열 숨김 |
 | `--no-pvalue` | p값 열 숨김 — **무작위배정 임상시험(SERENE 등)** 은 CONSORT 권고상 기저 p값 대신 SMD로 균형 보고 |
 | `--range` | 연속형 셀에 `(최소–최대)` 범위 추가 |
-| `--effect` | **군간 차이(95% CI)** 열 추가 — 연속형은 평균차(모수 검정 시, Student는 합동·Welch는 비합동 SE로 t-기반 CI, **p값과 정합**)/**Hodges–Lehmann** 중앙값차(비모수, tie-보정 분포무관 CI), 이진 범주형은 표시된 **index 수준**(`M:`)의 **위험차(%p)** 를 **Newcombe** 점수구간으로(이 CI는 Fisher/χ²와 다른 방법이라 p와 어긋날 수 있음). 방향은 **첫 군 − 둘째 군**(양수면 첫 군이 큼). **2군 비교에만** 적용(≥3군·다범주형은 공란) |
+| `--effect` | **군간 차이(95% CI)** 열 추가 — 연속형은 평균차(모수 검정 시, Student는 합동·Welch는 비합동 SE로 t-기반 CI, **p값과 정합**)/**Hodges–Lehmann** 중앙값차(비모수, tie-보정 분포무관 CI), 이진 범주형은 표시된 **index 수준**(`M:`)의 **위험차(%p)** 를 **Newcombe** 점수구간으로(이 CI는 Fisher/χ²와 다른 방법이라 p와 어긋날 수 있음). 방향은 **첫 군 − 둘째 군**(양수면 첫 군이 큼). **2군 비교에만** 적용 — ≥3군이거나 가중(`--weights`) 표에서는 **열 자체가 생략**되고, 2군 표 안의 다범주형(3수준 이상) 행만 공란입니다 |
 | `--padjust none\|bonferroni\|holm\|bh\|by` | 변수별 p값에 **다중비교 보정** 열 추가. bh=Benjamini–Hochberg(FDR), by=Benjamini–Yekutieli. 검정 불가 변수(p 없음)는 가족 크기에서 제외. **무작위배정 시험의 기저 p값 보정은 비권장**(CONSORT) — 비교/관찰 연구용 |
 | `--lang ko\|en` | 표 라벨 **및 모든 주석·경고** 언어(기본 ko, `en` = 영문 저널 제출용) |
 | `--labels COL=이름 …` | 변수 표시 이름/단위 지정(예: `--labels rmssd_ms="RMSSD (ms)"`) |
@@ -137,7 +144,7 @@ table1 examples/psm_weighted.csv --group cohort --weights iptw --vars age,sex,bm
 | `--delimiter D` | 입력 구분자 강제(한 글자, 미지정 시 자동 감지). 탭은 `--delimiter tab`(또는 `\t`), 세로줄은 `--delimiter '\|'`. **CSV 전용**(xlsx에 쓰면 오류) |
 | 입력 `.xlsx` | **엑셀 파일을 그대로 입력**(확장자가 아니라 실제 파일 내용으로 판별). 공유문자열·서식있는 텍스트·수식 결과·불리언·**빈 셀이 생략된 희소 행**·**날짜 일련번호→`YYYY-MM-DD`**(1900/1904 기준 모두) 처리. 표준 라이브러리만 사용 |
 | 입력 `-` | CSV 경로 대신 `-` 를 주면 **표준입력(stdin)** 에서 읽음(파이프라인용: `cut -d, -f2- data.csv \| table1 - -g arm`) |
-| `--format md\|csv\|tsv\|json\|html`, `-o` | 출력 형식/파일. `html` = Word/저널 제출 시스템에 붙여넣을 HTML 조각(`<table>` + 범례·주석·경고, 데이터 셀 HTML 이스케이프, 표는 유효 XHTML로 파싱) |
+| `--format md\|csv\|tsv\|json\|html` (`-f`), `-o\|--out 경로` | 출력 형식/파일. `html` = Word/저널 제출 시스템에 붙여넣을 HTML 조각(`<table>` + 범례·주석·경고, 데이터 셀 HTML 이스케이프, 표는 유효 XHTML로 파싱) |
 | `--version` | 버전 출력 후 종료 |
 
 ## 방법론 노트 / Methods
@@ -154,7 +161,7 @@ table1 examples/psm_weighted.csv --group cohort --weights iptw --vars age,sex,bm
 - **전체 코호트 기술통계(`--group` 생략)**: 군 열 없이 실행하면 모든 행을 하나의 '전체(Overall)' 열로 요약합니다(연속형 평균±SD/중앙값[IQR], 범주형 n(%), 결측). 비교가 없으므로 검정·p·SMD·차이·다중비교 열은 모두 생략됩니다 — 단일군(single-arm)·파일럿·코호트 기술에 적합.
 - **다중비교 보정(`--padjust`)**: 변수별 1차 p값(수준별 아님)에 Bonferroni / Holm(단계적 하강) / Benjamini–Hochberg(FDR, 단계적 상승) / Benjamini–Yekutieli(임의 종속하 FDR)를 적용. 검정 불가 변수는 가족 크기에서 제외. `statsmodels.stats.multitest.multipletests` 와 일치. 무작위배정 시험의 기저 p값 보정은 CONSORT상 비권장이므로 기본값은 `none`.
 - **결측**: 연속형은 결측·비수치 셀(및 inf/-inf 등 비유한 수치)을 제외해 요약하고 결측 수를 표기하며, 두 군 이상일 때는 **군별 결측 분포**를 함께 표시합니다(`· 결측 4 (device 2, sham 2)`) — 무작위배정 시험에서 차등 결측(differential missingness)을 한눈에 볼 수 있습니다. 범주형 %는 **비결측(non-missing) 기준**이며, 결측은 기본적으로 수준에서 제외합니다(`--missing-as-level`로 표시 가능). 군 값이 결측인 행은 전체에서 제외하고 경고합니다. 숫자로 해석되지 않는 셀(예: `>100`·`12 kg`·`45%`·유럽식 `1,5`)은 **단순 결측이 아니라 "해석 불가"로 별도 주석**해, 검열(censored)·단위 포함 값이 평균에 조용히 반영되지 않도록 알립니다. 변수의 결측이 50%를 넘거나, 대소문자만 다른 그룹 라벨(예: `Device`/`device`)이 별개 군으로 잡히면 경고합니다.
-- 분포 함수(정규/ t / F / χ²)와 Shapiro–Wilk, Fisher exact 열거는 모두 표준 라이브러리로 자체 구현했고, SciPy/numpy와 대조 검증했습니다: 분포함수·Student/Welch t·ANOVA·Fisher·χ²는 대체로 ≤1e-9(꼬리 확률까지) 일치하고, Shapiro–Wilk는 ~1e-8 수준(W 통계량은 ~1e-9)으로 일치합니다. **단, Mann–Whitney U·Kruskal–Wallis는 정규/χ² 점근(asymptotic) 근사를 쓰므로 SciPy의 `method='asymptotic'` 결과와 일치하며, 소표본에서 SciPy 기본값의 정확검정(exact)과는 다를 수 있습니다.** 이 대조값들은 오프라인 테스트로 고정해 두었습니다(`tests/test_tests_stat.py`, `tests/test_normality.py`, `tests/test_special.py`, `tests/test_smd.py`, 골든 스냅샷, 하드닝 회귀·속성 테스트 `tests/test_hardening_r1.py`~`r3.py`, 신규 기능 테스트 `tests/test_effects.py`·`tests/test_multiplicity.py`·`tests/test_new_features.py`·`tests/test_weights.py`·`tests/test_xlsx.py`·`tests/test_nonnormal_cli.py` 등, 총 368개). 효과크기·다중비교 보정은 statsmodels와 대조 검증(≤1e-9).
+- 분포 함수(정규/ t / F / χ²)와 Shapiro–Wilk, Fisher exact 열거는 모두 표준 라이브러리로 자체 구현했고, SciPy/numpy와 대조 검증했습니다: 분포함수·Student/Welch t·ANOVA·Fisher·χ²는 대체로 ≤1e-9(꼬리 확률까지) 일치하고, Shapiro–Wilk는 ~1e-8 수준(W 통계량은 ~1e-9)으로 일치합니다. **단, Mann–Whitney U·Kruskal–Wallis는 정규/χ² 점근(asymptotic) 근사를 쓰므로 SciPy의 `method='asymptotic'` 결과와 일치하며, 소표본에서 SciPy 기본값의 정확검정(exact)과는 다를 수 있습니다.** 이 대조값들은 오프라인 테스트로 고정해 두었습니다(`tests/test_tests_stat.py`, `tests/test_normality.py`, `tests/test_special.py`, `tests/test_smd.py`, 골든 스냅샷, 하드닝 회귀·속성 테스트 `tests/test_hardening_r1.py`~`r5.py`, 신규 기능 테스트 `tests/test_effects.py`·`tests/test_multiplicity.py`·`tests/test_new_features.py`·`tests/test_weights.py`·`tests/test_xlsx.py`·`tests/test_nonnormal_cli.py` 등, 400개 이상). 효과크기·다중비교 보정은 statsmodels와 대조 검증(≤1e-9).
 
 ## 한계 / Limitations
 
@@ -172,5 +179,5 @@ table1 examples/psm_weighted.csv --group cohort --weights iptw --vars age,sex,bm
 
 ```bash
 cd ~/Downloads/02_프로젝트/깃헙/table1-기저특성표
-python3 -m pytest -q      # 368개 테스트, 전부 오프라인
+python3 -m pytest -q      # 400개 이상, 전부 오프라인
 ```
