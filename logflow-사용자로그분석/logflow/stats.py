@@ -238,7 +238,7 @@ def fisher_exact_two_sided(a: int, b: int, c: int, d: int) -> float:
 @dataclass
 class MannWhitneyResult:
     u: float               # 1군 기준 U 통계량
-    z: float               # 연속성 보정 정규근사 z
+    z: float               # 연속성 보정 정규근사 z (부호 = 방향; p 는 |z| 로 계산)
     p: float               # 양측 p 값
     n1: int
     n2: int
@@ -299,9 +299,10 @@ def mann_whitney_u(
         # 모든 값이 동점 → 순위로 구분할 정보가 없음
         z, p = 0.0, 1.0
     else:
-        z = (abs(u1 - mu) - 0.5) / math.sqrt(var)
-        z = max(0.0, z)  # 연속성 보정이 차이를 넘어서면 0 으로 (p=1)
-        p = min(1.0, 2.0 * norm_sf(z))
+        magnitude = max(0.0, (abs(u1 - mu) - 0.5) / math.sqrt(var))
+        p = min(1.0, 2.0 * norm_sf(magnitude))
+        # 부호는 방향(1군이 큰가 작은가)을 담는다 — 크기만 있으면 방향을 복원할 수 없다.
+        z = magnitude if u1 >= mu else -magnitude
     return MannWhitneyResult(
         u=u1, z=z, p=p, n1=n1, n2=n2,
         median1=median(x), median2=median(y),
@@ -355,18 +356,28 @@ def kaplan_meier(
         raise ValueError("생존 시간은 0 이상의 유한한 값이어야 합니다")
     z = z_for_confidence(confidence)
 
-    pairs = sorted(zip(times, events), key=lambda p: (p[0], not p[1]))
+    # 시각 오름차순 한 번만 정렬하고 위험집합을 누적으로 줄여 나간다 (O(n log n)).
+    # 같은 시각의 절단은 그 시각의 위험집합에 포함되므로 n_risk 를 먼저 읽고 나서 뺀다.
+    pairs = sorted(zip(times, events), key=lambda p: p[0])
     n_total = len(pairs)
-    distinct = sorted({t for t, _ in pairs})
 
     points: List[KMPoint] = []
     surv = 1.0
     var_sum = 0.0  # Greenwood 누적합 Σ d/(n(n-d))
     n_events_total = 0
     median_surv: Optional[float] = None
-    for t in distinct:
-        n_risk = sum(1 for tt, _ in pairs if tt >= t)
-        d = sum(1 for tt, ev in pairs if tt == t and ev)
+    n_risk_remaining = n_total
+    i = 0
+    while i < n_total:
+        t = pairs[i][0]
+        j = i
+        d = 0
+        while j < n_total and pairs[j][0] == t:
+            d += 1 if pairs[j][1] else 0
+            j += 1
+        n_risk = n_risk_remaining
+        n_risk_remaining -= (j - i)
+        i = j
         if d == 0:
             continue  # 절단만 있는 시각은 생존 계단을 만들지 않는다
         n_events_total += d
@@ -424,6 +435,12 @@ def logrank_test(
     비례위험(proportional hazards)을 가정하며, 곡선이 교차하면 검정력이 떨어진다 —
     p 값만 보지 말고 KM 곡선을 함께 볼 것.
 
+    보고되는 observed/expected 는 **비교 가능한 시각**(두 군을 합쳐 위험집합이 2명 이상인
+    시각)으로 한정해 누적한 값이다. 한 군만 남은 시점의 사건은 분산이 정의되지 않아
+    통계량에 기여할 수 없으므로 O 와 E 양쪽에서 똑같이 제외한다 — 그래서
+    (O1-E1) + (O2-E2) = 0 이 성립하고, 한쪽만 제외해 다른 군에 떠넘기는 일이 없다.
+    따라서 observed1 + observed2 가 전체 사건 수보다 작을 수 있다(정상).
+
     어느 한 군이 비었거나 사건이 전혀 없으면 None.
     """
     if len(times1) != len(events1) or len(times2) != len(events2):
@@ -435,21 +452,36 @@ def logrank_test(
     if o1_total + o2_total == 0:
         return None
 
-    all_times = sorted({t for t in list(times1) + list(times2)})
+    # 시각별 (관측 수, 사건 수)를 미리 집계해 위험집합을 누적으로 줄인다 (O(n log n)).
+    from collections import Counter
+
+    at_risk1 = Counter(times1)
+    at_risk2 = Counter(times2)
+    ev_at1 = Counter(t for t, ev in zip(times1, events1) if ev)
+    ev_at2 = Counter(t for t, ev in zip(times2, events2) if ev)
+    all_times = sorted(set(at_risk1) | set(at_risk2))
+    n1_remaining = len(times1)
+    n2_remaining = len(times2)
     o1 = 0
+    o2 = 0
     e1_sum = 0.0
+    e2_sum = 0.0
     v_sum = 0.0
     for t in all_times:
-        n1 = sum(1 for tt in times1 if tt >= t)
-        n2 = sum(1 for tt in times2 if tt >= t)
-        d1 = sum(1 for tt, ev in zip(times1, events1) if tt == t and ev)
-        d2 = sum(1 for tt, ev in zip(times2, events2) if tt == t and ev)
+        n1 = n1_remaining
+        n2 = n2_remaining
+        n1_remaining -= at_risk1.get(t, 0)
+        n2_remaining -= at_risk2.get(t, 0)
+        d1 = ev_at1.get(t, 0)
+        d2 = ev_at2.get(t, 0)
         d = d1 + d2
         n = n1 + n2
         if d == 0 or n < 2:
             continue
         o1 += d1
+        o2 += d2
         e1_sum += d * n1 / n
+        e2_sum += d * n2 / n
         v_sum += d * n1 * n2 * (n - d) / (n * n * (n - 1.0))
     if v_sum <= 0.0:
         return None
@@ -457,9 +489,36 @@ def logrank_test(
     return LogRankResult(
         chi2=chi2, p=chi2_sf_1df(chi2),
         observed1=o1, expected1=e1_sum,
-        observed2=(o1_total + o2_total) - o1,
-        expected2=(o1_total + o2_total) - e1_sum,
+        observed2=o2, expected2=e2_sum,
     )
+
+
+# ---------------------------------------------------------------- 다중비교 보정
+
+def holm_adjust(pvalues: Sequence[float]) -> List[float]:
+    """Holm–Bonferroni 단계적 하향(step-down) 보정 p 값.
+
+    m 개의 p 값을 오름차순으로 정렬해 k 번째(0-기반)에 (m-k) 를 곱하고, 앞선 값보다
+    작아지지 않도록 누적 최대값을 취한 뒤 1 로 클램프한다. 원래 순서로 돌려준다.
+
+    Bonferroni 보다 검정력이 높으면서도 family-wise 오류율을 같은 수준으로 통제한다.
+    logflow 는 군 비교에서 여러 검정(리텐션 day-N·퍼널 완주·참여도·log-rank)을 한꺼번에
+    하므로, 보정하지 않은 p 값만 보고하면 우연한 '유의' 를 그대로 싣게 된다.
+    """
+    ps = list(pvalues)
+    for p in ps:
+        if not (0.0 <= p <= 1.0) or math.isnan(p):
+            raise ValueError(f"p 값은 0..1 범위여야 합니다 (받은 값: {p})")
+    m = len(ps)
+    if m == 0:
+        return []
+    order = sorted(range(m), key=lambda i: ps[i])
+    adjusted = [0.0] * m
+    running = 0.0
+    for rank, idx in enumerate(order):
+        running = max(running, (m - rank) * ps[idx])
+        adjusted[idx] = min(1.0, running)
+    return adjusted
 
 
 def _inv_norm_cdf(p: float) -> float:

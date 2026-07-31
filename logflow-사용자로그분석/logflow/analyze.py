@@ -14,6 +14,7 @@ from typing import Dict, List, Optional, Sequence
 
 from . import __version__
 from .dataio import Event
+from .groups import GroupComparison, compare_groups
 from .metrics import (
     ActiveUsers,
     EventStat,
@@ -54,6 +55,7 @@ class Analysis:
     retention_days: List[int]
     funnel_steps: Optional[List[str]]
     retention_mode: str = "exact"
+    groups: Optional[GroupComparison] = None
 
 
 def analyze(
@@ -64,6 +66,9 @@ def analyze(
     funnel_steps: Optional[Sequence[str]] = None,
     confidence: float = 0.95,
     retention_mode: str = "exact",
+    group_col: Optional[str] = None,
+    churn_days: int = 7,
+    reference_group: Optional[str] = None,
 ) -> Analysis:
     if not events:
         raise ValueError("분석할 이벤트가 없습니다 (빈 입력)")
@@ -88,6 +93,21 @@ def analyze(
         retention_days=list(retention_days),
         funnel_steps=list(funnel_steps) if funnel_steps else None,
         retention_mode=retention_mode,
+        groups=(
+            compare_groups(
+                events,
+                group_col=group_col,
+                gap_seconds=gap_seconds,
+                retention_days=retention_days,
+                funnel_steps=funnel_steps,
+                confidence=confidence,
+                retention_mode=retention_mode,
+                churn_days=churn_days,
+                reference=reference_group,
+            )
+            if group_col
+            else None
+        ),
     )
 
 
@@ -178,6 +198,117 @@ def to_dict(a: Analysis) -> dict:
             "weekday_labels": _WEEKDAY_KO,
             "peak_hour": a.peak_hour,
         },
+        "groups": _groups_to_dict(a.groups),
+    }
+
+
+def _groups_to_dict(g: Optional[GroupComparison]) -> Optional[dict]:
+    """군 비교 결과를 JSON 직렬화 가능한 dict 로."""
+    if g is None:
+        return None
+    return {
+        "group_col": g.group_col,
+        "groups": g.groups,
+        "reference": g.reference,
+        "compare_a": g.compare_a,
+        "compare_b": g.compare_b,
+        "n_tests": g.n_tests,
+        "ungrouped_users": g.ungrouped_users,
+        "conflicting_users": g.conflicting_users,
+        "notes": g.notes,
+        "arms": [
+            {
+                "group": s.group,
+                "n_users": s.n_users,
+                "n_events": s.n_events,
+                "n_sessions": s.n_sessions,
+                "median_events_per_user": s.median_events_per_user,
+                "median_sessions_per_user": s.median_sessions_per_user,
+                "median_minutes_per_user": s.median_minutes_per_user,
+                "median_active_days": s.median_active_days,
+                "retention": {
+                    str(n): {"retained": r, "eligible": e}
+                    for n, (r, e) in sorted(s.retention.items())
+                },
+                "funnel_completion": (
+                    {"completed": s.funnel_completion[0], "entered": s.funnel_completion[1]}
+                    if s.funnel_completion is not None
+                    else None
+                ),
+            }
+            for s in g.arms
+        ],
+        "proportion_tests": [
+            {
+                "label": t.label,
+                "group_a": t.group_a,
+                "group_b": t.group_b,
+                "a": {"successes": t.successes_a, "n": t.n_a, "rate": t.diff.p1},
+                "b": {"successes": t.successes_b, "n": t.n_b, "rate": t.diff.p2},
+                "diff": t.diff.diff,
+                "diff_ci": [t.diff.ci[0], t.diff.ci[1]],
+                "p_fisher": t.p_value,
+                "p_holm": t.p_adjusted,
+            }
+            for t in g.proportions
+        ],
+        "distribution_tests": [
+            {
+                "label": t.label,
+                "unit": t.unit,
+                "group_a": t.group_a,
+                "group_b": t.group_b,
+                "n_a": t.result.n1,
+                "n_b": t.result.n2,
+                "median_a": t.result.median1,
+                "median_b": t.result.median2,
+                "u": t.result.u,
+                "z": t.result.z,
+                "rank_biserial": t.result.rank_biserial,
+                "p_mann_whitney": t.result.p,
+                "p_holm": t.p_adjusted,
+            }
+            for t in g.distributions
+        ],
+        "survival": (
+            {
+                "churn_days": g.survival.churn_days,
+                "n_churned": g.survival.n_churned,
+                "curves": {
+                    name: {
+                        "n": c.n,
+                        "n_events": c.n_events,
+                        "median_survival_days": c.median_survival,
+                        "points": [
+                            {
+                                "day": p.time,
+                                "n_risk": p.n_risk,
+                                "n_event": p.n_event,
+                                "survival": p.survival,
+                                "ci": _ci(p.ci),
+                            }
+                            for p in c.points
+                        ],
+                    }
+                    for name, c in g.survival.curves.items()
+                },
+                "logrank": (
+                    {
+                        "chi2": g.survival.logrank.chi2,
+                        "p": g.survival.logrank.p,
+                        "p_holm": g.survival.p_adjusted,
+                        "observed1": g.survival.logrank.observed1,
+                        "expected1": g.survival.logrank.expected1,
+                        "observed2": g.survival.logrank.observed2,
+                        "expected2": g.survival.logrank.expected2,
+                    }
+                    if g.survival.logrank is not None
+                    else None
+                ),
+            }
+            if g.survival is not None
+            else None
+        ),
     }
 
 
@@ -242,4 +373,65 @@ def to_csv_tables(a: Analysis) -> Dict[str, str]:
         ["weekday", "label", "events"],
         [[i, _WEEKDAY_KO[i], a.weekday_hist[i]] for i in range(7)],
     )
+    if a.groups is not None:
+        tables.update(_group_tables(a.groups, _csv))
     return tables
+
+
+def _group_tables(g: GroupComparison, _csv) -> Dict[str, str]:
+    """군 비교 표 — 기술통계 · 검정 결과 · KM 곡선점."""
+    out: Dict[str, str] = {}
+    out["group_summary"] = _csv(
+        ["group", "n_users", "n_events", "n_sessions", "median_events_per_user",
+         "median_sessions_per_user", "median_minutes_per_user", "median_active_days"],
+        [[s.group, s.n_users, s.n_events, s.n_sessions,
+          _round(s.median_events_per_user, 2), _round(s.median_sessions_per_user, 2),
+          _round(s.median_minutes_per_user, 2), _round(s.median_active_days, 2)]
+         for s in g.arms],
+    )
+    rows = []
+    for t in g.proportions:
+        rows.append([
+            "proportion", t.label, t.group_a, t.group_b,
+            f"{t.successes_a}/{t.n_a}", f"{t.successes_b}/{t.n_b}",
+            _round(t.diff.p1), _round(t.diff.p2), _round(t.diff.diff),
+            _round(t.diff.ci[0]), _round(t.diff.ci[1]),
+            "Fisher exact", _round(t.p_value, 6), _round(t.p_adjusted, 6), "",
+        ])
+    for t in g.distributions:
+        rows.append([
+            "distribution", f"{t.label}({t.unit})", t.group_a, t.group_b,
+            t.result.n1, t.result.n2,
+            _round(t.result.median1, 3), _round(t.result.median2, 3), "", "", "",
+            "Mann-Whitney U", _round(t.result.p, 6), _round(t.p_adjusted, 6),
+            _round(t.result.rank_biserial, 4),
+        ])
+    if g.survival is not None and g.survival.logrank is not None:
+        lr = g.survival.logrank
+        rows.append([
+            "survival", f"이탈까지의 시간(churn≥{g.survival.churn_days}일)",
+            g.compare_a or "", g.compare_b or "",
+            lr.observed1, lr.observed2, "", "", "", "", "",
+            "log-rank", _round(lr.p, 6), _round(g.survival.p_adjusted, 6),
+            _round(lr.chi2, 4),
+        ])
+    out["group_tests"] = _csv(
+        ["kind", "metric", "group_a", "group_b", "a", "b", "rate_a", "rate_b",
+         "diff", "diff_ci_low", "diff_ci_high", "test", "p_value", "p_holm",
+         "effect_size"],
+        rows,
+    )
+    if g.survival is not None:
+        km_rows = []
+        for name, curve in g.survival.curves.items():
+            for p in curve.points:
+                km_rows.append([
+                    name, p.time, p.n_risk, p.n_event, _round(p.survival),
+                    _round(p.ci[0]) if p.ci else None,
+                    _round(p.ci[1]) if p.ci else None,
+                ])
+        out["group_survival_km"] = _csv(
+            ["group", "day", "n_risk", "n_event", "survival", "ci_low", "ci_high"],
+            km_rows,
+        )
+    return out

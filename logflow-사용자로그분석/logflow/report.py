@@ -96,9 +96,162 @@ def render_text(a: Analysis, *, top: int = 10) -> str:
     if a.funnel:
         _funnel_section(add, a.funnel, a.confidence)
     _activity_section(add, a)
+    if a.groups is not None:
+        _groups_section(add, a.groups)
     _top_users_section(add, a.user_stats, top)
     add("")
     return "\n".join(lines)
+
+
+def _fmt_p(p: Optional[float]) -> str:
+    """p 값 표기 — 아주 작으면 '<0.001', 그 외는 3자리."""
+    if p is None:
+        return "n/a"
+    if p < 0.001:
+        return "<0.001"
+    return f"{p:.3f}"
+
+
+def _fmt_num(x: Optional[float], nd: int = 1) -> str:
+    return "n/a" if x is None else f"{x:.{nd}f}"
+
+
+# 리포트 본문의 목표 표시 폭 (터미널 기본 80칸보다 약간 넓게).
+_WRAP_WIDTH = 96
+
+
+def _label(s: str, limit: int = 24) -> str:
+    """군 라벨 등 사용자 데이터를 표에 넣기 안전한 한 줄로.
+
+    줄바꿈/제어문자가 든 라벨은 표를 깨뜨리고, 아주 긴 라벨은 줄을 무한정 늘린다.
+    (JSON·CSV 출력은 원본을 그대로 담으므로 여기서만 표시용으로 다듬는다.)
+    """
+    flat = " ".join(str(s).split())
+    if _dw(flat) <= limit:
+        return flat
+    out = ""
+    for ch in flat:
+        if _dw(out + ch) > limit - 1:
+            break
+        out += ch
+    return out + "…"
+
+
+def _split_long(word: str, width: int) -> List[str]:
+    """공백이 없는 초장문 토큰(예: 300자 군 라벨)을 표시폭 기준으로 강제 분할."""
+    chunks, cur = [], ""
+    for ch in word:
+        if _dw(cur + ch) > width:
+            chunks.append(cur)
+            cur = ch
+        else:
+            cur += ch
+    if cur:
+        chunks.append(cur)
+    return chunks or [""]
+
+
+def _wrap(text: str, width: int = _WRAP_WIDTH, indent: str = "    ") -> List[str]:
+    """표시 폭 기준 줄바꿈 (한글 전각 2칸 반영). 공백 없는 긴 토큰도 잘라 넘긴다."""
+    words = []
+    for w in text.split():
+        words.extend(_split_long(w, width) if _dw(w) > width else [w])
+    if not words:
+        return []
+    lines, cur = [], words[0]
+    for w in words[1:]:
+        if _dw(cur) + 1 + _dw(w) <= width:
+            cur += " " + w
+        else:
+            lines.append(cur)
+            cur = indent + w
+    lines.append(cur)
+    return lines
+
+
+def _groups_section(add, g):
+    """군(arm) 비교 — 기술통계 · 비율 검정 · 분포 검정 · 이탈 생존."""
+    add("")
+    has_tests = bool(g.proportions or g.distributions or g.survival)
+    label = f"[ 군 비교 ] (열: {_label(g.group_col)}"
+    # 기준군은 실제로 비교에 쓰였을 때만 표시한다 (3군 이상이면 쓰이지 않는다).
+    if has_tests and g.compare_b:
+        label += f", 기준군: {_label(g.compare_b)}"
+    add(label + ")")
+
+    add("  " + _lj("군", 14) + _rj("사용자", 8) + _rj("이벤트", 8) + _rj("세션", 8)
+        + _rj("이벤트/명", 12) + _rj("세션/명", 10) + _rj("사용시간/명", 14)
+        + _rj("활성일/명", 12))
+    for s in g.arms:
+        add("  " + _lj(_label(s.group, 14), 14) + _rj(str(s.n_users), 8) + _rj(str(s.n_events), 8)
+            + _rj(str(s.n_sessions), 8)
+            + _rj(_fmt_num(s.median_events_per_user), 12)
+            + _rj(_fmt_num(s.median_sessions_per_user), 10)
+            + _rj(_fmt_num(s.median_minutes_per_user) + "분", 14)
+            + _rj(_fmt_num(s.median_active_days), 12))
+    add("  * 군별 값은 모두 사용자당 중앙값입니다 (한 사용자가 여러 번 세어지지 않도록).")
+    add("  * 사용시간 = 각 세션의 (첫→마지막 이벤트) 시간의 합. 이벤트가 하나뿐인 세션은")
+    add("    0분으로 잡히며, 세션과 세션 사이의 시간은 포함하지 않습니다.")
+
+    if g.proportions:
+        add("")
+        add(f"  ── 비율 비교 ({_label(g.compare_a)} − {_label(g.compare_b)}, "
+            f"위험차 {int(round(g.confidence * 100))}%CI: Newcombe / p: Fisher exact) ──")
+        add("  " + _lj("지표", 26) + _rj(_label(g.compare_a, 12), 12)
+            + _rj(_label(g.compare_b, 12), 12)
+            + _rj("차이", 9) + _lj(f"  {int(round(g.confidence * 100))}%CI", 20)
+            + _rj("p", 8) + _rj("p(Holm)", 10))
+        for t in g.proportions:
+            ci = f"  [{t.diff.ci[0] * 100:+.1f}, {t.diff.ci[1] * 100:+.1f}]%p"
+            add("  " + _lj(t.label, 26)
+                + _rj(f"{t.successes_a}/{t.n_a}", 12)
+                + _rj(f"{t.successes_b}/{t.n_b}", 12)
+                + _rj(f"{t.diff.diff * 100:+.1f}%p", 9)
+                + _lj(ci, 20)
+                + _rj(_fmt_p(t.p_value), 8) + _rj(_fmt_p(t.p_adjusted), 10))
+
+    if g.distributions:
+        add("")
+        add("  ── 분포 비교 (사용자당 값, Mann-Whitney U · 효과크기 rank-biserial) ──")
+        add("  " + _lj("지표", 26) + _rj(_label(g.compare_a, 12), 12)
+            + _rj(_label(g.compare_b, 12), 12)
+            + _rj("효과크기", 10) + _rj("p", 8) + _rj("p(Holm)", 10))
+        for t in g.distributions:
+            add("  " + _lj(f"{t.label}({t.unit})", 26)
+                + _rj(_fmt_num(t.result.median1), 12)
+                + _rj(_fmt_num(t.result.median2), 12)
+                + _rj(f"{t.result.rank_biserial:+.2f}", 10)
+                + _rj(_fmt_p(t.result.p), 8) + _rj(_fmt_p(t.p_adjusted), 10))
+        add("  * 표시값은 중앙값. 효과크기 +는 첫 군이 큼, −는 작음 (0=차이 없음).")
+        small = [t for t in g.distributions if min(t.result.n1, t.result.n2) < 8]
+        if small:
+            add("  * 주의: 한 군의 n<8 이라 정규근사 p 값은 대략적입니다 — 참고용으로만.")
+
+    if g.survival is not None:
+        s = g.survival
+        add("")
+        add(f"  ── 이탈까지의 시간 (마지막 활동 후 {s.churn_days}일 이상 무활동 = 이탈) ──")
+        for name, c in s.curves.items():
+            med = "도달 안 함" if c.median_survival is None else f"{c.median_survival:.0f}일"
+            add(f"    {_label(name)}: n={c.n}, 이탈 관찰 {c.n_events}명 "
+                f"(절단 {c.n - c.n_events}명), 생존중앙값 {med}")
+        if s.logrank is not None:
+            add(f"    log-rank: chi2={s.logrank.chi2:.2f}, p={_fmt_p(s.logrank.p)}, "
+                f"p(Holm)={_fmt_p(s.p_adjusted)}")
+        else:
+            add("    log-rank: n/a (이탈 사건이 없거나 한 군이 비어 검정 불가)")
+
+    add("")
+    if g.n_tests:
+        add(f"  * 다중비교: 이 절의 검정 {g.n_tests}개를 하나의 family 로 보고")
+        add("    Holm–Bonferroni 로 보정했습니다 — 판단은 p(Holm) 으로 하세요.")
+        add("    (검정 개수는 --retention/--funnel 에 따라 달라지므로, 보정된 p 값도")
+        add("     함께 바뀝니다. 비교 설계를 먼저 정하고 돌리세요.)")
+    add("  * 이 비교는 사후(post-hoc) 관찰 분석입니다. 사전에 정한 주요 평가변수가")
+    add("    아니라면 확증이 아닌 탐색적 근거로 다루세요.")
+    for note in g.notes:
+        for i, line in enumerate(_wrap(note, _WRAP_WIDTH - 4, indent="")):
+            add(("  ! " if i == 0 else "    ") + line)
 
 
 def _overview(add, a: Analysis):
