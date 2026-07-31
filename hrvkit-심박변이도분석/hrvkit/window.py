@@ -169,7 +169,9 @@ def analyze_windows(rr,
                     max_rr: float = 2000.0,
                     rel_thresh: float = 0.2,
                     nperseg: Optional[int] = None,
-                    do_sampen: bool = True) -> WindowSeries:
+                    do_sampen: bool = True,
+                    psd_method: str = "welch",
+                    ls_oversample: float = 4.0) -> WindowSeries:
     """RR(ms) 시계열을 window_sec 초 창으로 나눠 창마다 전 지표를 계산.
 
     step_sec 을 주면 창이 겹칩니다(예: window 300, step 60 → 5분 창을 1분씩 밀며
@@ -280,6 +282,9 @@ def analyze_windows(rr,
         hi = bisect.bisect_left(starts, w_end)
         sub = values[lo:hi]
         subf = wflags[lo:hi]
+        # 박동의 **종료 시각**(원시 시간축). analyze_rr 이 이걸 그대로 쓰므로
+        # `--clean remove` 로 사라진 박동의 시간이 창 안에서 접히지 않습니다.
+        subt = [starts[i] + values[i] / 1000.0 for i in range(lo, hi)]
         # 창의 이상박동 비율은 **원시 시간축의 전체 박동** 대비로 셉니다
         # (remove 로 사라진 박동도 분모·분자에 들어가야 정직합니다).
         n_a = (bisect.bisect_left(art_starts, w_end) -
@@ -298,7 +303,9 @@ def analyze_windows(rr,
                     sub, source=source, unit="ms", clean_method=clean_method,
                     fs=fs, min_rr=min_rr, max_rr=max_rr,
                     rel_thresh=rel_thresh, nperseg=nperseg,
-                    do_sampen=do_sampen, precleaned_flags=subf)
+                    do_sampen=do_sampen, psd_method=psd_method,
+                    ls_oversample=ls_oversample, precleaned_flags=subf,
+                    times=subt)
             except ValueError as exc:
                 win.error = str(exc)
                 n_short += 1

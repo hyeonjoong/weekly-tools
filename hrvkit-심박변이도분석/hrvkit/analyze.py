@@ -29,6 +29,7 @@ FLAT_COLUMNS = [
     ("source", None),
     ("n_input", 0),
     ("pct_artifacts", 1),
+    ("psd_method", None),
     ("mean_nn", 1),
     ("median_nn", 1),
     ("mean_hr", 1),
@@ -139,6 +140,15 @@ def _interpret(time: Dict[str, float], freq: Dict[str, float],
                     "신뢰할 수 없습니다. 시간영역 vagal 지표(RMSSD·SD1·pNN50)로 판단하세요.")
         return (f"RMSSD={rmssd:.1f} ms, SD1={sd1:.1f} ms, pNN50={pnn50:.1f}%. {tone}")
 
+    if math.isnan(hf_nu) or math.isnan(lf_hf):
+        # 주파수영역이 해상 불가(NaN)면 방향을 말할 근거가 없습니다. 예전에는 어느
+        # 부등식도 참이 아니어서 조용히 "균형 구간" 으로 떨어졌습니다 — 데이터가
+        # 없는 것과 균형인 것은 다릅니다.
+        return (f"RMSSD={rmssd:.1f} ms, SD1={sd1:.1f} ms, pNN50={pnn50:.1f}%. "
+                "주파수영역 지표(HF n.u.·LF/HF)가 해상되지 않아(NaN) 교감/부교감 "
+                "방향은 판단하지 않습니다 — 기록을 늘리거나 시간영역 vagal 지표"
+                "(RMSSD·SD1·pNN50)로 해석하세요.")
+
     if hf_nu >= 50.0 or lf_hf < 1.0:
         tone = ("부교감(미주신경) 우세 — 높은 RMSSD/HF/SD1은 호흡성 동성부정맥(RSA)이 "
                 "잘 실린 상태로, 느린 호흡 → 부교감 활성 ↑ → HRV ↑ → 서파수면 촉진이라는 "
@@ -164,7 +174,10 @@ def analyze_rr(rr,
                rel_thresh: float = 0.2,
                nperseg: Optional[int] = None,
                do_sampen: bool = True,
-               precleaned_flags: Optional[Sequence[bool]] = None) -> HRVResult:
+               psd_method: str = "welch",
+               ls_oversample: float = 4.0,
+               precleaned_flags: Optional[Sequence[bool]] = None,
+               times: Optional[Sequence[float]] = None) -> HRVResult:
     """RR(ms) 시계열 하나를 전 지표로 분석해 HRVResult를 반환.
 
     rr: RR/NN 간격(ms) 리스트. (단위 변환은 dataio.load_series 가 미리 수행)
@@ -203,11 +216,38 @@ def analyze_rr(rr,
     if clean_method == "remove" and len(cleaned) < 2:
         raise ValueError("이상박동 제거 후 남은 박동이 부족합니다.")
 
+    # 박동이 **삭제된** 경우(clean_method="remove") NN 의 누적합으로 시각을 다시
+    # 만들면 삭제된 시간이 통째로 사라져 뒤따르는 모든 박동이 앞으로 당겨집니다
+    # (기록이 짧아지고 스펙트럼 전체가 위로 밀립니다). 원본 시각을 살려 결측을
+    # **구멍으로 보존**합니다 — Lomb 은 구멍을 건너뛰고, Welch 는 가로질러 보간합니다.
+    beat_times: Optional[List[float]] = None
+    if times is not None:
+        # 호출자가 원본 시간축을 알고 있는 경우(구간 분석). 여기서 누적합으로 다시
+        # 만들면 창 안에서 제거된 박동만큼 시간이 사라져 창마다 다른 비율로 시간축이
+        # 압축됩니다 — 추세가 생리가 아니라 이상박동 밀도를 따라가게 됩니다.
+        if len(times) != n_input:
+            raise ValueError(
+                f"times 길이가 rr 길이와 다릅니다 ({len(times)} != {n_input}).")
+        beat_times = [float(t) for t in times]
+    elif precleaned_flags is None and clean_method == "remove" and n_art:
+        acc = 0.0
+        all_t: List[float] = []
+        for v in rr:
+            acc += v / 1000.0
+            all_t.append(acc)
+        beat_times = [t for t, bad in zip(all_t, flags) if not bad]
+
     # 정제 후에도 남을 수 있는 비생리적 값(0·음수·NaN/inf)을 제거해 지표 계산의
     # ZeroDivision/NaN 오염을 막습니다. interpolate/none 경로에서 '전부 이상'인
     # 구간은 원본을 그대로 두므로 여기서 최종 방어합니다.
     n_before = len(cleaned)
-    cleaned = [v for v in cleaned if math.isfinite(v) and v > 0.0]
+    if beat_times is not None:
+        kept = [(v, t) for v, t in zip(cleaned, beat_times)
+                if math.isfinite(v) and v > 0.0]
+        cleaned = [v for v, _ in kept]
+        beat_times = [t for _, t in kept]
+    else:
+        cleaned = [v for v in cleaned if math.isfinite(v) and v > 0.0]
     n_nonphys = n_before - len(cleaned)
     if n_nonphys:
         warnings.append(
@@ -228,7 +268,9 @@ def analyze_rr(rr,
 
     freq: Dict[str, float]
     try:
-        freq = frequency_domain(cleaned, fs=fs, nperseg=nperseg)
+        freq = frequency_domain(cleaned, fs=fs, nperseg=nperseg,
+                                method=psd_method, ls_oversample=ls_oversample,
+                                times=beat_times)
     except ValueError as exc:
         warnings.append(f"주파수영역 분석 생략: {exc}")
         freq = {k: float("nan") for k in (
@@ -240,7 +282,8 @@ def analyze_rr(rr,
                      "welch_segments": 0, "resp_source": None,
                      "slow_breathing_regime": False, "welch_segment_sec": 0.0,
                      "freq_resolution_hz": float("nan"), "vlf_bins": 0,
-                     "lf_bins": 0, "hf_bins": 0, "vlf_reliable": False})
+                     "lf_bins": 0, "hf_bins": 0, "vlf_reliable": False,
+                     "psd_method": None})
 
     sampen = float("nan")
     if do_sampen:
@@ -251,6 +294,12 @@ def analyze_rr(rr,
             sampen = sample_entropy(cleaned)
 
     dfa_metrics = dfa(cleaned)
+
+    if freq.get("ls_above_nyquist"):
+        warnings.append(
+            f"평균 표본율의 절반({freq['ls_nyquist_hz']:.3f} Hz)이 HF 상단(0.40 Hz)보다 "
+            "낮습니다(평균 HR < 48 bpm). HF 대역 상단은 앨리어싱될 수 있으니 HF 파워를 "
+            "보수적으로 해석하세요.")
 
     if freq.get("slow_breathing_regime"):
         warnings.append(

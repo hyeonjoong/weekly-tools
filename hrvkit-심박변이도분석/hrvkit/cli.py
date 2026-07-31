@@ -41,7 +41,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="hrvkit",
         description="심박변이도(HRV) 분석기 — RR/IBI(ms) 또는 순간 HR(bpm) CSV로부터 "
-                    "이상박동 보정 후 시간영역·주파수영역(Welch/FFT)·비선형(Poincaré/"
+                    "이상박동 보정 후 시간영역·주파수영역(Welch/FFT 또는 Lomb–Scargle)·비선형(Poincaré/"
                     "SampEn/DFA) 지표를 계산합니다 (표준 라이브러리만). 여러 파일을 "
                     "주면 일괄 요약, --compare 로 짝지은 비교, --paired 로 짝지은 "
                     "코호트 통계, --groups 로 평행군(독립 2군) 비교, --window 로 "
@@ -73,6 +73,24 @@ def _build_parser() -> argparse.ArgumentParser:
                         "해상도가 좋아지지만 평균할 구간 수가 줄어 분산이 커집니다. "
                         "VLF(0.003–0.04 Hz)를 신뢰하려면 구간이 333초 이상이어야 "
                         "하므로 긴 기록에서 예: --nperseg 2048 (fs 4 Hz → 512초)")
+    p.add_argument("--psd", default="welch", choices=["welch", "lomb"],
+                   help="PSD 추정 방법 (기본 welch: 4 Hz 선형보간 후 Welch). "
+                        "lomb = Lomb–Scargle 주기도 — **보간하지 않고** 박동 시각 "
+                        "위에서 직접 적합합니다. 선형보간은 저역통과로 작용해 HF를 "
+                        "과소추정하므로 **절대 파워(ms²·ln HF)를 논문에 실을 때** "
+                        "가장 권장되고, --clean remove 로 지운 기록에서는 구멍을 "
+                        "건너뜁니다. 기록을 구간으로 쪼개지 않아 긴 기록의 VLF도 "
+                        "해상되지만, lomb 은 추세 제거를 하지 않아 느린 드리프트가 "
+                        "VLF로 새어 들어갑니다(README 경고 참조). "
+                        "--fs/--nperseg 는 lomb 에서 쓰이지 않습니다. "
+                        "순수 파이썬이라 welch 보다 30–100배 느립니다"
+                        "(20분 0.5초, 1시간 3초, 8시간 20초대)")
+    p.add_argument("--ls-oversample", type=float, default=4.0, metavar="K",
+                   help="Lomb–Scargle 주파수 격자 과표본 배수 (1 이상 32 이하, "
+                        "기본 4). 격자 간격은 1/(K·기록길이) 이며, 과표본은 "
+                        "해상도(1/기록길이)를 늘리지 않고 대역 경계 적분 오차만 "
+                        "줄입니다. 클수록 느립니다. 격자점 4096개 상한에 걸리면 "
+                        "자동으로 낮아지고 리포트에 **실제 적용된** 배수를 찍습니다")
     p.add_argument("--no-sampen", action="store_true",
                    help="표본 엔트로피(SampEn) 계산 생략")
     p.add_argument("--compare", action="store_true",
@@ -149,6 +167,8 @@ def _analyze_file(args, path: str) -> HRVResult:
         rel_thresh=args.rel_thresh,
         nperseg=args.nperseg,
         do_sampen=not args.no_sampen,
+        psd_method=args.psd,
+        ls_oversample=args.ls_oversample,
     )
     if meta["n_dropped"]:
         res.warnings.append(
@@ -173,6 +193,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = _build_parser().parse_args(argv)
     fmt = args.format or ("json" if args.json else "text")
     paths: List[str] = args.csv
+
+    # 하한이 1 인 이유: 과표본은 대역 경계 적분 오차만 줄이는 장치라 1 미만은
+    # 쓸 이유가 없고, 격자가 해상도보다 성글어져 대역 파워가 크게 틀어집니다
+    # (측정: K=0.2 에서 HF 4배 과대·LF 30배 과소, 경고 없이 exit 0).
+    if not (1.0 <= args.ls_oversample <= 32.0):
+        print("입력 오류: --ls-oversample 은 1 이상 32 이하여야 합니다 "
+              f"(받은 값: {args.ls_oversample:g}). 1 미만은 격자가 주파수 "
+              "해상도보다 성글어져 대역 파워가 크게 틀어집니다.", file=sys.stderr)
+        return 2
 
     if not (0.0 < args.alpha < 1.0):
         print(f"입력 오류: --alpha 는 0과 1 사이여야 합니다 (받은 값: {args.alpha:g}).",
@@ -269,7 +298,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 min_beats=args.min_window_beats, source=path,
                 clean_method=args.clean, fs=args.fs, min_rr=args.min_rr,
                 max_rr=args.max_rr, rel_thresh=args.rel_thresh,
-                nperseg=args.nperseg, do_sampen=not args.no_sampen)
+                nperseg=args.nperseg, do_sampen=not args.no_sampen,
+                psd_method=args.psd, ls_oversample=args.ls_oversample)
         except Exception as exc:  # noqa: BLE001
             print(f"입력/분석 오류: {exc}", file=sys.stderr)
             return 2

@@ -78,7 +78,24 @@ def render_text(res: HRVResult) -> str:
     # [2] 주파수영역
     L("")
     L("[2] 주파수영역 / Frequency-domain")
-    if f.get("n_resampled"):
+    is_lomb = f.get("psd_method") == "lomb"
+    has_psd = bool(f.get("n_resampled")) or is_lomb
+    if is_lomb:
+        L(f"    방법 method        : Lomb–Scargle 주기도 (보간 없음, 박동 시각에 "
+          f"직접 최소제곱 적합, 격자 과표본 ×{_num(f.get('ls_oversample'), 1)})")
+        L(f"    기록 길이 duration : {_num(f['duration_sec'], 1)} s "
+          f"({int(f.get('ls_n_beats') or 0)} beats, 평균 표본율 "
+          f"{_num(f.get('ls_fs_eff'), 3)} Hz)")
+        L(f"    해상도 resolution  : {_num(f.get('freq_resolution_hz'), 4)} Hz "
+          f"(=1/기록길이; 격자 {_num(f.get('ls_df_hz'), 5)} Hz × "
+          f"{int(f.get('ls_nfreq') or 0)}점 → VLF/LF/HF 빈 "
+          f"{int(f.get('vlf_bins') or 0)}/{int(f.get('lf_bins') or 0)}/"
+          f"{int(f.get('hf_bins') or 0)}개)")
+        if f.get("ls_above_nyquist"):
+            L(f"      ※ 평균 표본율의 절반({_num(f.get('ls_nyquist_hz'), 3)} Hz)이 "
+              "HF 상단(0.40 Hz)보다 낮습니다 — 서맥 기록이라 HF 상단은 앨리어싱 "
+              "위험이 있습니다.")
+    elif f.get("n_resampled"):
         L(f"    방법 method        : {_num(f['resample_fs'], 0)} Hz 선형 리샘플 → "
           f"Welch PSD (Hann, nperseg={int(f['welch_nperseg'])}, 50% overlap, "
           f"radix-2 FFT, {int(f['welch_segments'])} segments)")
@@ -88,15 +105,16 @@ def render_text(res: HRVResult) -> str:
           f"(구간 {_num(f.get('welch_segment_sec'), 1)} s → VLF/LF/HF 빈 "
           f"{int(f.get('vlf_bins') or 0)}/{int(f.get('lf_bins') or 0)}/"
           f"{int(f.get('hf_bins') or 0)}개)")
-    # VLF는 구간 길이보다 느린 성분이라 기본 설정에선 과소추정/추정불가.
-    # 숫자만 찍으면 오해하므로 신뢰 여부를 같은 줄에 붙입니다.
+    # VLF는 구간(Welch)/기록(Lomb) 길이보다 느린 성분이라 짧은 기록에선
+    # 과소추정/추정불가. 숫자만 찍으면 오해하므로 신뢰 여부를 같은 줄에 붙입니다.
     vlf_note = ""
-    if not f.get("vlf_reliable", False) and f.get("n_resampled"):
+    if not f.get("vlf_reliable", False) and has_psd:
+        limit = "기록" if is_lomb else "구간"
+        fix = "더 긴 기록 필요" if is_lomb else "--nperseg 로 구간 확대"
         if not _finite(f.get("vlf_power")):
-            vlf_note = "  ※ 구간이 짧아 VLF 대역에 빈 없음 → 추정 불가"
+            vlf_note = f"  ※ {limit}이 짧아 VLF 대역에 빈 없음 → 추정 불가"
         else:
-            vlf_note = ("  ※ 구간 < VLF 주기(333 s) → 과소추정, 참고용"
-                        " (--nperseg 로 구간 확대)")
+            vlf_note = (f"  ※ {limit} < VLF 주기(333 s) → 과소추정, 참고용 ({fix})")
     L(f"    VLF power          : {_num(f['vlf_power'], 1)} ms²  "
       f"({_num(f['vlf_pct'], 1)}%){vlf_note}")
     L(f"    LF  power          : {_num(f['lf_power'], 1)} ms²  "
@@ -163,6 +181,43 @@ def _fmt_cell(value, digits) -> str:
     if math.isinf(xf):
         return "inf" if xf > 0 else "-inf"
     return f"{xf:.{digits}f}"
+
+
+_PSD_LABELS = {"welch": "Welch (4 Hz 선형보간 → FFT)",
+               "lomb": "Lomb–Scargle (보간 없음)"}
+
+
+def psd_method_of(results) -> str:
+    """여러 HRVResult 가 쓴 PSD 방법을 하나로 요약합니다.
+
+    코호트 표(--paired/--groups)와 --compare 는 여러 기록을 한 표에 모으므로,
+    어느 추정기로 낸 숫자인지 **표 위에 반드시 적혀야** 합니다. Welch 와 Lomb 의
+    절대 파워는 같은 기록에서도 20 % 이상 다를 수 있어, 방법이 안 적힌 표는
+    나중에 다른 연구와 섞이면 복구할 수 없는 혼동이 됩니다.
+
+    전부 같으면 그 방법을, 섞였으면 'mixed', 주파수영역이 전부 생략됐으면 ''.
+    """
+    seen = set()
+    for r in results:
+        m = getattr(r, "freq", {}).get("psd_method")
+        if m:
+            seen.add(m)
+    if not seen:
+        return ""
+    if len(seen) > 1:
+        return "mixed"
+    return seen.pop()
+
+
+def _psd_method_line(results) -> str:
+    """리포트 머리말에 넣을 'PSD 방법: …' 한 줄 (없으면 빈 문자열)."""
+    m = psd_method_of(results)
+    if not m:
+        return ""
+    if m == "mixed":
+        return ("  ※ PSD 방법: **혼합(mixed)** — 이 표의 기록들이 서로 다른 "
+                "추정기로 계산됐습니다. 절대 파워를 비교하지 마세요.")
+    return f"  PSD 방법     : {_PSD_LABELS.get(m, m)}"
 
 
 def metrics_to_csv(results: Sequence[HRVResult]) -> str:
@@ -259,6 +314,9 @@ def render_comparison(baseline: HRVResult, intervention: HRVResult,
     L("=" * 78)
     L(f"  기저 {base_label:<12}: {baseline.source or '?'}")
     L(f"  개입 {interv_label:<12}: {intervention.source or '?'}")
+    _pm = _psd_method_line([baseline, intervention])
+    if _pm:
+        L(_pm)
     if slow:
         L("  ※ 느린/공명 호흡 레짐 감지 → HF 기반 지표(HF·HF n.u.·LF/HF)는 방향 집계 "
           "제외(‘레짐?’)")
@@ -381,6 +439,7 @@ def paired_group(pairs: Sequence, alpha: float = 0.05) -> "dict":
 
     out["_meta"] = {
         "n_subjects": len(pairs),
+        "psd_method": psd_method_of([r for pair in pairs for r in pair]),
         "n_slow_regime": slow_n,
         "n_tests": sum(1 for p in pvals if _finite(p)),
         "alpha": alpha,
@@ -407,10 +466,11 @@ def paired_group_to_csv(pairs: Sequence, alpha: float = 0.05) -> str:
     g = paired_group(pairs, alpha=alpha)
     buf = io.StringIO()
     writer = csv.writer(buf)
-    writer.writerow(["metric"] + [k for k, _ in _PAIRED_CSV_COLS])
+    pm = psd_method_of([r for pair in pairs for r in pair])
+    writer.writerow(["metric", "psd_method"] + [k for k, _ in _PAIRED_CSV_COLS])
     for key, _label, _d, _direction, _hf in _PAIRED_METRICS:
         s = g.get(key) or {}
-        writer.writerow([key] +
+        writer.writerow([key, pm] +
                         [_fmt_cell(s.get(k), d) for k, d in _PAIRED_CSV_COLS])
     return buf.getvalue()
 
@@ -436,6 +496,9 @@ def render_paired_group(pairs: Sequence, alpha: float = 0.05) -> str:
     L("=" * 84)
     L(f"  피험자 짝 수 n = {n}"
       + (f"   (느린/공명 호흡 레짐 {slow}쌍: HF 기반 지표 해석 주의)" if slow else ""))
+    _pm = _psd_method_line([r for pair in pairs for r in pair])
+    if _pm:
+        L(_pm)
     L("")
 
     # ---------------- [A] 기술통계 ----------------
@@ -624,6 +687,9 @@ def render_windows(series: WindowSeries) -> str:
     L(f"  기록 길이     : {_num(series.duration_sec, 1)} s "
       f"({_mmss(series.duration_sec)}), 입력 박동 {series.n_input}개, "
       f"이상박동 {_num(series.pct_artifacts, 1)}% → 보정 {series.clean_method}")
+    _pm = _psd_method_line([w.result for w in series.ok_windows])
+    if _pm:
+        L(_pm)
     L(f"  창 window     : {_num(series.window_sec, 0)} s, "
       f"step {_num(series.step_sec, 0)} s "
       f"({'겹침 overlapping' if series.overlapping else '겹치지 않음'}) → "
@@ -731,12 +797,35 @@ def render_windows(series: WindowSeries) -> str:
     n_unrel = sum(1 for w in series.ok_windows
                   if not w.result.freq.get("vlf_reliable"))
     if n_unrel:
+        # 세 가지를 구분해야 합니다: ① 주파수영역 자체가 생략됨(값이 아예 없음),
+        # ② VLF 가 NaN(해상 불가로 정직하게 비움), ③ VLF 가 유한하지만 과소추정.
+        # 예전에는 셋을 한 문장으로 뭉뚱그려, 주파수영역이 전부 생략된 창에도
+        # "Welch 구간이 짧아서" + "NaN 이 아니라 유한 값" 이라고 썼습니다(둘 다 거짓).
+        n_total = len(series.ok_windows)
+        n_skipped = sum(1 for w in series.ok_windows
+                        if not w.result.freq.get("psd_method"))
+        n_nan = sum(1 for w in series.ok_windows
+                    if w.result.freq.get("psd_method")
+                    and not _finite(w.result.freq.get("vlf_power")))
+        n_finite = n_unrel - n_skipped - n_nan
+        method = psd_method_of([w.result for w in series.ok_windows])
         L("")
-        L(f"    ※ 구간 {n_unrel}/{len(series.ok_windows)}개에서 VLF 가 신뢰 불가"
-          f"(vlf_reliable=False)입니다 — 구간 길이가 VLF 주기(333 s)보다 짧기 "
-          f"때문입니다. VLF 는 NaN 이 아니라 **심하게 과소추정된 유한 값**으로 "
-          f"나오고, total_power 는 정의상 VLF 를 포함하므로 같은 편향을 갖습니다. "
-          f"구간별로는 total_power/VLF 대신 시간영역·Poincaré 지표를 쓰세요.")
+        if n_skipped:
+            L(f"    ※ 구간 {n_skipped}/{n_total}개는 창이 너무 짧아 **주파수영역을 "
+              f"아예 계산하지 못했습니다**(VLF/LF/HF/total 모두 비어 있음). "
+              f"창을 늘리거나 주파수 지표 없이 해석하세요.")
+        if n_nan or n_finite:
+            limit = "각 구간(epoch)의 길이가" if method == "lomb" else \
+                "Welch 구간이"
+            L(f"    ※ 구간 {n_nan + n_finite}/{n_total}개에서 VLF 가 신뢰 불가"
+              f"(vlf_reliable=False)입니다 — {limit} VLF 주기(333 s)보다 짧기 "
+              f"때문입니다."
+              + (f" 그중 {n_nan}개는 해상 불가라 **NaN**(total_power 도 NaN)이고,"
+                 if n_nan else "")
+              + (f" {n_finite}개는 **심하게 과소추정된 유한 값**으로 나오며 "
+                 f"total_power 는 정의상 VLF 를 포함해 같은 편향을 갖습니다."
+                 if n_finite else "")
+              + " 구간별로는 total_power/VLF 대신 시간영역·Poincaré 지표를 쓰세요.")
 
     # ---------------- 해석 ----------------
     L("")
@@ -818,6 +907,7 @@ def group_compare(a_results: Sequence[HRVResult],
     out["_meta"] = {
         "n_a": len(a_results),
         "n_b": len(b_results),
+        "psd_method": psd_method_of(list(a_results) + list(b_results)),
         "n_slow_regime": slow_n,
         "n_tests": sum(1 for p in pvals if _finite(p)),
         "alpha": alpha,
@@ -843,10 +933,11 @@ def group_compare_to_csv(a_results: Sequence[HRVResult],
     g = group_compare(a_results, b_results, alpha=alpha)
     buf = io.StringIO()
     writer = csv.writer(buf)
-    writer.writerow(["metric"] + [k for k, _ in _GROUP_CSV_COLS])
+    pm = psd_method_of(list(a_results) + list(b_results))
+    writer.writerow(["metric", "psd_method"] + [k for k, _ in _GROUP_CSV_COLS])
     for key, _label, _d, _dir, _hf in _GROUP_METRICS:
         s = g.get(key) or {}
-        writer.writerow([key] +
+        writer.writerow([key, pm] +
                         [_fmt_cell(s.get(k), d) for k, d in _GROUP_CSV_COLS])
     return buf.getvalue()
 
@@ -877,6 +968,9 @@ def render_group_compare(a_results: Sequence[HRVResult],
       f"모든 차이·이동량은 {b_label} − {a_label} 방향입니다.")
     L("  검정: Mann–Whitney U(=Wilcoxon 순위합, 양측) — 각 피험자가 한 군에만 "
       "속하는 설계용.")
+    _pm = _psd_method_line(list(a_results) + list(b_results))
+    if _pm:
+        L(_pm)
     L("")
 
     # ---------------- [A] 기술 ----------------

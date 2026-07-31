@@ -13,6 +13,12 @@ from typing import Dict, List, Sequence
 # 기하학적 지표용 히스토그램 빈 폭 — Task Force(1996) 표준: 1/128 초 ≈ 7.8125 ms.
 _HIST_BIN_MS = 1000.0 / 128.0
 
+# 히스토그램 빈 개수 상한. 빈 폭이 7.8125 ms 이므로 2^20 빈 ≈ 8190 초(2.3시간)의
+# NN 폭까지 덮습니다 — 생리적으로 도달할 수 없는 범위입니다. 상한이 없으면
+# `--clean none` 으로 통과한 비생리적 값(예: 9e99) 하나가 `range(max_idx+1)` 을
+# 무한정 키워 프로세스가 OOM 으로 되돌아올 수 없이 멈춥니다.
+_MAX_HIST_BINS = 1 << 20
+
 
 def _histogram(nn: Sequence[float], bin_width: float
                ) -> "tuple[List[float], List[int]]":
@@ -24,6 +30,11 @@ def _histogram(nn: Sequence[float], bin_width: float
         idx = int(math.floor((v - lo) / bin_width))
         counts[idx] = counts.get(idx, 0) + 1
     max_idx = max(counts)
+    if max_idx + 1 > _MAX_HIST_BINS:
+        raise ValueError(
+            f"NN 값의 폭이 너무 커 히스토그램 빈이 {max_idx + 1:.3g}개 필요합니다 "
+            f"(상한 {_MAX_HIST_BINS}). 비생리적 값이 섞여 있습니다 — "
+            "--max-rr 로 범위를 제한하거나 --clean interpolate 를 쓰세요.")
     centers = [lo + (i + 0.5) * bin_width for i in range(max_idx + 1)]
     hist = [counts.get(i, 0) for i in range(max_idx + 1)]
     return centers, hist
@@ -45,7 +56,11 @@ def geometric_indices(nn: Sequence[float],
     if n < 2:
         return {"hti": float("nan"), "tinn": float("nan")}
 
-    centers, hist = _histogram(nn, bin_width)
+    try:
+        centers, hist = _histogram(nn, bin_width)
+    except ValueError:
+        # 기하학적 지표만 포기하고 나머지 시간영역 지표는 그대로 냅니다.
+        return {"hti": float("nan"), "tinn": float("nan")}
     peak = max(hist)
     if peak <= 0:
         return {"hti": float("nan"), "tinn": float("nan")}
