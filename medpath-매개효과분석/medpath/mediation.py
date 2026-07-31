@@ -24,7 +24,7 @@ from itertools import combinations
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from .bootstrap import (EffectPlan, ci_from_boots, jackknife_acceleration,
-                        percentile_ci, run_bootstrap)
+                        jackknife_values, percentile_ci, run_bootstrap)
 from .dataio import Design
 from .linalg import GramCache, SingularDesignError
 from .model import (Regression, breusch_pagan, fit_ols, influence_summary,
@@ -55,9 +55,19 @@ class Effect:
         self.warnings: List[str] = []
 
     @property
+    def tested(self) -> bool:
+        """Was an interval actually computed for this effect?
+
+        ``significant`` is False both when the interval covers zero and when
+        there *is* no interval; only this property separates "tested and null"
+        from "never tested", and every report line must respect the difference.
+        """
+        return math.isfinite(self.ci_lo) and math.isfinite(self.ci_hi)
+
+    @property
     def significant(self) -> bool:
         """Does the bootstrap interval exclude zero? (NaN interval -> False)"""
-        if not (math.isfinite(self.ci_lo) and math.isfinite(self.ci_hi)):
+        if not self.tested:
             return False
         return (self.ci_lo > 0.0 and self.ci_hi > 0.0) or (self.ci_lo < 0.0 and self.ci_hi < 0.0)
 
@@ -65,7 +75,8 @@ class Effect:
         d = {"key": self.key, "label": self.label, "kind": self.kind,
              "estimate": self.estimate, "se": self.se,
              "ci_lo": self.ci_lo, "ci_hi": self.ci_hi, "ci_method": self.ci_method,
-             "excludes_zero": self.significant,
+             "tested": self.tested,
+             "excludes_zero": self.significant if self.tested else None,
              "standardized": self.standardized}
         if self.components:
             d["components"] = [{"term": n, "estimate": v, "se": s}
@@ -84,11 +95,14 @@ class Effect:
 class Contrast:
     """Difference between two specific indirect effects."""
 
-    def __init__(self, label: str, estimate: float, ci_lo: float, ci_hi: float):
+    def __init__(self, label: str, estimate: float, ci_lo: float, ci_hi: float,
+                 ci_method: str = "", warnings: Optional[Sequence[str]] = None):
         self.label = label
         self.estimate = estimate
         self.ci_lo = ci_lo
         self.ci_hi = ci_hi
+        self.ci_method = ci_method
+        self.warnings: List[str] = list(warnings or ())
 
     @property
     def significant(self) -> bool:
@@ -97,9 +111,13 @@ class Contrast:
         return (self.ci_lo > 0.0 and self.ci_hi > 0.0) or (self.ci_lo < 0.0 and self.ci_hi < 0.0)
 
     def to_dict(self) -> dict:
-        return {"label": self.label, "estimate": self.estimate,
-                "ci_lo": self.ci_lo, "ci_hi": self.ci_hi,
-                "excludes_zero": self.significant}
+        d = {"label": self.label, "estimate": self.estimate,
+             "ci_lo": self.ci_lo, "ci_hi": self.ci_hi,
+             "ci_method": self.ci_method,
+             "excludes_zero": self.significant}
+        if self.warnings:
+            d["warnings"] = list(self.warnings)
+        return d
 
 
 class MediationResult:
@@ -238,6 +256,9 @@ def analyze(design: Design,
     res.ci_method = ci_method
     res.robust = robust
     res.notes.extend(design.notes)
+    # design.warnings carries data-preparation problems that must not be
+    # demoted to a "note" (notes are hidden by --brief).
+    res.warnings.extend(design.warnings)
 
     x_name = design.x_name
     y_name = design.y_name
@@ -374,18 +395,24 @@ def analyze(design: Design,
             res.boot_failed = boot.failed
 
     if boot is not None and boot.n_ok > 0:
+        method_label = {"percentile": "백분위 부트스트랩",
+                        "bc": "편향보정(BC) 부트스트랩",
+                        "bca": "BCa 부트스트랩"}[ci_method]
+        # One leave-one-out sweep serves every acceleration below (effects and
+        # contrasts alike); recomputing it per statistic was O(effects × N).
+        jack = None
+        if ci_method == "bca" and cache is not None:
+            jack = jackknife_values(cache, plan)
         eff_list = indirect_effects + ([total_ind] if len(indirect_effects) > 1 else [])
         for offset, eff in enumerate(eff_list):
             stat_index = 2 + offset if offset < len(indirect_effects) else 2 + len(indirect_effects)
             samples = boot.columns[stat_index]
             acc = None
-            if ci_method == "bca" and cache is not None:
-                acc = jackknife_acceleration(cache, plan, stat_index)
+            if jack:
+                acc = jackknife_acceleration(cache, plan, stat_index, jack=jack)
             lo, hi, warns = ci_from_boots(samples, eff.estimate, conf, ci_method, acc)
             eff.ci_lo, eff.ci_hi = lo, hi
-            eff.ci_method = {"percentile": "백분위 부트스트랩",
-                             "bc": "편향보정(BC) 부트스트랩",
-                             "bca": "BCa 부트스트랩"}[ci_method]
+            eff.ci_method = method_label
             eff.se = sd(samples)
             eff.warnings.extend(warns)
         # contrasts between specific indirect effects
@@ -393,11 +420,17 @@ def analyze(design: Design,
             for i, j in combinations(range(len(indirect_effects)), 2):
                 diffs = [bi - bj for bi, bj in zip(boot.columns[2 + i], boot.columns[2 + j])]
                 est = indirect_effects[i].estimate - indirect_effects[j].estimate
-                lo, hi, _ = ci_from_boots(diffs, est, conf, ci_method, None)
+                # A contrast is its own statistic, so it needs its own
+                # acceleration — passing None here silently produced a BC
+                # interval while the report claimed BCa.
+                acc_c = None
+                if jack:
+                    acc_c = jackknife_acceleration(cache, plan, 2 + i, 2 + j, jack=jack)
+                lo, hi, cwarns = ci_from_boots(diffs, est, conf, ci_method, acc_c)
                 res.contrasts.append(Contrast(
                     "%s − %s" % (indirect_effects[i].label.replace("간접효과 ", ""),
                                  indirect_effects[j].label.replace("간접효과 ", "")),
-                    est, lo, hi))
+                    est, lo, hi, ci_method=method_label, warnings=cwarns))
     elif n_boot > 0:
         res.warnings.append(
             "부트스트랩 재표본이 모두 실패해 간접효과 신뢰구간을 계산하지 못했습니다 "
@@ -493,7 +526,14 @@ def _model_warnings(design: Design, res: MediationResult, k: int,
             w.append("강한 영향점이 있습니다(Cook's D > 0.5): %s. 이 관측치를 빼고도 결론이 "
                      "유지되는지 반드시 확인하세요(행 번호는 결측 제거 후 순번)."
                      % ", ".join("#%d(D=%.2f)" % (r + 1, d) for r, d in strong))
-    if res.n_boot and res.n_boot < 1000:
+    if res.n_boot == 0:
+        # Without resamples there is no interval and therefore no test. Saying
+        # so loudly matters: the effect table and the APA sentence would
+        # otherwise read as a tested null result.
+        w.append("부트스트랩을 실행하지 않아(--bootstrap 0) 간접효과의 신뢰구간·검정이 "
+                 "없습니다. 표에 보이는 간접효과는 '점추정치일 뿐 검정되지 않은' 값이며, "
+                 "'유의하지 않다'는 뜻이 아닙니다. 보고하려면 --bootstrap 5000 으로 다시 실행하세요.")
+    elif res.n_boot < 1000:
         w.append("부트스트랩 반복이 %d회로 적습니다. 논문 보고용은 5000회 이상을 권합니다."
                  % res.n_boot)
     return w

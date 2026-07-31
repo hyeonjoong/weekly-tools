@@ -19,18 +19,25 @@ EXIT_OK = 0
 EXIT_ERROR = 1
 
 _EPILOG = """\
-예시:
+실행 방법 (설치 불필요 — 이 폴더에서 그대로):
+  python3 -m medpath <CSV> --x ... --m ... --y ...
+  (macOS에서는 실행.command 파일을 더블클릭해도 됩니다.)
+
+예시 (아래 명령은 동봉된 예제 파일로 그대로 복사·실행됩니다):
   # 1) 단순매개: 중재군(arm) → HRV(rmssd_ms) → 서파수면(sws_min), 나이 보정
-  medpath sleep.csv --x arm --m rmssd_ms --y sws_min --covariates age
+  python3 -m medpath examples/sleep_breathing_hrv.csv \\
+      --x arm --m rmssd_ms --y sws_min --covariates age
 
   # 2) 병렬 다중매개: 매개변수 두 개를 동시에
-  medpath sleep.csv --x arm --m rmssd_ms,resp_rate --y sws_min
+  python3 -m medpath examples/sleep_breathing_hrv.csv \\
+      --x arm --m rmssd_ms,resp_rate_bpm --y sws_min
 
-  # 3) 직렬(연쇄) 매개: 호흡 → HRV → 서파수면 → ISI 개선 (순서대로)
-  medpath sleep.csv --x arm --m rmssd_ms,sws_min --y isi_change --serial
+  # 3) 직렬(연쇄) 매개: 중재 → HRV → 서파수면 → ISI 개선 (순서대로)
+  python3 -m medpath examples/sleep_breathing_hrv.csv \\
+      --x arm --m rmssd_ms,sws_min --y isi_change --serial
 
   # 4) 열 이름이 기억나지 않을 때
-  medpath sleep.csv --list-columns
+  python3 -m medpath examples/sleep_breathing_hrv.csv --list-columns
 """
 
 
@@ -47,7 +54,9 @@ def _split_list(values: Optional[Sequence[str]]) -> List[str]:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        prog="medpath",
+        # There is no installed console script; the real invocation is the
+        # module form, so that is what usage/error lines must show.
+        prog="python3 -m medpath",
         description="매개효과(간접효과) 분석 — X → M → Y 경로를 부트스트랩으로 검정합니다. "
                     "병렬/직렬 다중매개, 공변량 보정, 논문용 문장까지. 외부 의존성 없음.",
         epilog=_EPILOG,
@@ -76,7 +85,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="경로계수 표준오차: hc3 = 이분산 강건 (부트스트랩 구간은 영향 없음)")
     p.add_argument("--jobs", type=int, default=1, metavar="N",
                    help="부트스트랩 병렬 프로세스 수 (기본 1; 결과는 개수와 무관하게 동일)")
-    p.add_argument("--delimiter", help="CSV 구분자 강제 지정 (기본: 자동 인식)")
+    p.add_argument("--delimiter", help="CSV 구분자 강제 지정 (기본: 자동 인식, 탭은 tab)")
+    p.add_argument("--decimal", choices=["auto", "point", "comma"], default="auto",
+                   help="소수점 기호: point=1.5 / comma=1,5 (기본 auto — 잘못 인식되면 강제 지정)")
     p.add_argument("--digits", type=int, default=3, help="소수점 자리수 (기본 3)")
     p.add_argument("--brief", action="store_true", help="핵심 결과만 짧게 출력")
     p.add_argument("--no-diagnostics", action="store_true",
@@ -90,6 +101,46 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def json_safe(obj):
+    """Replace non-finite floats with ``null`` so the output is real JSON.
+
+    JSON has no NaN/Infinity literal. ``json.dumps(allow_nan=True)`` emits bare
+    ``NaN``, which Python re-reads but ``JSON.parse`` (and every strict parser)
+    rejects — so a missing interval silently made the whole file unloadable.
+    ``null`` is the honest encoding of "not computed".
+    """
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
+    if isinstance(obj, dict):
+        return {k: json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [json_safe(v) for v in obj]
+    return obj
+
+
+def make_console_safe() -> Optional[str]:
+    """Stop a narrow console encoding from destroying the whole report.
+
+    A Korean Windows console is cp949, which cannot encode '—' (U+2014) or the
+    box-drawing rules used in the tables. Left alone, ``print`` raises
+    UnicodeEncodeError and the user loses *every* result to a traceback. Losing
+    a dash is acceptable; losing the analysis is not.
+
+    Returns the name of the non-UTF-8 encoding when a fallback was installed.
+    """
+    encodings = set()
+    for stream in (sys.stdout, sys.stderr):
+        enc = (getattr(stream, "encoding", None) or "").lower().replace("-", "")
+        if enc in ("utf8", "utf8sig", ""):
+            continue
+        try:
+            stream.reconfigure(errors="replace")   # type: ignore[union-attr]
+        except (AttributeError, ValueError, OSError):  # pragma: no cover
+            continue
+        encodings.add(getattr(stream, "encoding", enc))
+    return sorted(encodings)[0] if encodings else None
+
+
 def _resolve_conf(raw: float) -> float:
     conf = raw / 100.0 if raw > 1.0 else raw
     if not (0.5 <= conf < 0.99999):
@@ -100,9 +151,10 @@ def _resolve_conf(raw: float) -> float:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    narrow_encoding = make_console_safe()
 
     try:
-        table = load_table(args.csv, args.delimiter)
+        table = load_table(args.csv, args.delimiter, args.decimal)
 
         if args.list_columns:
             print("CSV: %s" % args.csv)
@@ -119,7 +171,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         if not val]
         if missing_opts:
             raise DataError(
-                "%s 옵션이 필요합니다. 열 이름을 모르면 `medpath %s --list-columns` 로 확인하세요."
+                "%s 옵션이 필요합니다. 열 이름을 모르면 "
+                "`python3 -m medpath %s --list-columns` 로 확인하세요."
                 % (", ".join(missing_opts), args.csv))
 
         mediators = _split_list(args.mediators)
@@ -171,7 +224,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         payload = result.to_dict()
         payload["source"] = args.csv
         payload["medpath_version"] = __version__
-        text = json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=True)
+        # allow_nan=False makes any missed non-finite value a loud error rather
+        # than a silently unparseable file.
+        text = json.dumps(json_safe(payload), ensure_ascii=False, indent=2,
+                          allow_nan=False)
     else:
         text = render(result, args.csv, mode="md" if args.markdown else "text",
                       digits=args.digits, brief=args.brief)
@@ -201,6 +257,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return EXIT_OK
 
     print(text)
+    if narrow_encoding:
+        print("참고: 콘솔 인코딩이 %s라 일부 기호(—, → 등)가 '?'로 표시될 수 있습니다. "
+              "온전한 결과는 --out 파일.txt 로 저장하세요(항상 UTF-8)." % narrow_encoding,
+              file=sys.stderr)
     return EXIT_OK
 
 

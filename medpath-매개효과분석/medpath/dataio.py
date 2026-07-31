@@ -12,6 +12,7 @@ import csv
 import io
 import math
 import re
+import unicodedata
 from typing import Dict, List, Optional, Sequence, Tuple
 
 __all__ = [
@@ -41,34 +42,87 @@ _ENCODINGS = ["utf-8-sig", "cp949", "latin-1"]
 _PLAIN_NUM_RE = re.compile(r"^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$", re.ASCII)
 _THOUSANDS_RE = re.compile(r"^[+-]?\d{1,3}(,\d{3})+(\.\d+)?$", re.ASCII)
 
+# Comma-as-decimal grammar (German/French/Korean-Excel-in-EU-locale exports).
+# "1.234" is then one thousand two hundred thirty four, and "3,142" is pi.
+_COMMA_DEC_RE = re.compile(r"^[+-]?(\d+,?\d*|,\d+)$", re.ASCII)
+_COMMA_THOUSANDS_RE = re.compile(r"^[+-]?\d{1,3}(\.\d{3})+(,\d+)?$", re.ASCII)
 
-def parse_float(token: str) -> Optional[float]:
-    """Parse a cell to float; ``None`` for blank / NA / non-numeric / non-finite."""
-    t = token.strip().strip('"').strip("'").strip()
+# Magnitudes above this square to +inf in the residual sums, which used to
+# escape as a bare OverflowError traceback. Treated as unparseable instead.
+_MAX_MAGNITUDE = 1e150
+
+# Excel, Word and Hangul autocorrect happily replace the ASCII hyphen with a
+# typographic minus, and paste non-breaking spaces into numbers. Left
+# unnormalised these cells parse as *nothing*, get relabelled "missing", and
+# silently delete exactly the negative rows — which biases the sample instead
+# of raising an error. See HARDENING.md.
+_UNICODE_MINUS = "−–—―﹣－"
+_INVISIBLE_SPACE = "      ​﻿"
+
+
+def _normalize_numeric_text(t: str) -> str:
+    """Fold typographic look-alikes onto the ASCII forms the grammar accepts."""
+    # Invisible spaces go first: NFKC would fold them into ordinary spaces,
+    # making "1<NBSP>234" indistinguishable from the genuinely ambiguous
+    # "12 34", which must stay rejected.
+    for ch in _INVISIBLE_SPACE:
+        t = t.replace(ch, "")
+    # NFKC turns full-width digits/signs (１２３, ％, －) into ASCII.
+    t = unicodedata.normalize("NFKC", t)
+    for ch in _UNICODE_MINUS:
+        t = t.replace(ch, "-")
+    return t.strip()
+
+
+def _finite(v: float) -> Optional[float]:
+    if not math.isfinite(v) or abs(v) > _MAX_MAGNITUDE:
+        return None
+    return v
+
+
+def parse_float(token: str, decimal: str = ".") -> Optional[float]:
+    """Parse a cell to float; ``None`` for blank / NA / non-numeric / non-finite.
+
+    ``decimal`` selects the convention for the comma. With ``'.'`` (default)
+    a comma is a thousands separator, so ``"3,142"`` is 3142. With ``','`` the
+    comma is the decimal mark, so ``"3,142"`` is 3.142 — a factor of 1000
+    apart, which is why this is never guessed per-cell.
+    """
+    t = _normalize_numeric_text(token.strip().strip('"').strip("'"))
     if t == "" or t.upper() in _NA_LABELS:
         return None
     core = t[:-1].strip() if t.endswith("%") else t
+    if decimal == ",":
+        if _COMMA_THOUSANDS_RE.match(core):
+            return _finite(float(core.replace(".", "").replace(",", ".")))
+        if _COMMA_DEC_RE.match(core):
+            return _finite(float(core.replace(",", ".")))
+        # A dot-decimal token ("12.5") cannot be EU thousands (that needs
+        # exactly three digits), so it is unambiguous even in comma mode.
+        if _PLAIN_NUM_RE.match(core):
+            return _finite(float(core))
+        return None
     if _PLAIN_NUM_RE.match(core):
-        v = float(core)
-        return v if math.isfinite(v) else None
+        return _finite(float(core))
     if _THOUSANDS_RE.match(core):
-        v = float(core.replace(",", ""))
-        return v if math.isfinite(v) else None
+        return _finite(float(core.replace(",", "")))
     return None
 
 
 def is_missing(token: str) -> bool:
-    t = token.strip().strip('"').strip("'").strip()
+    t = _normalize_numeric_text(token.strip().strip('"').strip("'"))
     return t == "" or t.upper() in _NA_LABELS
 
 
 class Table:
     """A loaded CSV: header names plus string cells."""
 
-    def __init__(self, header: List[str], rows: List[List[str]], notes: List[str]):
+    def __init__(self, header: List[str], rows: List[List[str]], notes: List[str],
+                 decimal: str = "."):
         self.header = header
         self.rows = rows
         self.notes = notes
+        self.decimal = decimal
         self._index: Dict[str, int] = {}
         seen: Dict[str, int] = {}
         for i, name in enumerate(header):
@@ -148,10 +202,55 @@ def _sniff_delimiter(text: str) -> str:
     return best
 
 
-def load_table(path: str, delimiter: Optional[str] = None) -> Table:
-    """Read a CSV/TSV into a :class:`Table`, tolerating common export quirks."""
+def _sniff_decimal(rows: Sequence[Sequence[str]], delim: str) -> str:
+    """Decide whether a comma means 'decimal point' or 'thousands separator'.
+
+    Getting this wrong is a silent factor-of-1000 error, so the decision uses
+    positive evidence only:
+
+    * any token like ``1,5`` or ``12,34`` (comma not followed by exactly three
+      digits) can only be a decimal comma;
+    * a semicolon delimiter is the standard European-Excel workaround for a
+      locale where the comma is already the decimal mark.
+
+    Anything else keeps the dot convention.
+    """
+    comma_decimal_hits = 0
+    comma_group_hits = 0
+    for row in rows[:200]:
+        for cell in row:
+            c = _normalize_numeric_text(cell.strip().strip('"').strip("'"))
+            if "," not in c:
+                continue
+            if _COMMA_DEC_RE.match(c) and not _PLAIN_NUM_RE.match(c.replace(",", "")):
+                pass
+            if re.match(r"^[+-]?\d+,\d{1,2}$", c) or re.match(r"^[+-]?\d+,\d{4,}$", c):
+                comma_decimal_hits += 1
+            elif _THOUSANDS_RE.match(c):
+                comma_group_hits += 1
+    if comma_decimal_hits:
+        return ","
+    if delim == ";" and comma_group_hits:
+        return ","
+    return "."
+
+
+def load_table(path: str, delimiter: Optional[str] = None,
+               decimal: str = "auto") -> Table:
+    """Read a CSV/TSV into a :class:`Table`, tolerating common export quirks.
+
+    ``decimal`` is ``'auto'`` (sniffed), ``'point'`` or ``'comma'``.
+    """
+    if decimal not in ("auto", "point", "comma", ".", ","):
+        raise DataError("--decimal 은 auto/point/comma 중 하나여야 합니다: %r" % decimal)
     notes: List[str] = []
     text = _decode(path, notes)
+    if delimiter is not None:
+        delimiter = {"\\t": "\t", "tab": "\t", "TAB": "\t",
+                     "\\;": ";", "\\|": "|"}.get(delimiter, delimiter)
+        if len(delimiter) != 1:
+            raise DataError(
+                "구분자는 한 글자여야 합니다(탭은 --delimiter tab): %r" % delimiter)
     delim = delimiter or _sniff_delimiter(text)
     if delimiter is None and delim != ",":
         notes.append("구분자를 '%s'(으)로 자동 인식했습니다."
@@ -192,7 +291,18 @@ def load_table(path: str, delimiter: Optional[str] = None) -> Table:
         notes.append("열 개수가 헤더보다 많은 행이 %d개 있어 뒤쪽 값을 무시했습니다." % ragged_long)
     if not rows:
         raise DataError("헤더만 있고 데이터 행이 없습니다: %s" % path)
-    return Table(header, rows, notes)
+
+    if decimal in ("auto",):
+        dec = _sniff_decimal(rows, delim)
+        if dec == ",":
+            notes.append(
+                "숫자의 소수점을 쉼표(예: 3,142 = 3.142)로 해석했습니다 — 유럽/한국 엑셀 "
+                "형식으로 보입니다. 잘못 인식됐다면 --decimal point 로 강제하세요.")
+    else:
+        dec = {"point": ".", "comma": ","}.get(decimal, decimal)
+        if dec == ",":
+            notes.append("--decimal comma: 쉼표를 소수점으로 해석합니다.")
+    return Table(header, rows, notes, decimal=dec)
 
 
 # --------------------------------------------------------------------------
@@ -221,21 +331,49 @@ class Design:
         self.row_ids: List[int] = []   # original 1-based CSV data-row numbers
 
 
-def _numeric_or_none(values: Sequence[str]) -> Tuple[List[Optional[float]], int]:
+def _preview(token: str, width: int = 16) -> str:
+    """A short, quote-wrapped echo of a cell — deliberately truncated.
+
+    Cells can hold names, phone numbers or free-text notes, so diagnostics show
+    only enough to recognise a formatting problem, never a whole field.
+    """
+    t = " ".join(token.split())
+    return "'%s…'" % t[:width] if len(t) > width else "'%s'" % t
+
+
+def _numeric_or_none(values: Sequence[str], decimal: str = "."
+                     ) -> Tuple[List[Optional[float]], int]:
     """Return parsed floats (None = missing) and the count of unparseable cells."""
+    out, bad, _ = _numeric_scan(values, decimal)
+    return out, bad
+
+
+def _numeric_scan(values: Sequence[str], decimal: str = "."
+                  ) -> Tuple[List[Optional[float]], int, List[str]]:
+    """As :func:`_numeric_or_none`, plus a few sample unparseable tokens.
+
+    Blank/NA cells and cells that merely *look* non-numeric are very different
+    problems, so they are counted apart: the second kind means the column holds
+    data the parser threw away, and the user has to be told which cells.
+    """
     out: List[Optional[float]] = []
     bad = 0
+    samples: List[str] = []
     for v in values:
         if is_missing(v):
             out.append(None)
+            continue
+        f = parse_float(v, decimal)
+        if f is None:
+            bad += 1
+            if len(samples) < 3:
+                p = _preview(v)
+                if p not in samples:
+                    samples.append(p)
+            out.append(None)
         else:
-            f = parse_float(v)
-            if f is None:
-                bad += 1
-                out.append(None)
-            else:
-                out.append(f)
-    return out, bad
+            out.append(f)
+    return out, bad, samples
 
 
 # Level names that almost always mean "this is the control/reference group".
@@ -265,15 +403,26 @@ def _levels(values: Sequence[str]) -> List[str]:
     return sorted(seen, key=lambda k: (-seen[k], k))
 
 
-def _require_numeric(table: Table, name: str, role: str) -> List[Optional[float]]:
+def _unparsed_warning(name: str, bad: int, n: int, samples: Sequence[str]) -> str:
+    return ("'%s' 열의 %d/%d행이 숫자로 해석되지 않아 결측으로 처리했습니다(예: %s). "
+            "빈칸이 아니라 값이 들어 있는 칸이므로, 단위·기호·오타를 확인하세요 — "
+            "특정 종류의 값만 빠지면 표본이 한쪽으로 치우칩니다."
+            % (name, bad, n, ", ".join(samples) if samples else "?"))
+
+
+def _require_numeric(table: Table, name: str, role: str,
+                     warnings: Optional[List[str]] = None) -> List[Optional[float]]:
     raw = table.column(name)
-    vals, bad = _numeric_or_none(raw)
+    vals, bad, samples = _numeric_scan(raw, table.decimal)
     if bad and bad >= max(1, int(0.5 * len(raw))):
-        lv = _levels(raw)[:6]
         raise DataError(
-            "%s 변수 '%s'의 값 대부분이 숫자가 아닙니다(예: %s). "
+            "%s 변수 '%s'의 값 대부분(%d/%d행)이 숫자가 아닙니다(예: %s). "
             "매개분석의 %s는 연속형(숫자)이어야 합니다."
-            % (role, name, ", ".join(lv) if lv else "?", role))
+            % (role, name, bad, len(raw), ", ".join(samples) if samples else "?", role))
+    if bad and warnings is not None:
+        # Silently folding these into the generic "결측" count hid the fact
+        # that the dropped rows were selected by *value*, not at random.
+        warnings.append(_unparsed_warning(name, bad, len(raw), samples))
     return vals
 
 
@@ -322,12 +471,22 @@ def build_design(
             d.notes.append("공변량 '%s'가 중복 지정돼 한 번만 사용합니다." % c)
 
     # --- parse each role -------------------------------------------------
-    y_vals = _require_numeric(table, y_name, "종속(Y)")
-    m_vals = [(nm, _require_numeric(table, nm, "매개(M)")) for nm in mediator_names]
+    y_vals = _require_numeric(table, y_name, "종속(Y)", d.warnings)
+    m_vals = [(nm, _require_numeric(table, nm, "매개(M)", d.warnings))
+              for nm in mediator_names]
 
     x_raw = table.column(x_name)
-    x_parsed, x_bad = _numeric_or_none(x_raw)
+    x_parsed, x_bad = _numeric_or_none(x_raw, table.decimal)
     x_is_numeric = x_bad == 0 and any(v is not None for v in x_parsed)
+    # An explicit --reference/--x-levels means "treat X as groups". Numeric
+    # group codes (0/1, 1/2/3, dose levels) are the common case, and silently
+    # ignoring the flag there gave the user a continuous analysis over *all*
+    # rows while they believed they had restricted the comparison.
+    if x_is_numeric and (x_levels or reference is not None):
+        x_is_numeric = False
+        d.notes.append(
+            "X '%s'는 숫자열이지만 %s 옵션이 지정돼 범주형(집단 비교)으로 처리했습니다."
+            % (x_name, "--x-levels" if x_levels else "--reference"))
     x_vals: List[Optional[float]]
     if x_is_numeric:
         x_vals = x_parsed
@@ -391,7 +550,7 @@ def build_design(
     cov_cols: List[Tuple[str, List[Optional[float]]]] = []
     for cname in cov_clean:
         raw = table.column(cname)
-        parsed, bad = _numeric_or_none(raw)
+        parsed, bad, _samples = _numeric_scan(raw, table.decimal)
         if bad == 0 and any(v is not None for v in parsed):
             cov_cols.append((cname, parsed))
             continue

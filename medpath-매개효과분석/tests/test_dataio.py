@@ -21,10 +21,45 @@ def test_parse_float_accepts_benign_noise(token, expected):
 @pytest.mark.parametrize("token", [
     "", "NA", "N/A", "na", ".", "-", "#N/A", "결측", "없음", "null",
     "1,5",          # European decimal comma — ambiguous, must NOT become 15 or 1.5
-    "inf", "-inf", "nan", "1_000", "１２３", "abc", "12 34", "5.5.5", "--3",
+    "inf", "-inf", "nan", "1_000", "abc", "12 34", "5.5.5", "--3",
+    "1e308",        # squares to inf in the residual sums -> refuse, don't crash
 ])
 def test_parse_float_rejects_ambiguous_or_non_numeric(token):
     assert parse_float(token) is None
+
+
+# Typographic look-alikes are *not* ambiguous — they have exactly one reading.
+# Rejecting them was worse than accepting: an unparsed cell becomes "missing",
+# so a column of Excel-autocorrected negatives silently deleted every negative
+# row and biased the sample instead of raising anything.
+@pytest.mark.parametrize("token,expected", [
+    ("−2.11", -2.11),    # MINUS SIGN (Excel/Word autocorrect)
+    ("–3.5", -3.5),      # EN DASH
+    ("－4.5", -4.5),      # FULLWIDTH HYPHEN-MINUS
+    ("１２３", 123.0),        # full-width digits
+    ("１.５", 1.5),
+    ("1 234.5", 1234.5),             # non-breaking space inside a number
+    ("2 000.5", 2000.5),             # thin space
+])
+def test_parse_float_normalizes_typographic_lookalikes(token, expected):
+    assert parse_float(token) == pytest.approx(expected)
+
+
+def test_unicode_minus_does_not_silently_delete_negative_rows(tmp_path):
+    """Regression: only the negative rows failed to parse and vanished.
+
+    The surviving sample was systematically biased upward, which flipped the
+    reported total effect from significant to null on otherwise identical data.
+    """
+    rows = []
+    for i in range(20):
+        y = i - 10
+        token = ("−%g" % abs(y)) if y < 0 else "%g" % y   # unicode minus
+        rows.append([i % 2, i * 1.5, token])
+    t = load_table(write_csv(tmp_path / "u.csv", ["x", "m", "y"], rows))
+    d = build_design(t, "x", ["m"], "y")
+    assert d.n_used == 20                       # nothing dropped
+    assert min(d.y) == -10.0                    # negatives survived intact
 
 
 # --------------------------------------------------------------------------
@@ -267,3 +302,104 @@ def test_duplicate_covariates_are_deduplicated(tmp_path):
     d = build_design(t, "x", ["m"], "y", ["age", "age"])
     assert len(d.covariates) == 1
     assert any("중복" in n for n in d.notes)
+
+
+# --------------------------------------------------------------------------
+# Numeric X with explicit grouping flags
+# (regression: --reference / --x-levels were silently ignored on numeric X,
+#  so a user who asked to compare two dose levels got the full continuous
+#  analysis over every row without any notice.)
+# --------------------------------------------------------------------------
+def test_x_levels_is_honoured_on_a_numeric_x(tmp_path):
+    rows = [[dose, i, i * 2] for dose in (0, 1, 2) for i in range(5)]
+    t = _table(tmp_path, ["dose", "m", "y"], rows)
+    d = build_design(t, "dose", ["m"], "y", x_levels=["0", "2"])
+    assert d.x_kind == "dummy"
+    assert d.n_used == 10                    # the dose==1 rows are excluded
+    assert d.x_reference == "0" and d.x_comparison == "2"
+    assert set(d.x) == {0.0, 1.0}
+
+
+def test_reference_is_honoured_on_a_numeric_two_level_x(tmp_path):
+    rows = [[g, i, i * 2] for g in (0, 1) for i in range(5)]
+    t = _table(tmp_path, ["grp", "m", "y"], rows)
+    d = build_design(t, "grp", ["m"], "y", reference="1")
+    assert d.x_kind == "dummy"
+    assert d.x_reference == "1" and d.x_comparison == "0"
+    assert d.n_used == 10
+
+
+def test_unknown_numeric_x_level_is_rejected_not_ignored(tmp_path):
+    rows = [[dose, i, i * 2] for dose in (0, 1, 2) for i in range(5)]
+    t = _table(tmp_path, ["dose", "m", "y"], rows)
+    with pytest.raises(DataError, match="없는 수준"):
+        build_design(t, "dose", ["m"], "y", x_levels=["7", "9"])
+
+
+def test_numeric_x_without_grouping_flags_stays_continuous(tmp_path):
+    rows = [[dose, i, i * 2] for dose in (0, 1, 2) for i in range(5)]
+    t = _table(tmp_path, ["dose", "m", "y"], rows)
+    d = build_design(t, "dose", ["m"], "y")
+    assert d.x_kind == "numeric"
+    assert d.n_used == 15
+    assert d.x_label.endswith("(연속형 그대로 사용)")
+
+
+def test_grouping_a_numeric_x_is_recorded_in_the_notes(tmp_path):
+    rows = [[dose, i, i * 2] for dose in (0, 1, 2) for i in range(5)]
+    t = _table(tmp_path, ["dose", "m", "y"], rows)
+    d = build_design(t, "dose", ["m"], "y", x_levels=["0", "2"])
+    assert any("범주형" in n and "--x-levels" in n for n in d.notes)
+
+
+# --------------------------------------------------------------------------
+# Unparseable cells must be announced, not folded into the generic "결측" count
+# --------------------------------------------------------------------------
+def test_unparseable_cells_raise_a_warning_naming_the_column(tmp_path):
+    rows = [[i % 2, i * 1.5, ("%d ms" % i) if i % 5 == 0 else i] for i in range(30)]
+    t = _table(tmp_path, ["x", "m", "y"], rows)
+    d = build_design(t, "x", ["m"], "y")
+    assert d.n_used == 24
+    joined = " ".join(d.warnings)
+    assert "'y'" in joined and "6/30" in joined
+    assert "ms" in joined                      # a sample token is shown
+
+
+def test_unparseable_warning_reaches_the_report_not_just_the_notes(tmp_path):
+    """--brief hides notes, so this must be a warning or it disappears."""
+    from medpath.mediation import analyze
+    from medpath.report import render
+    rows = [[i % 2, i * 1.5, ("%d ms" % i) if i % 5 == 0 else i] for i in range(40)]
+    t = _table(tmp_path, ["x", "m", "y"], rows)
+    res = analyze(build_design(t, "x", ["m"], "y"), n_boot=0)
+    assert any("숫자로 해석되지" in w for w in res.warnings)
+    assert "숫자로 해석되지" in render(res, "x.csv", brief=True)
+
+
+def test_unparseable_previews_are_truncated(tmp_path):
+    """Cells can hold names or notes — diagnostics must not echo them whole."""
+    secret = "환자김민수010223344556677889900"
+    rows = [[i % 2, i * 1.5, secret if i % 6 == 0 else i] for i in range(30)]
+    t = _table(tmp_path, ["x", "m", "y"], rows)
+    d = build_design(t, "x", ["m"], "y")
+    joined = " ".join(d.warnings)
+    assert secret not in joined
+    assert "…" in joined
+
+
+def test_fully_non_numeric_column_error_reports_counts_not_every_value(tmp_path):
+    names = ["김민수 010-2233-4455", "박준호 010-5566-7788",
+             "이지연 010-9911-0022", "최다미 010-3344-1212"]
+    rows = [[i % 2, i * 1.5, names[i % 4]] for i in range(20)]
+    t = _table(tmp_path, ["x", "m", "note"], rows)
+    with pytest.raises(DataError) as exc:
+        build_design(t, "x", ["m"], "note")
+    msg = str(exc.value)
+    assert "20/20" in msg
+    assert sum(1 for n in names if n in msg) == 0     # no full value echoed
+
+
+def test_clean_data_produces_no_unparsed_warning(tmp_path):
+    rows = [[i % 2, i * 1.5, i * 2.0] for i in range(20)]
+    d = build_design(_table(tmp_path, ["x", "m", "y"], rows), "x", ["m"], "y")
+    assert not any("숫자로 해석되지" in w for w in d.warnings)
