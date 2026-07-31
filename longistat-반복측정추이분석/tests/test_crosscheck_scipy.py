@@ -196,3 +196,104 @@ def test_balanced_mixed_anova_matches_the_classical_formulas():
             ss_gt += len(idx) * (cell - gm - col_means[j] + grand) ** 2
     assert res.effect("시점(시간)").ss == pytest.approx(ss_time, rel=1e-9)
     assert res.effect("그룹 × 시점").ss == pytest.approx(ss_gt, rel=1e-9)
+
+
+# --------------------------------------------------------------------------
+# MMRM: the EM fit must land on the same REML optimum a general-purpose
+# optimiser finds.  This is the strongest independent check available without
+# an R installation — the objective below is written from the textbook formula
+# (Verbeke & Molenberghs eq. 5.8) and shares no code with longistat.
+# --------------------------------------------------------------------------
+
+def test_mmrm_em_reaches_the_same_reml_optimum_as_a_numerical_optimiser():
+    np = pytest.importorskip("numpy")
+    optimize = pytest.importorskip("scipy.optimize")
+
+    from longistat.dataio import Panel                                # noqa: E402
+    from longistat.mmrm import _build, _fit_reml, mmrm_analysis       # noqa: E402
+
+    rng = random.Random(11)
+    n, n_times = 45, 4
+    groups = ["A" if i % 2 else "B" for i in range(n)]
+    rows = []
+    for i in range(n):
+        base = rng.gauss(20, 4)
+        arm = -3.0 if groups[i] == "A" else 0.0
+        row = [base] + [base + arm * (j + 1) / 3 + rng.gauss(-(j + 1), 2.5)
+                        for j in range(n_times - 1)]
+        for j in range(1, n_times):                    # monotone dropout
+            if rng.random() < 0.18:
+                for k in range(j, n_times):
+                    row[k] = None
+                break
+        rows.append(row)
+    panel = Panel(subjects=[f"s{i}" for i in range(n)],
+                  times=[f"V{j}" for j in range(n_times)],
+                  values=rows, groups=groups, group_name="군")
+
+    fitted = mmrm_analysis(panel, 0)
+    assert fitted is not None and fitted.converged
+    subs, visits, _lab, _cc, _bc, n_cols, _drop = _build(panel, 0, True)
+    t_model = len(visits)
+
+    xs, ys, obs = [], [], []
+    for s in subs:
+        x = np.zeros((len(s.obs), n_cols))
+        for r, entries in enumerate(s.rows):
+            for col, val in entries:
+                x[r, col] = val
+        xs.append(x)
+        ys.append(np.asarray(s.y))
+        obs.append(list(s.obs))
+
+    tril = np.tril_indices(t_model)
+
+    def minus2_reml(theta):
+        low = np.zeros((t_model, t_model))
+        low[tril] = theta
+        np.fill_diagonal(low, np.exp(np.diag(low)))    # keeps Σ positive definite
+        sigma = low @ low.T
+        cache, xtx, xty, logdet_v, n_obs = {}, 0.0, 0.0, 0.0, 0
+        for x, y, o in zip(xs, ys, obs):
+            key = tuple(o)
+            if key not in cache:
+                block = sigma[np.ix_(o, o)]
+                cache[key] = (np.linalg.inv(block),
+                              np.linalg.slogdet(block)[1])
+            vinv, ld = cache[key]
+            logdet_v += ld
+            n_obs += len(o)
+            xtx = xtx + x.T @ vinv @ x
+            xty = xty + x.T @ vinv @ y
+        beta = np.linalg.solve(xtx, xty)
+        quad = 0.0
+        for x, y, o in zip(xs, ys, obs):
+            resid = y - x @ beta
+            quad += resid @ cache[tuple(o)][0] @ resid
+        return (logdet_v + quad + np.linalg.slogdet(xtx)[1]
+                + (n_obs - n_cols) * math.log(2 * math.pi))
+
+    start = np.zeros(t_model * (t_model + 1) // 2)
+    start[np.cumsum(np.arange(1, t_model + 1)) - 1] = math.log(3.0)
+    best = min((optimize.minimize(
+        minus2_reml, start + np.linspace(-0.05, 0.05, start.size) * seed,
+        method="Nelder-Mead",
+        options=dict(maxiter=200000, maxfev=200000, xatol=1e-10, fatol=1e-10))
+        for seed in (0, 1, 2)), key=lambda r: r.fun)
+
+    assert best.fun == pytest.approx(-2.0 * fitted.loglik, abs=1e-6)
+    low = np.zeros((t_model, t_model))
+    low[tril] = best.x
+    np.fill_diagonal(low, np.exp(np.diag(low)))
+    sigma_ref = low @ low.T
+    assert np.abs(sigma_ref - np.asarray(fitted.cov)).max() < 1e-4
+
+    beta_em = _fit_reml(subs, n_cols, t_model, 400, 1e-9)[0]
+    xtx, xty, cache = 0.0, 0.0, {}
+    for x, y, o in zip(xs, ys, obs):
+        key = tuple(o)
+        if key not in cache:
+            cache[key] = np.linalg.inv(sigma_ref[np.ix_(o, o)])
+        xtx = xtx + x.T @ cache[key] @ x
+        xty = xty + x.T @ cache[key] @ y
+    assert np.abs(np.linalg.solve(xtx, xty) - np.asarray(beta_em)).max() < 1e-5

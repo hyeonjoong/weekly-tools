@@ -39,12 +39,16 @@ _EPILOG = """\
   · [4] 주 분석  = 시점/그룹/상호작용의 omnibus 검정 (구형성 보정 자동 적용)
   · [4b] 추세    = 선형·이차 추세 대비 + 개인별 기울기(점/주) — 방문 간격이
                    불규칙하면 --time-values 0,4,12,24 로 알려주세요
+  · [4c] MMRM    = 혼합모형 반복측정 (REML·비구조화 공분산). 일부 방문만 마친
+                   대상도 버리지 않고, MAR 가정에서 타당합니다 (자유도는
+                   Kenward–Roger 가 아닌 근사)
   · [5] 변화량   = 기저 대비 변화 + 군간 차이 + 기저값 보정(ANCOVA)
                    + 결측 대체 민감도(LOCF·BOCF)
   · [8] 반응자   = MCID 이상 좋아진 사람의 비율과 군간 차이(RD/RR/OR/NNT)
   · [9] RCI      = 개인 수준에서 '측정오차보다 큰 변화'인지 (Jacobson-Truax)
 
 주의: [4]와 [5]는 모든 시점이 관측된 대상만 쓰는 완전사례 분석입니다 (ITT 아님).
+      일부 방문만 마친 대상까지 쓴 답이 필요하면 [4c] MMRM 을 보세요.
 """
 
 
@@ -53,7 +57,8 @@ def build_parser() -> argparse.ArgumentParser:
         prog="longistat",
         description="반복측정(전-후·다시점) 자료를 한 번에 분석합니다 — "
                     "기술통계·정규성/구형성 점검·반복측정/혼합 ANOVA(+GG/HF 보정)·"
-                    "Friedman·사후비교·기저대비 변화량·반응자(MCID)·RCI·논문용 문장.",
+                    "MMRM(REML·비구조화 공분산)·Friedman·사후비교·기저대비 "
+                    "변화량·반응자(MCID)·RCI·논문용 문장.",
         epilog=_EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("csv", help="입력 CSV 파일 경로")
@@ -111,6 +116,11 @@ def build_parser() -> argparse.ArgumentParser:
                       metavar="auto|none|locf,bocf",
                       help="결측 대체 민감도 분석 (기본 auto: 결측이 있으면 "
                            "LOCF·BOCF 를 함께 계산해 결론이 흔들리는지 확인)")
+    stat.add_argument("--no-mmrm", action="store_true",
+                      help="[4c] MMRM(혼합모형 반복측정, REML·비구조화 공분산) "
+                           "구획을 생략. 기본은 수행 — 부분 관측 대상을 버리지 "
+                           "않으므로, 결측이 있는 연속형 결과라면 계획서에 "
+                           "사전 지정할 주분석 후보입니다")
     stat.add_argument("--all-pairs", action="store_true",
                       help="시점이 12개를 넘어도 모든 시점 조합을 비교 "
                            "(기본은 기준시점 대비 + 인접 시점만)")
@@ -372,7 +382,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             labels_en=_parse_labels(args.labels_en),
             time_values=_parse_time_values(args.time_values),
             time_unit=(args.time_unit or "").strip(),
-            trend=not args.no_trend, sensitivity=args.sensitivity)
+            trend=not args.no_trend, sensitivity=args.sensitivity,
+            mmrm=not args.no_mmrm)
         result = analyze(panel, opt)
         if args.format == "json":
             text = render_json(result)

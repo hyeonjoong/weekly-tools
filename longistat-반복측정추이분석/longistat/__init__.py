@@ -10,7 +10,8 @@
 
 포함 내용: 시점·그룹별 기술통계, 결측/탈락 프로파일, Shapiro–Wilk 정규성,
 Mauchly 구형성 + Greenhouse–Geisser/Huynh–Feldt 보정, 반복측정 및 혼합
-(split-plot) ANOVA, Friedman + Kendall's W, 시점 간·군간 사후비교,
+(split-plot) ANOVA, MMRM(REML·비구조화 공분산 — 탈락자를 버리지 않는 MAR
+기반 분석), Friedman + Kendall's W, 시점 간·군간 사후비교,
 기저 대비 변화량과 군간 변화량 차이, MCID 반응자 분석(RD/RR/OR/NNT),
 Jacobson–Truax 신뢰변화지수(RCI), 그리고 논문에 바로 넣을 수 있는 문장.
 
@@ -25,6 +26,7 @@ from .analyze import Analysis, Options, analyze
 from .anova import RMAnovaResult, rm_anova
 from .dataio import DataError, Panel, load_long, load_wide
 from .describe import describe, profile_missing
+from .mmrm import MMRMContrast, MMRMLsMean, MMRMResult, mmrm_analysis
 from .nonparam import friedman
 from .report import render_csv, render_json, render_text
 from .responder import rci_analysis, responder_analysis
@@ -39,6 +41,7 @@ __all__ = [
     "Panel", "DataError", "load_long", "load_wide",
     "RMAnovaResult", "rm_anova",
     "describe", "profile_missing", "friedman",
+    "MMRMResult", "MMRMLsMean", "MMRMContrast", "mmrm_analysis",
     "responder_analysis", "rci_analysis",
     "TrendResult", "SlopeRow", "trend_analysis", "orthogonal_polynomials",
     "SensitivityResult", "sensitivity_analysis", "impute_panel",

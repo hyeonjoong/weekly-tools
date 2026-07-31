@@ -235,6 +235,36 @@ def _rows_ancova(a: Analysis) -> List[List[str]]:
             for c in a.ancova.contrasts]
 
 
+def _rows_mmrm_lsmeans(a: Analysis) -> List[List[str]]:
+    if a.mmrm is None:
+        return []
+    return [[x.group or ALL_LABEL, x.time, str(x.n), fmt(x.estimate),
+             fmt(x.se), fmt_df(x.df), fmt_ci(x.ci_low, x.ci_high)]
+            for x in a.mmrm.lsmeans]
+
+
+def _rows_mmrm_contrasts(a: Analysis) -> List[List[str]]:
+    if a.mmrm is None:
+        return []
+    alpha = a.options.alpha
+    return [[c.time, c.label, f"{c.n_a}/{c.n_b}" if a.mmrm.grouped else str(c.n_a),
+             fmt(c.estimate), fmt(c.se), fmt_ci(c.ci_low, c.ci_high),
+             fmt_df(c.df), fmt_p_cell(c.p_raw),
+             fmt_p_cell(c.p_adj) + _stars(c.p_adj, alpha)
+             + (" (주요)" if c.primary else "")]
+            for c in a.mmrm.contrasts]
+
+
+def _rows_mmrm_corr(a: Analysis) -> List[List[str]]:
+    if a.mmrm is None:
+        return []
+    m = a.mmrm
+    return [[t, fmt(m.sds[i])] + [fmt_es(m.corr[i][j], 2) if j < i else
+                                  ("1.00" if j == i else "")
+                                  for j in range(len(m.times))]
+            for i, t in enumerate(m.times)]
+
+
 def _rows_pairwise(a: Analysis) -> List[List[str]]:
     pw = a.pairwise_param if a.recommended == "parametric" else a.pairwise_rank
     return [[r.group, f"{r.time_a} → {r.time_b}", str(r.n), fmt(r.mean_diff),
@@ -362,6 +392,53 @@ def apa_sentences(a: Analysis) -> List[str]:
                 f"[EN] {scope_en}a Friedman test gave χ²({fr.df}) = "
                 f"{fmt(fr.chi2)}, p {fmt_p(fr.p)}, Kendall's W = "
                 f"{fmt_es(fr.kendall_w)} (n = {fr.n}).")
+
+    if a.mmrm is not None and a.mmrm.contrasts:
+        m = a.mmrm
+        what = ("baseline-adjusted between-arm difference in mean change"
+                if m.grouped else "mean change from baseline")
+        out.append(
+            f"[KO] 결측을 MAR로 가정한 혼합모형 반복측정(MMRM, 비구조화 공분산, "
+            f"REML)을 {m.n_subjects}명(관측 {m.n_obs}개)에 적합하였다"
+            + ("; 고정효과는 시점, 군, 시점×군 및 기저값(시점과의 교호작용 포함)"
+               "이었다." if m.adjusted else "; 고정효과는 시점이었다.")
+            + " 자유도는 시점별 잔차 자유도 근사이며 Kenward–Roger 가 아니다.")
+        out.append(
+            f"[EN] A mixed model for repeated measures (MMRM) with an "
+            f"unstructured covariance was fitted by REML to {m.n_subjects} "
+            f"participants ({m.n_obs} observations) under a missing-at-random "
+            "assumption"
+            + ("; fixed effects were visit, arm, visit × arm, and baseline "
+               "with its visit interaction." if m.adjusted
+               else "; visit was the only fixed effect.")
+            + " Degrees of freedom used a per-visit residual approximation, "
+              "not Kenward–Roger.")
+        if not m.converged:
+            out.append(
+                f"[KO] 다만 이 모형은 EM 반복 {m.iterations}회 안에 수렴하지 "
+                "않았으므로 아래 MMRM 수치는 그대로 인용하지 마십시오.")
+            out.append(
+                f"[EN] Note, however, that this model did not converge within "
+                f"{m.iterations} EM iterations; the MMRM figures below should "
+                "not be quoted as they stand.")
+        for c in m.contrasts:
+            if not math.isfinite(c.p_adj):
+                continue
+            verdict = "유의하였다" if c.p_adj < alpha else "유의하지 않았다"
+            # Name the arms in the English line too — "the difference was −2.22"
+            # leaves the reader unable to tell which arm did better.
+            which = (f" ({_en(a, c.group_a)} − {_en(a, c.group_b)})"
+                     if m.grouped else "")
+            out.append(
+                f"[KO] {c.time}에서 {c.label}의 추정치는 {fmt(c.estimate)} "
+                f"(95% CI {fmt(c.ci_low)}–{fmt(c.ci_high)}), "
+                f"t({fmt_df(c.df)}) = {fmt(c.t)}, 보정 p {fmt_p(c.p_adj)} 로 "
+                f"{verdict}.")
+            out.append(
+                f"[EN] At {_en(a, c.time)}, the {what}{which} was "
+                f"{fmt(c.estimate)} "
+                f"(95% CI {fmt(c.ci_low)} to {fmt(c.ci_high)}), "
+                f"t({fmt_df(c.df)}) = {fmt(c.t)}, adjusted p {fmt_p(c.p_adj)}.")
 
     if a.trend is not None and a.recommended == "parametric":
         for eff in a.trend.effects:
@@ -588,6 +665,9 @@ def render_text(a: Analysis, full: bool = False, brief: bool = False) -> str:
     # -- [4] omnibus ------------------------------------------------------
     add("[4] 주 분석 (omnibus)")
     add("  " + _COMPLETER_BANNER)
+    if a.mmrm is not None and a.mmrm.n_subjects > a.missing.n_complete:
+        add(f"     일부 방문만 마친 대상까지 쓴 답은 아래 [4c] MMRM 에 있습니다 "
+            f"({a.mmrm.n_subjects}명 사용).")
     if a.anova is not None:
         if a.recommended == "parametric" or full:
             add(f"  반복측정/혼합 ANOVA (완전자료 N = {a.anova.n_subjects}"
@@ -662,6 +742,56 @@ def render_text(a: Analysis, full: bool = False, brief: bool = False) -> str:
                  "right"]))
         for note in tr.notes:
             add(f"  ※ {note}")
+        add("")
+
+    # -- [4c] MMRM --------------------------------------------------------
+    if a.mmrm is not None:
+        m = a.mmrm
+        add("[4c] MMRM — 혼합모형 반복측정 (REML · 비구조화 공분산 · MAR 가정)")
+        add(f"  응답변수: {m.response}   모형 대상 {m.n_subjects}명 / "
+            f"관측 {m.n_obs}개 (완전자료 {a.missing.n_complete}명)")
+        if m.n_subjects > a.missing.n_complete:
+            add("  → 일부 방문만 마친 대상도 버리지 않고 씁니다"
+                + (" (기저값과 기저 이후 관측이 각각 하나 이상 있어야 모형에 "
+                   "들어갑니다)." if m.adjusted else " (관측이 하나 이상 있으면 "
+                   "모형에 들어갑니다).")
+                + " 구형성 가정이 없어 GG/HF 보정도 필요 없습니다.")
+        else:
+            add("  → 구형성 가정이 없어 GG/HF 보정이 필요 없습니다 "
+                "(이 자료에서는 완전자료 대상과 같은 인원을 씁니다).")
+        if a.recommended != "parametric":
+            add("  ※ MMRM 은 다변량 정규성을 가정하는 모수 모형입니다 — 이 자료는 "
+                "정규성이 기각되었으니 [4]·[5]의 순위검정 결과와 반드시 함께 "
+                "보세요.")
+        L.extend("  " + ln for ln in table(
+            ["그룹", "시점", "n", "LS 평균", "SE", "df", "95% CI"],
+            _rows_mmrm_lsmeans(a),
+            ["left", "left", "right", "right", "right", "right", "right"]))
+        rows = _rows_mmrm_contrasts(a)
+        if rows:
+            add("")
+            add("  " + ("시점별 군간 차이 (기저 보정 LS 평균차)" if m.grouped
+                        else "기준시점 대비 변화 (관측된 자료 전부 사용)"))
+            L.extend("    " + ln for ln in table(
+                ["시점", "대비", "n", "추정치", "SE", "95% CI", "df", "raw p",
+                 "보정 p"], rows,
+                ["left", "left", "right", "right", "right", "right", "right",
+                 "right", "right"]))
+        if full:
+            add("")
+            add("  추정된 비구조화 공분산 (대각=SD, 아래삼각=상관)")
+            L.extend("    " + ln for ln in table(
+                ["시점", "SD"] + list(m.times), _rows_mmrm_corr(a),
+                ["left"] + ["right"] * (len(m.times) + 1)))
+            add(f"    −2 REML log-likelihood = {fmt(-2 * m.loglik)} · "
+                f"공분산 모수 {m.n_cov_params}개 · AIC = {fmt(m.aic)} · "
+                f"EM {m.iterations}회")
+        add(f"  ※ df 산출: {m.df_method}.")
+        for note in m.notes:
+            add(f"  ※ {note}")
+        add("")
+    elif a.mmrm_error and a.options.mmrm:
+        add(f"[4c] MMRM 미수행: {a.mmrm_error}")
         add("")
 
     # -- [5] change from baseline ----------------------------------------
@@ -861,6 +991,25 @@ def render_markdown(a: Analysis, full: bool = False, brief: bool = False) -> str
     block("군간 변화량 차이",
           ["시점", "대비", "n", "변화A", "변화B", "차이", "95% CI", "보정 p",
            "효과크기 [95% CI]"], _rows_change_between(a))
+    if a.mmrm is not None:
+        block(f"MMRM LS 평균 ({a.mmrm.response}, REML·비구조화, "
+              f"{a.mmrm.n_subjects}명)",
+              ["그룹", "시점", "n", "LS 평균", "SE", "df", "95% CI"],
+              _rows_mmrm_lsmeans(a))
+        block("MMRM " + ("시점별 군간 차이" if a.mmrm.grouped
+                         else "기준시점 대비 변화"),
+              ["시점", "대비", "n", "추정치", "SE", "95% CI", "df", "raw p",
+               "보정 p"], _rows_mmrm_contrasts(a))
+        add(f"> MMRM df 산출: {a.mmrm.df_method}. MAR 가정.")
+        if a.recommended != "parametric":
+            add("> MMRM 은 다변량 정규성을 가정합니다 — 이 자료는 정규성이 "
+                "기각되었으므로 순위검정 결과와 함께 보고하세요.")
+        # The notes carry the non-convergence flag and the excluded-subject
+        # counts.  Markdown is the format the CLI advertises for pasting into a
+        # manuscript, so dropping them here was the worst place to drop them.
+        for note in a.mmrm.notes:
+            add(f"> {note}")
+        add("")
     block("기저값 보정 (ANCOVA)",
           ["시점", "대비", "n", "조정평균차", "95% CI", "보정 p", "비보정 차이",
            "기저 기울기"], _rows_ancova(a))
@@ -940,6 +1089,8 @@ def render_json(a: Analysis) -> str:
         "change_parametric": _clean(a.change_param),
         "change_rank": _clean(a.change_rank),
         "ancova": _clean(a.ancova),
+        "mmrm": _clean(a.mmrm),
+        "mmrm_error": a.mmrm_error,
         "trend": _clean(a.trend),
         "sensitivity": _clean(a.sensitivity),
         "responder": _clean(a.responder),
@@ -947,6 +1098,10 @@ def render_json(a: Analysis) -> str:
         "apa": apa_sentences(a),
         "warnings": a.warnings,
     }
+    if isinstance(payload["mmrm"], dict):
+        # asdict() skips properties, and the REML AIC is the one number a reader
+        # comparing covariance structures in R would want to line up against.
+        payload["mmrm"]["aic"] = _clean(a.mmrm.aic)
     text = json.dumps(payload, ensure_ascii=False, indent=2)
     for ch, esc in _JSON_INLINE_SAFE:
         text = text.replace(ch, esc)
@@ -1032,6 +1187,28 @@ def render_csv(a: Analysis) -> str:
                 "adjusted mean difference", c.n_a + c.n_b, c.adjusted_diff, "",
                 c.ci_low, c.ci_high, c.t, c.p_raw, c.p_adj, c.unadjusted_diff,
                 "", "")
+    if a.mmrm is not None:
+        # The df column is meaningless without knowing how it was derived, and a
+        # spreadsheet has nowhere else to carry that, so it travels as a row.
+        row("mmrm_model", "mmrm",
+            "converged" if a.mmrm.converged else "NOT CONVERGED",
+            "", a.mmrm.df_method, a.mmrm.n_subjects,
+            a.mmrm.loglik, "", "", "", a.mmrm.iterations, "", "", a.mmrm.n_obs,
+            "", "")
+        for note in a.mmrm.notes:
+            row("mmrm_note", "mmrm", "", "", note, "", "", "", "", "", "", "",
+                "", "", "", "")
+        for x in a.mmrm.lsmeans:
+            # df goes in the same slot the contrast rows use, so the interval
+            # can be rebuilt from the export alone.
+            row("mmrm_lsmean", "mmrm", x.group, x.time, "LS mean", x.n,
+                x.estimate, x.se, x.ci_low, x.ci_high, "", "", "", x.df, "", "")
+        for c in a.mmrm.contrasts:
+            row("mmrm_contrast", "mmrm",
+                f"{c.group_a}−{c.group_b}" if a.mmrm.grouped else c.group_a,
+                c.time, c.label, c.n_a + (c.n_b if a.mmrm.grouped else 0),
+                c.estimate, c.se, c.ci_low, c.ci_high, c.t, c.p_raw, c.p_adj,
+                c.df, "", "")
     if a.trend is not None:
         for t in a.trend.effects:
             row("trend_contrast", "parametric", "", t.scope,
