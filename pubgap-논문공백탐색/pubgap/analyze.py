@@ -17,10 +17,11 @@
 
 from __future__ import annotations
 
+from bisect import bisect_left
 from collections import Counter
 from dataclasses import dataclass, field
 from itertools import combinations
-from math import comb, erf, exp, lgamma, log, log1p, log2, sqrt
+from math import comb, erf, exp, inf, lgamma, log, log1p, log2, sqrt
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from .records import Article
@@ -192,6 +193,34 @@ def hypergeom_lower_tail(N: int, K: int, n: int, k: int) -> float:
     return min(1.0, total)
 
 
+def poisson_binomial_lower_tail(probs: Sequence[float], k: int) -> float:
+    """서로 다른 성공확률을 갖는 독립 베르누이 합의 하단꼬리 P(X <= k) — 정확값.
+
+    초기하검정은 "모든 논문이 그 주제를 달 확률이 같다"고 가정한다. 실제 색인은
+    그렇지 않다 — 어떤 논문은 주제어가 2개, 어떤 논문은 20개다. 논문마다 확률이
+    다른 경우의 정확분포가 포아송이항분포이고, 이 함수가 그 하단꼬리다.
+
+    구현: dp[j] = '지금까지 j번 성공할 확률' 을 **j<=k 까지만** 들고 가는 절단 DP.
+    O(len(probs) x (k+1)) 이라 k(=관측 동시등장 편수)가 작은 공백 탐색에서는 사실상
+    선형이다. 전체 분포를 만드는 O(n^2) 구현은 수천 편 입력에서 너무 느리다.
+    """
+    if k < 0:
+        return 0.0
+    if k >= len(probs):
+        return 1.0
+    dp = [0.0] * (k + 1)
+    dp[0] = 1.0
+    for p in probs:
+        if p <= 0.0:
+            continue
+        p = min(1.0, p)
+        # 뒤에서 앞으로 갱신하면 같은 리스트를 그대로 쓸 수 있다.
+        for j in range(k, 0, -1):
+            dp[j] = dp[j] * (1.0 - p) + dp[j - 1] * p
+        dp[0] *= (1.0 - p)
+    return min(1.0, max(0.0, sum(dp)))
+
+
 def _hyp_pmf(N: int, K: int, n: int, k: int) -> float:
     """초기하 확률질량 P(X=k) — log 공간(오버플로 안전)."""
     if k < 0 or k > K or k > n or (n - k) > (N - K):
@@ -246,6 +275,34 @@ def benjamini_hochberg(pvalues: Sequence[float]) -> List[float]:
         running_min = min(running_min, val)
         q[idx] = min(running_min, 1.0)
     return q
+
+
+class BHProbe:
+    """검정군에서 **한 후보의 p 만** 바꿔가며 그 후보의 q 를 다시 구하는 도구.
+
+    취약도(fragility) 계산에 쓴다: "이 공백을 무너뜨리려면 함께 다룬 논문이 몇 편
+    더 필요한가"를 알려면 관측을 1편씩 올려가며 q 를 다시 계산해야 하는데,
+    매번 `benjamini_hochberg` 를 통째로 돌리면 후보가 2만 개(top_k=200)일 때
+    수억 번의 연산이 된다. 나머지 p 는 고정이므로 **접미 최소값**을 한 번만
+    만들어 두면 갱신 1회가 O(log m) 이다.
+
+    BH 정의: q_i = min(1, min_{l >= rank(i)} p_(l)·m/l). 삽입 위치 r(0-기반) 에
+    p' 를 넣으면 그 자신의 순위는 r+1, 뒤로 밀린 others[t] 의 순위는 t+2 다.
+    동점은 어느 쪽에 넣어도 min 이 같으므로 결과가 달라지지 않는다.
+    """
+
+    def __init__(self, pvalues: Sequence[float], index: int) -> None:
+        self.m = len(pvalues)
+        self.others = sorted(p for j, p in enumerate(pvalues) if j != index)
+        n_o = len(self.others)
+        suff = [inf] * (n_o + 1)
+        for t in range(n_o - 1, -1, -1):
+            suff[t] = min(suff[t + 1], self.others[t] * self.m / (t + 2))
+        self.suffix_min = suff
+
+    def q(self, p_new: float) -> float:
+        r = bisect_left(self.others, p_new)
+        return min(1.0, min(p_new * self.m / (r + 1), self.suffix_min[r]))
 
 
 def _normal_cdf(z: float) -> float:
@@ -660,6 +717,86 @@ class GapPair:
     hierarchy_suspect: bool = False
     n_early: int = 0     # 초기 구간 논문 수(추이를 비율로 읽기 위한 분모)
     n_recent: int = 0    # 최근 구간 논문 수
+    # 어떤 귀무모형으로 기대·p 를 냈는가 — 'independent'(초기하) | 'degree'(색인 밀도 보정).
+    null_model: str = "independent"
+    # 요청한 모형이 이 쌍에서 성립하지 않아 되돌렸는가(밀도 모형 포화 → 독립가정).
+    null_fallback: bool = False
+    # 독립가정 기대값(= cA·cB/N). null_model='degree' 일 때 두 모형을 나란히 볼 수 있게
+    # 항상 채운다(독립 모형에서는 expected 와 같다).
+    expected_independent: float = 0.0
+    # 취약도(fragility): 이 공백의 q 를 alpha 위로 밀어 올리는 데 필요한 **추가 동시등장
+    # 편수**. 임상시험의 fragility index 와 같은 발상 — "결론이 논문 몇 편에 매달려
+    # 있는가". None = 애초에 q>alpha 라 물을 수 없음(또는 상한까지 안 뒤집힘).
+    fragility: Optional[int] = None
+    fragility_capped: bool = False   # 탐색 상한까지 뒤집히지 않았다(= 매우 견고)
+    # 실제로 몇 편까지 얹어 봤는가. 상한은 min(FRAGILITY_MAX_STEPS, 관측 상한 −
+    # 관측)이라 40 보다 작을 수 있다 — '≥40편' 이라고 뭉뚱그리면 검정하지 않은
+    # 범위까지 견고하다고 주장하게 되므로, 실제 시험한 편수를 그대로 들고 다닌다.
+    fragility_tested: int = 0
+
+
+GAP_NULLS: Tuple[str, ...] = ("independent", "degree")
+
+# 취약도를 몇 편까지 밀어 볼 것인가. 이보다 더 필요한 공백은 실무적으로 '아주 견고'
+# 하나로 묶어도 충분하고, 계산량 상한도 여기서 정해진다.
+FRAGILITY_MAX_STEPS = 40
+
+
+def degree_null_pair(
+    sizes: Sequence[int],
+    anchor_articles: Sequence[int],
+    count_anchor: int,
+    count_other: int,
+    total_headings: int,
+) -> Tuple[float, List[float]]:
+    """색인 밀도 보정 귀무모형 — (기대 동시등장 수, 논문별 확률).
+
+    **왜 필요한가.** 초기하 귀무모형은 "주제 B 가 어느 논문에 붙을 확률은 모든 논문이
+    같다"고 본다. 실제 색인은 그렇지 않다 — 주제어를 3개만 단 논문과 25개를 단 논문이
+    B 를 달 확률이 같을 리 없다. 그래서 **A 가 주로 얇게 색인된 논문에만 등장하는**
+    경우 초기하 기대값이 과대평가되고, 색인 밀도의 부산물이 '연구공백'으로 찍힌다.
+
+    **모형.** 코퍼스의 표목(논문 x 주제어) 수를 그대로 두고, B 를 표목 수에 비례해
+    다시 배분한다. A 를 단 논문 i 는 이미 한 칸을 A 에 썼으므로 남은 칸은 m_i − 1 개고,
+    A 가 쓴 칸을 뺀 전체 칸은 M − c_A 개다:
+
+        p_i = min(1, c_B · (m_i − 1) / (M − c_A))     (i ∈ A 를 단 논문)
+
+    코퍼스 전체로 합하면 Σ p_i = c_B 라 **주변합이 보존**된다(잘라내기 전 기준).
+
+    **포화(saturation).** 아주 흔한 주제(코퍼스의 절반 이상에 붙은 B)와 평균보다 훨씬
+    깊게 색인된 논문이 만나면 raw p_i 가 1 을 넘는다 — 모형이 "이 논문에 B 를 한 번보다
+    많이 넣겠다"고 말하는 셈이라, 그 쌍에서는 **모형 자체가 성립하지 않는다**. 1 로 자르면
+    점추정은 작아지지만(보수적) 동시에 **분산이 사라져** 하단꼬리가 정확히 0 이 되고,
+    p=0·q=0 짜리 가짜 1순위 공백이 만들어진다(실측: 독립가정에서는 공백으로 잡히지도
+    않던 쌍이 q=0.000, 부족 +18편으로 리포트 머리에 올랐다). 그래서 이 함수는 잘라내되
+    **포화 여부를 함께 돌려주고**, 호출부는 포화된 쌍을 밀도 모형으로 검정하지 않는다.
+
+    주제어가 하나뿐인
+    논문은 p_i = 0 — 구조적으로 어떤 쌍도 가질 수 없다는 사실이 그대로 반영된다.
+    관측 동시등장 수는 이 확률들의 포아송이항분포를 따르므로 정확검정이 가능하다.
+
+    **비대칭성.** 어느 쪽을 조건으로 잡느냐는 **작은 차이가 아니다** — 한쪽 주제가 얇게
+    색인된 논문에만 몰려 있으면 기대값이 8배 넘게 갈리는 코퍼스를 만들 수 있다(실측
+    2.87 vs 26.77). 자의적 선택이 결론을 좌우하지 않도록 호출부는 항상 **논문 수가 적은
+    쪽**(동수면 이름 오름차순)을 anchor 로 고정하고, 리포트에도 그 사실을 적는다.
+
+    반환: (기대값, 논문별 확률, 포화여부).
+    """
+    slots = total_headings - count_anchor
+    if slots <= 0 or count_other <= 0:
+        return 0.0, [], False
+    probs: List[float] = []
+    saturated = False
+    for i in anchor_articles:
+        free = sizes[i] - 1
+        if free <= 0:
+            continue
+        raw = count_other * free / slots
+        if raw > 1.0:
+            saturated = True
+        probs.append(min(1.0, raw))
+    return sum(probs), probs, saturated
 
 
 def _pair_metrics(n: int, ca: int, cb: int, observed: int) -> Tuple[float, float, float]:
@@ -933,6 +1070,8 @@ def gap_pairs(
     n_examples: int = 3,
     bridge_top_n: int = 3,
     sort: str = "deficit",
+    null: str = "independent",
+    fragility_alpha: float = 0.05,
 ) -> List[GapPair]:
     """빈출 상위 top_k 주제쌍 중 '저조 조합'을 lift 오름차순으로 반환.
 
@@ -945,7 +1084,14 @@ def gap_pairs(
     - min_expected: 기대값이 이 값 미만이면(애초에 만날 일이 드묾) 제외 —
       '충분히 만날 만한데도 안 만난' 조합만 공백으로 본다.
     - max_lift: 이 값 이하인 조합만 반환.
+    - null: 귀무모형. 'independent' = 초기하(모든 논문이 같은 확률).
+      'degree' = **색인 밀도 보정**(논문마다 주제어 수가 다르다는 사실을 반영,
+      `degree_null_pair` 참고) + 포아송이항 정확검정. 얇게 색인된 논문이 많은
+      코퍼스(RIS/CSV 내보내기, 저자 키워드 승격)에서 특히 결과가 달라진다.
+    - fragility_alpha: 취약도를 판정할 유의수준(기본 0.05, q 기준).
     """
+    if null not in GAP_NULLS:
+        raise ValueError(f"알 수 없는 귀무모형: {null!r} (가능: {', '.join(GAP_NULLS)})")
     # 분모(N)는 **주제어를 하나라도 가진 논문 수**여야 한다.
     # MeSH 가 아직 안 붙은 논문(실제 PubMed 조회에서 30~40%가 흔하다)은 구조적으로
     # 어떤 주제쌍도 가질 수 없으므로, 이를 분모에 넣으면 기대값이 낮아지고 lift 가
@@ -961,17 +1107,52 @@ def gap_pairs(
     top_terms = [t for t, _ in _ranked(freq)[:top_k]]  # 결정론적 상위 선택
     pair_obs = _cooccurrence(articles, top_terms)
 
+    # 색인 밀도 보정 귀무모형에 필요한 재료(논문별 주제어 수 · 주제별 논문 색인).
+    sizes: List[int] = [len(set(a.mesh)) for a in articles]
+    total_headings = sum(sizes)
+    idx_by_term: Dict[str, List[int]] = {}
+    if null == "degree":
+        top_set = set(top_terms)
+        for i, art in enumerate(articles):
+            for t in set(art.mesh) & top_set:
+                idx_by_term.setdefault(t, []).append(i)
+
     # 1) 기대>=min_expected 인 모든 후보에 대해 p 를 계산(= 실제로 수행한 검정 집합).
+    #    tails[i] 는 '관측이 k 였다면 p 가 얼마였을까'를 돌려주는 함수 — 취약도 계산용.
     candidates: List[GapPair] = []
+    tails: List = []
     for a_term, b_term in combinations(top_terms, 2):
         ca, cb = freq[a_term], freq[b_term]
-        expected = ca * cb / n
-        if expected < min_expected:
-            continue
+        expected_ind = ca * cb / n
         key = (a_term, b_term) if a_term < b_term else (b_term, a_term)
         observed = pair_obs.get(key, 0)
+        if null == "degree":
+            # 조건으로 잡는 쪽(anchor)은 항상 논문 수가 적은 쪽 — 결정론적.
+            if (ca, a_term) <= (cb, b_term):
+                anchor, other = a_term, b_term
+            else:
+                anchor, other = b_term, a_term
+            expected, probs, saturated = degree_null_pair(
+                sizes, idx_by_term.get(anchor, []), freq[anchor], freq[other], total_headings
+            )
+            if saturated:
+                # 밀도 모형이 이 쌍에서 성립하지 않는다(raw p_i > 1). 잘라낸 채로 검정하면
+                # 분산이 사라져 p=0 인 가짜 공백이 나오므로, 이 쌍만 독립가정으로 되돌리고
+                # 그 사실을 행에 남긴다(조용히 바꾸면 리포트가 거짓말이 된다).
+                expected = expected_ind
+                used_null = "independent"
+                tail = lambda k, _ca=ca, _cb=cb: hypergeom_lower_tail(n, _ca, _cb, k)
+            else:
+                used_null = "degree"
+                tail = lambda k, _p=probs: poisson_binomial_lower_tail(_p, k)
+        else:
+            expected = expected_ind
+            used_null = "independent"
+            tail = lambda k, _ca=ca, _cb=cb: hypergeom_lower_tail(n, _ca, _cb, k)
+        if expected < min_expected:
+            continue
         lift = observed / expected if expected > 0 else 0.0
-        p = hypergeom_lower_tail(n, ca, cb, observed)
+        p = tail(observed)
         jac, cos, npmi = _pair_metrics(n, ca, cb, observed)
         ci_lo, ci_hi = lift_ci(observed, expected)
         candidates.append(
@@ -979,8 +1160,11 @@ def gap_pairs(
                 a_term, b_term, observed, expected, lift, ca, cb, p,
                 deficit=expected - observed, jaccard=jac, cosine=cos, npmi=npmi,
                 lift_ci_low=ci_lo, lift_ci_high=ci_hi,
+                null_model=used_null, expected_independent=expected_ind,
+                null_fallback=(used_null != null),
             )
         )
+        tails.append(tail)
 
     # 2) 검정한 후보 전체에 BH-FDR 를 적용해 q-value 를 채운다(필터 전에!).
     qs = benjamini_hochberg([g.p_value for g in candidates])
@@ -988,7 +1172,29 @@ def gap_pairs(
         g.q_value = q
 
     # 3) lift 임계 통과분만 남겨 요청한 기준으로 정렬.
-    out = sort_gaps([g for g in candidates if g.lift <= max_lift], sort)
+    keep = [i for i, g in enumerate(candidates) if g.lift <= max_lift]
+    out = sort_gaps([candidates[i] for i in keep], sort)
+
+    # 3-1) 살아남은 공백의 **취약도**: 함께 다룬 논문이 몇 편 더 있었으면 q 가
+    #      alpha 를 넘겼을까. 유의하지 않은 줄에는 물을 수 없는 질문이라 건너뛴다.
+    base_ps = [g.p_value for g in candidates]
+    index_of = {id(g): i for i, g in enumerate(candidates)}
+    for g in out:
+        if g.q_value > fragility_alpha:
+            continue
+        i = index_of[id(g)]
+        probe = BHProbe(base_ps, i)
+        # 관측 상한(min(cA,cB)) 을 넘겨 물을 수는 없다 — 그 지점의 p 는 정확히 1.0.
+        limit = min(FRAGILITY_MAX_STEPS, max(0, min(g.count_a, g.count_b) - g.observed))
+        if limit <= 0:
+            continue  # 이미 관측 상한 — 더 얹을 수 없으니 물을 수 없는 질문이다
+        g.fragility_tested = limit
+        for d in range(1, limit + 1):
+            if probe.q(tails[i](g.observed + d)) > fragility_alpha:
+                g.fragility = d
+                break
+        else:
+            g.fragility_capped = True
 
     # 4) 살아남은 소수의 공백에만 대표 PMID·가교 주제·시간 추이를 채운다(비용은 작다).
     split = split_point(articles)

@@ -31,6 +31,9 @@ echo
 echo "대상집단(연령·성별) 공백 — '이 주제는 이 분야 평균보다 고령자 비중이 낮다':"
 echo "  python3 -m pubgap.cli --from-file examples/sleep_pubmed.xml --format csv --csv-section population"
 echo
+echo "색인이 얇은 코퍼스(RIS/CSV 내보내기)에서 '헛공백'이 걱정될 때 — 귀무모형 바꿔 재확인:"
+echo "  python3 -m pubgap.cli --from-file examples/sleep_export.csv --gap-null degree"
+echo
 echo "여러 출처를 합쳐 분석(중복은 PMID→DOI→제목+연도로 자동 제거):"
 echo "  python3 -m pubgap.cli --from-file examples/sleep_pubmed.xml --from-file examples/sleep_export.csv"
 echo "자세한 사용법은 사용법.md / README.md 참고."

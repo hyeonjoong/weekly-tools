@@ -162,6 +162,8 @@ def test_render_csv_structure():
         "term_a,term_b,observed,expected,deficit,lift,"
         "lift_ci_low,lift_ci_high,jaccard,cosine,npmi,"
         "count_a,count_b,p_value,q_value,"
+        "null_model,null_fallback,expected_independent,"
+        "fragility,fragility_capped,fragility_tested,"
         "observed_early,observed_recent,gap_trend,"
         "pmids_a,pmids_b,pmids_both,bridges,"
         "pubmed_url_mesh,pubmed_url_text,"
