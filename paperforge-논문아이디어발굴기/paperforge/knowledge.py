@@ -8,6 +8,11 @@ Templates are intentionally hand-curated, not generated, so that the
 hypotheses, recommended analyses and effect-size assumptions are defensible.
 ``required`` lists the canonical modality keys that MUST all be present for the
 idea to be offered; ``effect`` feeds the sample-size feasibility check.
+``analysis_unit`` ("observation"/"subject") states whether the sample-size target
+counts rows of analysis or people; it is what makes ``--repeats/--icc`` apply to
+trial-level coupling analyses but not to a psychometric or device-agreement
+study, where each subject contributes exactly one value. When omitted it is
+inferred from the effect family.
 
 The effect sizes are deliberately *conservative planning priors* drawn from the
 typical magnitudes reported in psychophysiology (small-to-medium), so the
@@ -84,6 +89,9 @@ IDEA_TEMPLATES = [
         "analysis": "Bland–Altman 일치도 + 급내상관(ICC) + 민감도/특이도(에포크 단위).",
         "design": "method comparison",
         "effect": {"type": "correlation", "r": 0.30},
+        # One agreement value per subject -> repeated measures do NOT reduce the
+        # number of subjects needed (they reduce measurement error instead).
+        "analysis_unit": "subject",
         "journal": "Sleep / Journal of Clinical Sleep Medicine (기기 검증)",
         "novelty": "기기 검증 연구는 인용 수요 꾸준 — 회사 보유 EEG가 기준선이 되는 강점.",
     },
@@ -161,6 +169,9 @@ IDEA_TEMPLATES = [
         "analysis": "Cronbach α + 탐색적/확인적 요인분석 + 문항-총점 상관.",
         "design": "psychometric",
         "effect": {"type": "correlation", "r": 0.30},
+        # Cronbach alpha / factor structure need N *respondents*; administering
+        # the scale repeatedly does not substitute for more people.
+        "analysis_unit": "subject",
         "journal": "BMC Psychology / PLOS ONE (측정도구)",
         "novelty": "도구 타당화는 인용 토대가 되며 생리데이터와 묶을 발판.",
     },

@@ -113,12 +113,19 @@ def test_json_output_roundtrips():
     results = evaluate(man, dropout=0.2)
     payload = json.loads(render_json(man, results, 0.05, 0.80, 0.2))
     assert payload["study"] == "t"
-    assert payload["parameters"] == {"alpha": 0.05, "power": 0.80, "dropout": 0.2}
+    assert payload["parameters"]["alpha"] == 0.05
+    assert payload["parameters"]["power"] == 0.80
+    assert payload["parameters"]["dropout"] == 0.2
+    # alpha_effective is always present so consumers never have to re-derive the
+    # multiplicity correction.
+    assert payload["parameters"]["alpha_effective"] == 0.05
     assert len(payload["ideas"]) == len(results)
     idea = payload["ideas"][0]
     assert idea["rank"] == 1
     for key in ("idea_id", "title", "required_n", "available_n",
-                "detectable_effect", "feasible", "journal", "recruit_n"):
+                "detectable_effect", "feasible", "journal", "recruit_n",
+                "attained_power", "analysis_n", "planned_effect",
+                "required_rows", "linked_declared"):
         assert key in idea
 
 
