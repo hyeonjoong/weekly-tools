@@ -63,9 +63,36 @@ def pubmed_angle_url(term: str, qualifier: str) -> str:
     return _PUBMED_SEARCH + urllib.parse.quote_plus(f'"{a}/{b}"[MeSH Terms]')
 
 
+def pubmed_population_url(term: str, group: str) -> str:
+    """주제 × 대상집단(연령·성별) 조합의 실제 문헌을 눈으로 확인하는 PubMed URL.
+
+    연령 그룹은 여러 MeSH 체크 태그의 합집합이라(소아 = Infant OR Child OR …)
+    OR 절로 묶는다. 체크 태그 쪽에는 **`:noexp`(하위어 확장 끔)** 를 쓴다:
+    PubMed 는 기본적으로 상위어를 확장하는데 `Aged`·`Middle Aged`·`Young Adult` 는
+    MeSH 트리에서 `Adult` 의 하위어라, 확장을 켜면 '성인(19–44)' 링크가 19세 이상
+    전부를 돌려준다(실측 +46%). 이 도구는 표목 문자열을 그대로 세므로 확장을 끈
+    쪽이 표와 같은 정의다.
+
+    ⚠️ 이 링크는 **당신의 검색어·기간과 무관한 PubMed 전체 검색**이다. 표의 `관측`
+    편수와 직접 비교하지 말고, "그 조합의 논문이 실제로 어떤 것들인지" 보는 데 쓴다.
+    """
+    a = _CONTROL_RE.sub(" ", str(term)).replace('"', "")
+    tags = sorted(analyze._POP_TERMS.get(group, frozenset()))
+    if not tags:
+        return _PUBMED_SEARCH + urllib.parse.quote_plus(f'"{a}"[MeSH Terms]')
+    ors = " OR ".join(f'"{t}"[MeSH Terms:noexp]' for t in tags)
+    return _PUBMED_SEARCH + urllib.parse.quote_plus(f'"{a}"[MeSH Terms] AND ({ors})')
+
+
 def _angle_dict(gap) -> Dict:
     d = dict(gap.__dict__)
     d["pubmed_url"] = pubmed_angle_url(gap.term, gap.qualifier)
+    return d
+
+
+def _population_dict(gap) -> Dict:
+    d = dict(gap.__dict__)
+    d["pubmed_url"] = pubmed_population_url(gap.term, gap.group)
     return d
 
 
@@ -127,6 +154,10 @@ def _bar(count: int, max_count: int, width: int = 28) -> str:
 # 이 편수 미만이면 공백 통계(초기하검정·FDR)가 매우 불안정하다. 리포트에 경고를 띄운다.
 SMALL_SAMPLE_N = 30
 
+# 대상집단 표에 실을 최대 행 수. (주제 K개 × 집단 9개)를 전부 실으면 Markdown 표가
+# 100줄을 넘겨 리포트의 다른 절을 덮는다 — 전체는 JSON/CSV 로 나간다.
+_POP_MAX_ROWS = 12
+
 
 def build_report(
     articles: Sequence[Article],
@@ -150,6 +181,10 @@ def build_report(
     angle_min_expected: float = 1.0,
     angle_max_lift: float = 0.5,
     angle_hide_implausible: bool = False,
+    population: bool = True,
+    population_top_k: int = 12,
+    population_min_articles: int = 5,
+    population_sort: str = "deficit",
     meta: Optional[Dict] = None,
     topic_source: str = "mesh",
     total_available: Optional[int] = None,
@@ -162,6 +197,7 @@ def build_report(
     exclude_terms: 추가로 제외할 주제어(대소문자 무시) — 보통 검색어 자체.
     bridge_top_n: 각 공백쌍에 대해 제안할 Swanson ABC 가교 주제 수(0 이면 생략).
     evidence: PublicationType 기반 '근거 공백'(연구 설계 축) 분석 포함 여부.
+    population: MeSH 연령·성별 체크 태그 기반 '대상집단 공백' 분석 포함 여부.
     meta: 재현용 실행 정보(도구 버전·파라미터·입력 해시 등). 주면 리포트에 실린다.
     topic_source: 'mesh' | 'keywords' | 'mesh+keywords' — 주제가 어디서 왔는지.
         리포트가 "MeSH 기반"이라고 거짓말하지 않도록 렌더러가 이 값을 읽는다.
@@ -171,6 +207,9 @@ def build_report(
     # 연구 설계 신호는 체크 태그를 떼기 **전** 의 MeSH 로 읽어야 한다
     # (NLM 은 코호트·후향 연구를 MeSH 로 색인하는데, 그 태그들이 곧 제거 대상이다).
     tiers = [analyze.article_tier(a) for a in articles] if evidence else None
+    # 대상집단(연령·성별)도 마찬가지로 **체크 태그를 떼기 전** 에 읽어야 한다 —
+    # strip_check_tags 가 지우는 바로 그 태그가 이 축에서는 유일한 신호다.
+    pops = [analyze.article_populations(a) for a in articles] if population else None
     raw_articles = list(articles)   # 필터 이전 코퍼스(안내 문구 분기용)
 
     if drop_check_tags:
@@ -266,6 +305,19 @@ def build_report(
         rep["angle_gaps"] = [_angle_dict(g) for g in ang]
         rep["angle_n_tested"] = n_tested
         rep["angle_n_implausible"] = n_implausible
+    if population:
+        # 대상집단 축 — '무엇을·어떻게' 가 아니라 **'누구를'**.
+        # articles 는 필터를 거쳤지만 pops 는 필터 이전에 계산했고, 필터들은
+        # 순서·길이를 보존하므로 zip 이 성립한다(길이 불일치는 함수가 거부).
+        # 지형은 **필터 이전** 코퍼스로 센다 — Humans/Animals 도 체크 태그라
+        # 필터 뒤에 세면 "동물실험이라 태그가 없다"는 안내가 사라진다.
+        rep["population"] = analyze.population_profile(raw_articles, pops)
+        pgaps, p_tested = analyze.population_gaps(
+            articles, pops, top_k=population_top_k,
+            min_articles=population_min_articles, sort=population_sort,
+        )
+        rep["population_gaps"] = [_population_dict(g) for g in pgaps]
+        rep["population_n_tested"] = p_tested
     if dedup:
         rep["dedup"] = dict(dedup)
     if meta:
@@ -406,6 +458,153 @@ def _render_evidence(rep: Dict) -> List[str]:
     return L
 
 
+def _render_population(rep: Dict) -> List[str]:
+    """대상집단 공백(연령·성별 축) 섹션 — '누구를 대상으로 연구했는가'.
+
+    주제쌍 공백이 "A와 B를 함께 본 논문이 없다", 각도 공백이 "이 주제를 치료 관점으로
+    본 논문이 없다"라면, 이 절은 **"이 주제를 고령·소아·여성에서 본 논문이 없다"** 다.
+    규제 관점(ICH E7 고령자, 소아 개발계획, 성별을 생물학적 변수로 다루는 요구)에서
+    가장 직접적으로 '해야 할 연구'가 나오는 축이다.
+    """
+    prof = rep.get("population")
+    if not prof:
+        return []
+    L: List[str] = ["## 👥 대상집단 공백 (연령·성별 축)", ""]
+    n_idx = prof.get("n_indexed", 0)
+    if not n_idx:
+        L.append(
+            "_이 입력에는 연령·성별 체크 태그(MeSH `Aged`/`Child`/`Female`…)가 없어 "
+            "대상집단 분석을 낼 수 없습니다. PubMed efetch XML 또는 NBIB 로 받으면 "
+            "자동으로 채워집니다(RIS·CSV 내보내기에는 대개 없습니다)._"
+        )
+        if prof.get("n_animal"):
+            L.append("")
+            L.append(
+                f"_참고: 이 코퍼스에는 동물실험으로 색인된 논문이 {prof['n_animal']}편 "
+                "있습니다 — 동물실험에는 연령·성별 체크 태그가 붙지 않습니다._"
+            )
+        L.append("")
+        return L
+
+    cov = prof.get("coverage", 0.0)
+    base = prof.get("axis_base") or {}
+    L.append(
+        f"- 대상집단이 색인된 논문 **{n_idx}편** "
+        f"(전체 {prof.get('n_articles', 0)}편의 {cov*100:.0f}%) 기준입니다 "
+        f"— 연령 태그 {base.get('age', 0)}편 · 성별 태그 {base.get('sex', 0)}편. "
+        "태그가 없는 논문은 **분모에서 제외**했습니다('색인 안 됨'과 '연구 없음'을 "
+        "섞지 않기 위해서입니다)."
+    )
+    if prof.get("n_animal"):
+        L.append(
+            f"- 이 코퍼스의 동물실험 색인 논문 {prof['n_animal']}편은 연령·성별 태그가 "
+            "붙지 않아 아래 표의 분모에 들어가지 않습니다."
+        )
+    if cov < 0.5:
+        L.append(
+            f"- ⚠️ 대상집단 색인 커버리지가 {cov*100:.0f}% 로 낮습니다 — 아래 '공백'은 "
+            "연구가 없다는 뜻이 아니라 **색인이 안 됐다**는 뜻일 가능성이 큽니다."
+        )
+    L.append("")
+    L.append("| 대상집단 | 논문 | 분모 | 비중 | 95% CI |")
+    L.append("|---|---:|---:|---:|:--:|")
+    for g in prof.get("groups", []):
+        if not g.get("base"):
+            continue
+        ci = _ci_text(g.get("share_ci_low"), g.get("share_ci_high"), pct=True)
+        L.append(
+            f"| {_md_cell(g['label'])} | {g['count']} | {g['base']} "
+            f"| {g['share']*100:.0f}% | {ci} |"
+        )
+    L.append("")
+    L.append(
+        "_연령 구간은 NLM 정의를 그대로 씁니다. **구간이 서로 겹치므로**(40–70세 코호트는 "
+        "성인·중년·고령이 동시에 붙습니다) 비중의 합은 100% 가 아닙니다._"
+    )
+    L.append("")
+
+    rows = rep.get("population_gaps") or []
+    if not rows:
+        L.append(
+            "_주제별 대상집단 검정을 수행할 만한 조합이 없습니다 — 주제별 편수가 "
+            "`--population-min-articles`(기본 5) 미만이거나, 주제가 하나뿐이라 비교군이 "
+            "없거나, 각 집단이 모든 논문에 붙어(또는 하나도 안 붙어) 검정이 성립하지 "
+            "않는 경우입니다._"
+        )
+        L.append("")
+        return L
+    under = [r for r in rows if r["deficit"] > 0]
+    over = [r for r in rows if r["deficit"] < 0]
+    n_tested = rep.get("population_n_tested", len(rows))
+    # '달성한 최소 q' 는 **표에 실린 과소대표 줄** 기준이어야 한다. 전체 검정에서
+    # 고르면 *과대대표* 줄의 q=0.002 가 표시돼, 아래 표에 유의한 공백이 있는 것처럼
+    # 읽힌다(정반대 방향의 유의성이다).
+    best_q = min((r.get("q_value", 1.0) for r in under), default=1.0)
+
+    if under:
+        L.append("### 상대적 과소대표 — '나머지 논문보다 이 집단 비중이 낮은 주제'")
+        L.append("")
+        L.append("| 주제 | 대상집단 | 논문 | 관측 | 기대 | 부족 | 비중 | 95% CI | 그 외 | q(FDR) | 확인 |")
+        L.append("|---|---|---:|---:|---:|---:|---:|:--:|---:|---:|:--:|")
+        for r in under[:_POP_MAX_ROWS]:
+            ci = _ci_text(r.get("share_ci_low"), r.get("share_ci_high"), pct=True)
+            L.append(
+                f"| {_md_cell(r['term'])} | {_md_cell(r['label'])} | {r['n_articles']} "
+                f"| {r['observed']} | {r['expected']:.1f} | {r['deficit']:.1f} "
+                f"| {r['share']*100:.0f}% | {ci} | {r['rest_share']*100:.0f}% "
+                f"| {r['q_value']:.3f} | [PubMed]({r['pubmed_url']}) |"
+            )
+        L.append("")
+        if len(under) > _POP_MAX_ROWS:
+            L.append(
+                f"_과소대표 후보 {len(under)}개 중 상위 {_POP_MAX_ROWS}개만 표시했습니다 "
+                "(전체는 `--format json` 또는 `--csv-section population`)._"
+            )
+            L.append("")
+        note = (
+            "_`기대` = 그 주제의 논문 수 × **그 주제를 달지 않은 나머지 논문**의 해당 집단 "
+            "비중이고, `부족` = 기대 − 관측입니다. q 는 (주제×집단) "
+            f"{n_tested}개 검정 전체에 BH-FDR 를 적용한 값이며 **q ≤ 0.05** 인 줄이 가장 "
+            f"뚜렷한 공백입니다 · 달성한 최소 q={best_q:.3f}"
+        )
+        if best_q > 0.05:
+            note += (
+                " — **q≤0.05 인 줄이 없습니다.** 아래는 탐색적 신호일 뿐이고, `95% CI` 가 "
+                "넓은 줄은 편수가 적어 아무것도 단정할 수 없다는 뜻입니다._"
+            )
+        else:
+            note += "._"
+        L.append(note)
+        L.append("")
+    else:
+        L.append("_상위 주제 중 나머지 논문보다 특정 집단이 과소대표된 조합이 없습니다._")
+        L.append("")
+    if over:
+        # 표시 정렬(--population-sort)이 무엇이든 '가장 과대대표된 셋'을 고른다.
+        # 리스트 끝 3개를 쓰면 정렬을 q/share 로 바꾼 순간 엉뚱한 행이 실린다.
+        names = ", ".join(
+            f"{_md_cell(r['term'])}×{_md_cell(r['label'])}"
+            for r in sorted(over, key=lambda z: z["deficit"])[:3]
+        )
+        L.append(
+            f"_참고: {names} 등은 오히려 그 집단이 **과대대표**된 조합이라 공백이 아닙니다 "
+            "(전체 표는 `--csv-section population`)._"
+        )
+        L.append("")
+    L.append(
+        "_한계: (1) 이 표는 **절대적 부재가 아니라 상대적 과소대표**입니다 — 비중 29%"
+        " 도 나머지가 73% 면 여기 실립니다. '한 편도 없는' 줄을 원하면 `관측 0` 인 행을 "
+        "보세요. (2) 이 축은 **색인자가 단 체크 태그**를 셉니다. 고령자를 포함한 "
+        "연구라도 연령이 보고되지 않으면 태그가 없고, 오래된 레코드일수록 성깁니다. "
+        "(3) `Male`/`Female` 은 '그 성별이 한 명이라도 포함됐는가' 표시라 인체 논문 "
+        "대부분에 **둘 다** 붙습니다 — 등록 성비나 성별 층화분석 여부는 알 수 없습니다. "
+        "(4) `확인` 링크는 검색어·기간과 무관한 PubMed 전체 검색이므로 표의 편수와 직접 "
+        "비교하지 말고, 실제 논문을 눈으로 보는 데 쓰세요._"
+    )
+    L.append("")
+    return L
+
+
 def _render_summary(rep: Dict) -> List[str]:
     """맨 앞 3~5줄 요약 — 이 리포트의 결론만 먼저.
 
@@ -415,7 +614,11 @@ def _render_summary(rep: Dict) -> List[str]:
     """
     gaps = rep.get("gaps") or []
     angles = rep.get("angle_gaps") or []
-    if not gaps and not angles:
+    pops = [
+        r for r in (rep.get("population_gaps") or [])
+        if r.get("deficit", 0.0) > 0 and r.get("observed", 0) < r.get("expected", 0)
+    ]
+    if not gaps and not angles and not pops:
         return []
     L = ["## 요약 (결론부터)", ""]
     verified = [g for g in gaps if g.get("verdict") in ("confirmed", "confirmed_empty")]
@@ -437,6 +640,14 @@ def _render_summary(rep: Dict) -> List[str]:
         L.append(
             f"- **연구 각도 1순위**: {_md_cell(a0['term'])} × {_md_cell(a0['qualifier'])} "
             f"— 함께 {a0['observed']}개 표목(기대 {a0['expected']:.1f}, q={a0['q_value']:.3f})"
+        )
+    if pops:
+        p0 = pops[0]
+        mark = "" if p0.get("q_value", 1.0) <= 0.05 else " ⚠️ 탐색적(q>0.05)"
+        L.append(
+            f"- **대상집단 1순위**(상대 과소대표): {_md_cell(p0['term'])} × "
+            f"{_md_cell(p0['label'])} — {p0['n_articles']}편 중 {p0['observed']}편"
+            f"(기대 {p0['expected']:.1f}, q={p0['q_value']:.3f}){mark}"
         )
     best_q = min((g.get("q_value", 1.0) for g in gaps), default=1.0)
     if gaps:
@@ -756,6 +967,9 @@ def render_markdown(rep: Dict) -> str:
     # 연구 각도 공백 (부주제어 축)
     L.extend(_render_angles(rep))
 
+    # 대상집단 공백 (연령·성별 축)
+    L.extend(_render_population(rep))
+
     # 연구공백
     L.append("## 🔍 덜 연구된 주제 조합 (저조 조합 = 연구공백 후보)")
     L.append("")
@@ -961,6 +1175,8 @@ _DEFAULT_PARAMS = {
     "angles": True, "angle_top_k": 12, "angle_top_qualifiers": 10,
     "angle_min_expected": 1.0, "angle_max_lift": 0.5,
     "angle_hide_implausible": False, "fuzzy_dedup": True,
+    "population": True, "population_top_k": 12, "population_min_articles": 5,
+    "population_sort": "deficit",
     "top_mesh": 15, "top_journals": 8, "major_topics_only": False,
     "include_keywords": False, "include_check_tags": False, "min_year": None,
     "max_year": None, "exclude_terms": None, "sample": "stratified",
@@ -1065,7 +1281,7 @@ def _csv_safe(value):
 # 집계(연도별 편수·저널·주제·부상/쇠퇴·근거 지형)를 모두 내보낼 수 있게 한다.
 CSV_SECTIONS: tuple = (
     "gaps", "yearly", "journals", "mesh", "emerging", "declining",
-    "evidence", "topic-evidence", "angles",
+    "evidence", "topic-evidence", "angles", "population", "population-profile",
 )
 
 
@@ -1204,6 +1420,39 @@ def _csv_angles(writer, rep: Dict) -> None:
         ])
 
 
+def _csv_population(writer, rep: Dict) -> None:
+    writer.writerow([
+        "term", "group", "axis", "label", "n_articles", "observed", "expected",
+        "deficit", "share", "share_ci_low", "share_ci_high", "rest_n",
+        "rest_observed", "rest_share", "lift", "lift_ci_low", "lift_ci_high",
+        "p_value", "q_value", "pubmed_url",
+    ])
+    for g in rep.get("population_gaps") or []:
+        lift = g.get("lift")
+        writer.writerow([
+            g["term"], g["group"], g["axis"], g["label"], g["n_articles"],
+            g["observed"], f"{g['expected']:.4f}", f"{g['deficit']:.4f}",
+            f"{g['share']:.4f}", f"{g['share_ci_low']:.4f}", f"{g['share_ci_high']:.4f}",
+            g["rest_n"], g["rest_observed"], f"{g['rest_share']:.4f}",
+            "" if lift is None or not math.isfinite(lift) else f"{lift:.4f}",
+            "" if g.get("lift_ci_low") is None else f"{g['lift_ci_low']:.4f}",
+            "" if g.get("lift_ci_high") is None else f"{g['lift_ci_high']:.4f}",
+            f"{g['p_value']:.6f}", f"{g['q_value']:.6f}", g.get("pubmed_url", ""),
+        ])
+
+
+def _csv_population_profile(writer, rep: Dict) -> None:
+    writer.writerow([
+        "group", "axis", "label", "count", "base", "share",
+        "share_ci_low", "share_ci_high",
+    ])
+    for g in (rep.get("population") or {}).get("groups", []):
+        writer.writerow([
+            g["key"], g["axis"], g["label"], g["count"], g["base"],
+            f"{g['share']:.4f}", f"{g['share_ci_low']:.4f}", f"{g['share_ci_high']:.4f}",
+        ])
+
+
 _CSV_RENDERERS = {
     "gaps": _csv_gaps,
     "yearly": _csv_yearly,
@@ -1214,4 +1463,6 @@ _CSV_RENDERERS = {
     "evidence": _csv_evidence,
     "topic-evidence": _csv_topic_evidence,
     "angles": _csv_angles,
+    "population": _csv_population,
+    "population-profile": _csv_population_profile,
 }

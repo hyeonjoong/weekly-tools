@@ -4,6 +4,8 @@ import json
 
 import pytest
 
+from pathlib import Path as _Path
+
 from pubgap import analyze
 from pubgap.cli import main
 from pubgap.records import (
@@ -15,6 +17,12 @@ from pubgap.records import (
     parse_ris,
 )
 from pubgap.report import build_report, render_csv, render_markdown
+
+_ROOT = _Path(__file__).resolve().parents[1]
+# cwd 와 무관하게 돌도록 절대경로로 잡는다 — 상대경로면 다른 폴더에서
+# 돌릴 때 rc 2(파일 없음)로 끝나면서도 통과하는 테스트가 생긴다.
+_EX_XML = str(_ROOT / "examples" / "sleep_pubmed.xml")
+_EX_CSV = str(_ROOT / "examples" / "sleep_export.csv")
 
 
 def art(pmid, year, mesh, quals, pub_types=("Journal Article",)):
@@ -340,14 +348,14 @@ def test_report_without_qualifiers_says_so_instead_of_claiming_gaps():
 
 
 def test_no_angles_flag_removes_the_section(capsys):
-    rc = main(["--from-file", "examples/sleep_pubmed.xml", "--no-angles", "--format", "json"])
+    rc = main(["--from-file", _EX_XML, "--no-angles", "--format", "json"])
     assert rc == 0
     data = json.loads(capsys.readouterr().out)
     assert "angle_gaps" not in data and "qualifier_coverage" not in data
 
 
 def _angle_json(capsys, *args):
-    assert main(["--from-file", "examples/sleep_pubmed.xml", "--format", "json", *args]) == 0
+    assert main(["--from-file", _EX_XML, "--format", "json", *args]) == 0
     return json.loads(capsys.readouterr().out)
 
 
@@ -384,7 +392,7 @@ def test_cli_hide_implausible_only_changes_display(capsys):
 
 
 def test_bundled_example_angle_gap_is_the_pharmacological_one(capsys):
-    rc = main(["--from-file", "examples/sleep_pubmed.xml", "--format", "json"])
+    rc = main(["--from-file", _EX_XML, "--format", "json"])
     assert rc == 0
     data = json.loads(capsys.readouterr().out)
     rows = data["angle_gaps"]
@@ -395,7 +403,7 @@ def test_bundled_example_angle_gap_is_the_pharmacological_one(capsys):
     # 구조적으로 불가능한 조합(기법 용어 × 생리 각도)은 표에 남되 뒤로 밀리고 표시된다.
     assert cells[("Electroencephalography", "physiology")]["plausible"] is False
     assert data["angle_n_implausible"] > 0
-    md_rc = main(["--from-file", "examples/sleep_pubmed.xml"])
+    md_rc = main(["--from-file", _EX_XML])
     assert md_rc == 0
     md = capsys.readouterr().out
     assert "⚠ 규칙상 불가?" in md

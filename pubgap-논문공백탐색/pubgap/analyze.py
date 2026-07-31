@@ -1719,3 +1719,249 @@ def topic_evidence(
 
     out.sort(key=lambda t: (t.share, -t.n_articles, t.term))
     return out
+
+
+# --------------------------------------------------------------------------- #
+# 대상집단 공백(population gap) — '누구를 대상으로 연구했는가' 축
+# --------------------------------------------------------------------------- #
+# NLM 색인자는 인체 대상 논문에 연령·성별 체크 태그를 단다(Child/Adult/Aged…).
+# 이 태그들은 *연구 주제* 가 아니라서 주제 분석에서는 잡음이지만(→ CHECK_TAGS 로 제외),
+# **그 자체가 하나의 축** 이다: "이 질환은 논문이 200편인데 고령(Aged) 논문은 12편뿐"
+# 은 임상·제약 연구자에게 곧바로 시험 설계로 이어지는 정보다(ICH E7 고령자 지침,
+# 소아 개발계획(PSP/PIP), NIH 의 성별을 생물학적 변수로 다루는 정책).
+# 연령 구간은 NLM 정의를 그대로 따른다(구간이 서로 **겹친다** — 40~70세 코호트는
+# Adult + Middle Aged + Aged 가 동시에 붙는다. 그래서 비중의 합은 1이 아니다).
+POPULATION_GROUPS: Tuple[Tuple[str, str, str, frozenset], ...] = (
+    ("pediatric", "age", "소아·청소년 (0–18)", frozenset({
+        "Infant, Newborn", "Infant", "Child, Preschool", "Child", "Adolescent",
+    })),
+    ("young_adult", "age", "청년 (19–24)", frozenset({"Young Adult"})),
+    ("adult", "age", "성인 (19–44)", frozenset({"Adult"})),
+    ("middle_aged", "age", "중년 (45–64)", frozenset({"Middle Aged"})),
+    ("aged", "age", "고령 (65+)", frozenset({"Aged"})),
+    ("oldest_old", "age", "초고령 (80+)", frozenset({"Aged, 80 and over"})),
+    ("female", "sex", "여성", frozenset({"Female"})),
+    ("male", "sex", "남성", frozenset({"Male"})),
+    ("pregnancy", "sex", "임신", frozenset({"Pregnancy"})),
+)
+POPULATION_AXES: Tuple[str, ...] = ("age", "sex")
+_POP_LABEL: Dict[str, str] = {k: lab for k, _ax, lab, _t in POPULATION_GROUPS}
+_POP_AXIS: Dict[str, str] = {k: ax for k, ax, _lab, _t in POPULATION_GROUPS}
+_POP_TERMS: Dict[str, frozenset] = {k: t for k, _ax, _lab, t in POPULATION_GROUPS}
+# 그룹 판정에 쓰이는 모든 MeSH 체크 태그(주제 후보에서 빼기 위해서도 쓴다).
+POPULATION_TAGS: frozenset = frozenset(
+    term for _k, _ax, _lab, terms in POPULATION_GROUPS for term in terms
+)
+POPULATION_SORTS: Tuple[str, ...] = ("deficit", "share", "q", "lift")
+
+
+def article_populations(article: "Article") -> frozenset:
+    """이 논문에 붙은 대상집단 그룹 키 집합.
+
+    **체크 태그를 떼기 전** 의 MeSH 로 읽어야 한다(strip_check_tags 가 지우는 바로 그
+    태그들이 여기서는 신호다). 그래서 build_report 는 tiers 와 같은 시점에 이 값을
+    미리 계산해 둔다.
+    """
+    mesh = set(article.mesh)
+    if not mesh:
+        return frozenset()
+    return frozenset(k for k, terms in _POP_TERMS.items() if mesh & terms)
+
+
+def population_profile(
+    articles: Sequence[Article], pops: Optional[Sequence[frozenset]] = None
+) -> Dict:
+    """코퍼스 전체의 대상집단 지형 + 색인 커버리지.
+
+    `articles` 는 **체크 태그를 떼기 전** 의 코퍼스여야 한다(Humans/Animals 집계도
+    체크 태그를 읽는다). `pops` 를 함께 주면 그 값을 그대로 쓴다.
+
+    커버리지를 함께 내는 이유는 근거 지형과 같다: **'색인이 안 됨'과 '연구가 없음'을
+    섞지 않기 위해서**다. RIS/CSV 내보내기나 색인 전 최신 논문에는 체크 태그가 아예
+    없고, 동물 실험에는 애초에 연령 태그가 붙지 않는다.
+    분모는 **축(axis)마다 따로** 잡는다 — 성별 태그만 있고 연령 태그가 없는 논문이
+    흔한데, 이를 연령 분모에 넣으면 모든 연령대가 실제보다 비어 보인다.
+    """
+    n = len(articles)
+    if pops is None:
+        pops = [article_populations(a) for a in articles]
+    if len(pops) != len(articles):
+        raise ValueError("pops 길이가 articles 와 다릅니다")
+    n_human = sum(1 for a in articles if "Humans" in a.mesh)
+    n_animal = sum(1 for a in articles if "Animals" in a.mesh)
+    axis_base = {
+        ax: sum(1 for p in pops if any(_POP_AXIS[k] == ax for k in p))
+        for ax in POPULATION_AXES
+    }
+    counts: Counter = Counter()
+    for p in pops:
+        for k in p:
+            counts[k] += 1
+    rows = []
+    for key, axis, label, _terms in POPULATION_GROUPS:
+        base = axis_base.get(axis, 0)
+        c = counts.get(key, 0)
+        lo, hi = clopper_pearson(c, base) if base else (0.0, 1.0)
+        rows.append({
+            "key": key,
+            "axis": axis,
+            "label": label,
+            "count": c,
+            "base": base,
+            "share": (c / base) if base else 0.0,
+            "share_ci_low": lo,
+            "share_ci_high": hi,
+        })
+    n_indexed = sum(1 for p in pops if p)
+    return {
+        "n_articles": n,
+        "n_indexed": n_indexed,
+        "coverage": (n_indexed / n) if n else 0.0,
+        "n_human": n_human,
+        "n_animal": n_animal,
+        "axis_base": axis_base,
+        "groups": rows,
+    }
+
+
+@dataclass
+class PopulationGap:
+    """한 주제 × 한 대상집단의 '대표성' — 나머지 논문 대비 유의하게 적은가."""
+
+    term: str
+    group: str               # POPULATION_GROUPS 의 키
+    axis: str                # 'age' | 'sex'
+    label: str               # 사람이 읽는 집단 이름
+    n_articles: int          # 그 축에 색인된 논문 중 이 주제를 단 편수
+    observed: int            # 그 중 이 집단에 색인된 편수
+    share: float             # observed / n_articles
+    rest_n: int              # 이 주제를 달지 않은(같은 축에 색인된) 논문 수
+    rest_observed: int
+    rest_share: float
+    expected: float          # n_articles × rest_share (비교군 기준 기대 편수)
+    deficit: float           # expected − observed (양수 = 과소대표)
+    lift: float              # observed / expected
+    p_value: float           # Fisher 정확검정 양측
+    q_value: float = 1.0     # 검정한 모든 (주제×집단)에 BH-FDR
+    share_ci_low: float = 0.0    # Clopper–Pearson
+    share_ci_high: float = 1.0
+    lift_ci_low: Optional[float] = None   # 포아송(Garwood) 정확구간 기반
+    lift_ci_high: Optional[float] = None
+
+
+def sort_population_gaps(
+    gaps: Sequence[PopulationGap], sort: str = "deficit"
+) -> List[PopulationGap]:
+    """대상집단 공백 정렬(결정론적 — 동률은 주제명·집단명 오름차순)."""
+    if sort not in POPULATION_SORTS:
+        raise ValueError(
+            f"알 수 없는 정렬 기준: {sort!r} (가능: {', '.join(POPULATION_SORTS)})"
+        )
+    keys = {
+        "deficit": lambda g: (-g.deficit, g.q_value),
+        "share": lambda g: (g.share, -g.deficit),
+        "q": lambda g: (g.q_value, -g.deficit),
+        "lift": lambda g: (g.lift, -g.deficit),
+    }
+    key = keys[sort]
+    return sorted(gaps, key=lambda g: (*key(g), g.term, g.group))
+
+
+def population_gaps(
+    articles: Sequence[Article],
+    pops: Optional[Sequence[frozenset]] = None,
+    top_k: int = 12,
+    min_articles: int = 5,
+    sort: str = "deficit",
+) -> Tuple[List[PopulationGap], int]:
+    """빈출 상위 top_k 주제 × 대상집단의 과소대표 검정. (목록, 검정 수) 반환.
+
+    - 분모는 **축마다** 그 축에 색인된 논문으로 잡는다(연령 태그가 없는 논문은
+      연령 검정에서 빠진다). 그래야 '색인 안 됨'이 '연구 안 됨'으로 둔갑하지 않는다.
+    - 각 (주제, 집단)에 2×2 [[주제&집단, 주제&비집단], [나머지&집단, 나머지&비집단]]
+      Fisher 정확검정(양측) → 코퍼스의 나머지와 대표성이 다른지.
+    - **검정한 전부**(과대대표 포함)에 BH-FDR 를 적용한다. 과소대표만 골라 보정하면
+      분모가 결과에 의존해 q 가 정직하지 않다.
+    - `share` 에 Clopper–Pearson, `lift` 에 포아송 정확구간을 붙인다: `0/7편 = 0%` 는
+      "고령 연구가 없다"가 아니라 "상한이 41% 다"라는 뜻이기 때문이다.
+    - 반환에는 과대대표 행도 포함된다(렌더러가 갈라 보여 준다).
+    """
+    if pops is None:
+        pops = [article_populations(a) for a in articles]
+    if len(pops) != len(articles):
+        raise ValueError("pops 길이가 articles 와 다릅니다")
+    if top_k <= 0 or not articles:
+        return [], 0
+    min_articles = max(1, int(min_articles))
+
+    # 주제 후보: 대상집단이 하나라도 색인된 논문에서 뽑는다(그 논문들만 검정에 쓰이므로).
+    # 체크 태그·방법론 표제어는 주제 축에서 제외한다 — --include-check-tags 를 켠
+    # 사용자라도 'Aged × 고령' 같은 자기순환 검정을 보고 싶진 않다.
+    indexed = [a for a, p in zip(articles, pops) if p and a.mesh]
+    if not indexed:
+        return [], 0
+    freq = Counter()
+    for a in indexed:
+        for t in set(a.mesh):
+            if not is_non_topical(t):
+                freq[t] += 1
+    top_terms = [t for t, _c in _ranked(freq)[:top_k]]
+    if not top_terms:
+        return [], 0
+    term_set = set(top_terms)
+
+    out: List[PopulationGap] = []
+    for axis in POPULATION_AXES:
+        axis_keys = [k for k, ax, _lab, _t in POPULATION_GROUPS if ax == axis]
+        base = [
+            (a, p) for a, p in zip(articles, pops)
+            if any(_POP_AXIS[k] == axis for k in p)
+        ]
+        n_base = len(base)
+        if not n_base:
+            continue
+        total_by_group = {k: sum(1 for _a, p in base if k in p) for k in axis_keys}
+        n_by_term: Counter = Counter()
+        obs: Dict[str, Counter] = {t: Counter() for t in top_terms}
+        for a, p in base:
+            for t in set(a.mesh) & term_set:
+                n_by_term[t] += 1
+                for k in p:
+                    if _POP_AXIS[k] == axis:
+                        obs[t][k] += 1
+        for term in top_terms:
+            n_t = n_by_term.get(term, 0)
+            if n_t < min_articles:
+                continue
+            rest_n = n_base - n_t
+            if rest_n <= 0:
+                continue
+            for k in axis_keys:
+                o = obs[term].get(k, 0)
+                rest_o = total_by_group[k] - o
+                if not total_by_group[k] or total_by_group[k] == n_base:
+                    # 그 집단이 축 전체에 0편이거나 **전부**면 2×2 표의 한 변이 상수라
+                    # Fisher p 가 항상 정확히 1.0 이다 — 정보가 없는데도 BH 의 분모(m)만
+                    # 키워 실제 공백의 q 를 부풀린다. PubMed 는 혼성 임상연구 대부분에
+                    # Male 과 Female 을 **둘 다** 달기 때문에 성별 축에서 늘 일어난다.
+                    continue
+                rest_share = rest_o / rest_n
+                expected = n_t * rest_share
+                lift = (o / expected) if expected > 0 else float("inf")
+                lo, hi = clopper_pearson(o, n_t)
+                l_lo, l_hi = lift_ci(o, expected)
+                out.append(PopulationGap(
+                    term=term, group=k, axis=axis, label=_POP_LABEL[k],
+                    n_articles=n_t, observed=o, share=o / n_t,
+                    rest_n=rest_n, rest_observed=rest_o, rest_share=rest_share,
+                    expected=expected, deficit=expected - o, lift=lift,
+                    p_value=fisher_exact_two_sided(
+                        o, n_t - o, rest_o, rest_n - rest_o
+                    ),
+                    share_ci_low=lo, share_ci_high=hi,
+                    lift_ci_low=l_lo, lift_ci_high=l_hi,
+                ))
+
+    for g, q in zip(out, benjamini_hochberg([g.p_value for g in out])):
+        g.q_value = q
+    return sort_population_gaps(out, sort), len(out)

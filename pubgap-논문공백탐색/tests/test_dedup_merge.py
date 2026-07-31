@@ -4,6 +4,8 @@ import json
 
 import pytest
 
+from pathlib import Path as _Path
+
 from pubgap.cli import main
 from pubgap.records import (
     Article,
@@ -12,6 +14,12 @@ from pubgap.records import (
     normalize_doi,
     title_key,
 )
+
+_ROOT = _Path(__file__).resolve().parents[1]
+# cwd 와 무관하게 돌도록 절대경로로 잡는다 — 상대경로면 다른 폴더에서
+# 돌릴 때 rc 2(파일 없음)로 끝나면서도 통과하는 테스트가 생긴다.
+_EX_XML = str(_ROOT / "examples" / "sleep_pubmed.xml")
+_EX_CSV = str(_ROOT / "examples" / "sleep_export.csv")
 
 LONG_TITLE = "Slow breathing and heart rate variability in healthy adults"
 
@@ -137,8 +145,8 @@ def test_dedup_is_linear_on_pathological_same_title_input():
 
 def test_cli_merges_multiple_files_and_reports_dedup(capsys, tmp_path):
     rc = main([
-        "--from-file", "examples/sleep_pubmed.xml",
-        "--from-file", "examples/sleep_export.csv",
+        "--from-file", _EX_XML,
+        "--from-file", _EX_CSV,
         "--format", "json",
     ])
     assert rc == 0
@@ -152,8 +160,8 @@ def test_cli_merges_multiple_files_and_reports_dedup(capsys, tmp_path):
 
 def test_cli_merge_markdown_mentions_the_merge(capsys):
     rc = main([
-        "--from-file", "examples/sleep_pubmed.xml",
-        "--from-file", "examples/sleep_export.csv",
+        "--from-file", _EX_XML,
+        "--from-file", _EX_CSV,
     ])
     assert rc == 0
     out = capsys.readouterr().out
@@ -212,7 +220,7 @@ def test_cli_no_fuzzy_dedup_keeps_title_duplicates(tmp_path, capsys):
 
 
 def test_cli_missing_file_names_the_offending_path(tmp_path, capsys):
-    rc = main(["--from-file", "examples/sleep_pubmed.xml",
+    rc = main(["--from-file", _EX_XML,
                "--from-file", str(tmp_path / "nope.xml")])
     assert rc == 2
     assert "nope.xml" in capsys.readouterr().err
