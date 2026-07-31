@@ -1,6 +1,6 @@
 # powerplan — 임상연구 표본수·검정력 설계기
 
-프로토콜/IRB/연구계획서에 그대로 붙일 수 있는 **표본수 계산**을 명령 한 줄로. 평균·ANOVA 계열은 비중심 t/F 분포로 정확히 계산하고, 탈락·군집설계·다중비교·기저값 보정(ANCOVA)·**중간분석(군차별설계)** 까지 반영하며, 사전연구 CSV에서 효과크기를 직접 뽑아 **한국어·영어 프로토콜 문장**까지 만들어 줍니다. 생존분석·반복측정(MMRM)·이분형 비열등성·McNemar·kappa 설계도 지원합니다. 외부 의존성 0.
+프로토콜/IRB/연구계획서에 그대로 붙일 수 있는 **표본수 계산**을 명령 한 줄로. 평균·ANOVA 계열은 비중심 t/F 분포로 정확히 계산하고, 탈락·군집설계·다중비교·기저값 보정(ANCOVA)·**중간분석(군차별설계)** 까지 반영하며, 사전연구 CSV에서 효과크기를 직접 뽑아 **한국어·영어 프로토콜 문장**까지 만들어 줍니다. 생존분석·반복측정(MMRM)·이분형 비열등성·McNemar·kappa·**반복사건 발생률(음이항)**·**순서형 등급(비례오즈)** 설계도 지원합니다. 외부 의존성 0.
 
 ## 목적 / Why this exists
 
@@ -36,6 +36,8 @@ python3 -m pip install -e .
 | `mcnemar` | 같은 사람의 두 이분형 판정 | Connor 1987 정규근사 (+ 정확검정 검정력 표시) |
 | `prop1` | 단일군 반응률 vs **성능목표치**(OPC) | **정확** 이항검정 (기각 임계값까지 제시) |
 | `crossover` | 2×2 교차설계 (같은 사람이 두 처치를 다 받음) | **정확** 비중심 t (개인 내 SD 기준) |
+| `count` | 한 사람이 **여러 번** 겪는 사건의 횟수 (악화·발작·재입원) | 음이항 발생률비 정규근사 (Zhu & Lakkis 2014, 과산포 k) |
+| `ordinal` | 순서 있는 등급 결과 (mRS·CTCAE·Likert) | 비례오즈 정규근사 (Whitehead 1993) |
 | `icc` | 신뢰도 연구 (ICC 신뢰구간 폭) | Bonett 2002 근사 (정밀도 기준) |
 | `loa` | Bland–Altman 일치한계 정밀도 | Bland & Altman 1999 근사 |
 | `kappa` | 범주형 판정 일치도 (센서 vs 판독) | Fleiss 1969 분산 (정밀도 기준) |
@@ -50,11 +52,11 @@ python3 -m pip install -e .
 
 - 검정력 기반 설계 공통: `--alpha` `--power`(→표본수) `--n`/`--n-total`(→검정력) `--dropout` `--comparisons/--alpha-method` `--sensitivity`
 - **`--sides` 없음**: `anova` `noninf` `equiv` (검정 방향이 설계로 고정됩니다)
-- **`--ratio` 있음**(두 군 배분비): `ttest2` `prop2` `noninf` `equiv` `repeated` `survival`
-- **`--cluster-size/--cluster-icc` 있음**: `ttest2` `prop2` `corr` `anova` `noninf` `equiv` `repeated` `survival` `pilot`. 없는 설계 — `paired` `onesample` `mcnemar` `prop1` `crossover` (군집을 *군에 배정*하는 구조가 아닙니다)
-- **`--interim/--spending/--timing/--futility` 있음**: `ttest2` `paired` `onesample` `prop2` `corr` `noninf` `repeated` `survival` `mcnemar` `pilot`. 없는 설계 — `anova`(전방향 F 검정) `equiv`(TOST) `prop1`(정확 이항검정) `crossover`(시기·이월효과)
+- **`--ratio` 있음**(두 군 배분비): `ttest2` `prop2` `noninf` `equiv` `repeated` `survival` `count` `ordinal`
+- **`--cluster-size/--cluster-icc` 있음**: `ttest2` `prop2` `corr` `anova` `noninf` `equiv` `repeated` `survival` `count` `ordinal` `pilot`. 없는 설계 — `paired` `onesample` `mcnemar` `prop1` `crossover` (군집을 *군에 배정*하는 구조가 아닙니다)
+- **`--interim/--spending/--timing/--futility` 있음**: `ttest2` `paired` `onesample` `prop2` `corr` `noninf` `repeated` `survival` `mcnemar` `count` `ordinal` `pilot`. 없는 설계 — `anova`(전방향 F 검정) `equiv`(TOST) `prop1`(정확 이항검정) `crossover`(시기·이월효과)
 - `icc` `loa` `kappa` `diag` → 정밀도 기준이라 `--alpha`와 `--n`만 받습니다. `--n`을 주면 "이 인원으로 얻는 정밀도"를 거꾸로 계산합니다 (`--power`/`--dropout`/`--cluster-*`/`--comparisons`/`--interim` **없음** — 탈락은 직접 나눠서 보정하세요)
-- 설계별 추가 옵션: `--ratio`(두 군 설계 전부), `--analysis`/`--baseline-r`(ttest2), `--post`/`--baseline-n`/`--rho`/`--analysis`/`--estimand`(repeated), `--hr`/`--median1`/`--accrual`/`--followup`/`--event-rate`/`--method`/`--time-unit`(survival), `--p01`/`--p10`(mcnemar), `--continuity`(prop2), `--bias-correct`(corr), `--lower-is-better`/`--diff`(noninf), `--diff`(equiv), `--means`(anova), `--prevalence`(kappa/diag), `--raters`(icc), `--p1`/`--p0`(prop1), `--diff`/`--sd-within`(crossover), `--sens`/`--spec`/`--half-width`(diag), `--groups`/`--filter`/`--baseline`/`--plan-on`/`--conf`/`--skip-invalid`(pilot)
+- 설계별 추가 옵션: `--ratio`(두 군 설계 전부), `--analysis`/`--baseline-r`(ttest2), `--post`/`--baseline-n`/`--rho`/`--analysis`/`--estimand`(repeated), `--hr`/`--median1`/`--accrual`/`--followup`/`--event-rate`/`--method`/`--time-unit`(survival), `--p01`/`--p10`(mcnemar), `--continuity`(prop2), `--bias-correct`(corr), `--lower-is-better`/`--diff`(noninf), `--diff`(equiv), `--means`(anova), `--prevalence`(kappa/diag), `--raters`(icc), `--p1`/`--p0`(prop1), `--diff`/`--sd-within`(crossover), `--rate1`/`--rr`/`--rate2`/`--dispersion`/`--exposure`/`--variance`/`--time-unit`(count), `--probs`/`--or`/`--probs2`(ordinal), `--sens`/`--spec`/`--half-width`(diag), `--groups`/`--filter`/`--baseline`/`--plan-on`/`--conf`/`--skip-invalid`(pilot)
 - 모든 설계 공통: `--format text|md|json` `-o 파일` `--force`
 
 전체 목록은 `powerplan <설계> --help`.
@@ -333,7 +335,81 @@ $ powerplan kappa --kappa 0.7 --width 0.2 --prevalence 0.3
 ```
 연속형 지표(호흡수·심박)는 `icc`/`loa`, **범주형 판정**(이상소견 유무, 수면단계 하나를 골라 이분화)은 `kappa`입니다. 유병률이 극단적일수록 필요한 표본수가 급증하므로 `--prevalence`를 실제값으로 넣으세요.
 
-### 13) 그 밖의 설계
+### 13) 반복사건 횟수 — "1년에 몇 번 악화하나"는 이분형이 아니다
+
+COPD·천식 악화, 뇌전증 발작, 심부전 재입원처럼 **한 사람이 여러 번 겪는 사건**은
+"한 번이라도 겪었나(prop2)"나 "첫 사건까지의 시간(survival)"으로 바꾸면 정보를 버립니다.
+실제 1차 분석은 거의 언제나 **음이항 회귀의 발생률비**이고, 표본수도 거기에 맞춰야 합니다.
+
+```bash
+$ powerplan count --rate1 1.2 --rr 0.75 --dispersion 0.7 --power 0.9
+```
+```
+ 효과크기     : 발생률비 (rate ratio) = 0.75 (대조 1.2/년 → 중재 0.9/년)
+
+▶ 필요한 분석 표본수 : 군당 425명 (1군 425 + 2군 425) = 총 850명
+  기대 사건 수       : 892.5건 (대조 510.0 + 중재 382.5) · 1인당 관찰 1년
+  과산포 영향        : k = 0.7 → 대조군 개인별 사건 수의 분산/평균 = 1.84배 (포아송이면 1.00배)
+```
+
+**`--dispersion`(과산포 k)이 이 계산에서 가장 민감한 가정입니다.** 임상 계수 자료는 거의 항상
+"자주 악화하는 사람이 따로 있어" 포아송보다 흩어져 있고(분산 = μ + k·μ²), k를 빼먹으면
+표본수가 크게 과소해집니다 — 위 예에서 `--dispersion`을 빼면 **군당 247명**으로,
+필요한 인원의 **58%** 밖에 안 됩니다. k는 사전연구의 1인당 사건 수 **평균과 분산**에서
+`k = (분산 − 평균) / 평균²`으로 추정합니다.
+
+⚠ **문헌의 값이 k의 역수일 수 있습니다.** R `glm.nb`의 `theta`, `rnbinom`의 `size`, SAS의 표기 등은
+분산을 μ + μ²/θ로 쓰므로 그 θ는 여기서 넣을 k의 **역수**입니다(θ = 0.7 → `--dispersion 1.43`).
+확인하지 않고 그대로 넣으면 표본수가 수십 % 어긋납니다. 보고되는 값은 질환·악화 정의·관찰기간에
+따라 크게 다르니 본인 자료나 해당 문헌에서 직접 확인하세요.
+
+`--exposure`는 1인당 **평균 관찰기간**입니다(기본 1). 발생률과 관찰기간은 곱으로만
+들어가므로 `--rate1 1.2 --exposure 1`과 `--rate1 0.6 --exposure 2`는 같은 결과입니다.
+중도 이탈이 많으면 `--dropout`(인원에서 빠짐)보다 `--exposure`를 실제 평균 관찰기간으로
+낮춰 잡는 편이 정직합니다 — 계수 결과에서는 이탈이 **관찰기간 단축**으로 작용하고
+그 사람도 분석에는 남기 때문입니다.
+
+`--rr` 대신 `--rate2`(중재군 발생률)를 직접 줘도 되고, `--variance null`은 기각역을
+귀무가설 하 합동 발생률로 잡습니다(점수검정 계열). 1:1 배분에서는 기본값보다 표본수가 **작게**
+나오지만(보수적인 쪽이 아닙니다) 배분비가 다르면 방향이 뒤집힐 수 있어, 출력에는 **그 설정에서
+실제로 계산한 방향**을 적습니다.
+
+### 14) 순서형 등급 결과 — 묶어서 버리지 말 것
+
+mRS, WHO 임상개선척도, CTCAE 등급, NRS 통증등급, Likert 만족도처럼 결과가
+**순서 있는 범주**일 때 씁니다. 흔한 "0~2 vs 3~6으로 묶어 반응률 비교"는 계산이 쉬워질 뿐
+표본수는 오히려 늘어납니다.
+
+```bash
+$ powerplan ordinal --probs 0.1,0.2,0.4,0.2,0.1 --or 1.8 --power 0.9
+```
+```
+ 효과크기     : 오즈비 (비례오즈) = 1.8 (범주 5개 · 동점보정 1−Σp̄³ = 0.9220)
+
+▶ 필요한 분석 표본수 : 군당 198명 (1군 198 + 2군 198) = 총 396명
+  대조군 범주 분포   : 0.100 / 0.200 / 0.400 / 0.200 / 0.100
+  중재군 범주 분포 (비례오즈 가정): 0.167 / 0.269 / 0.372 / 0.134 / 0.058
+  동점 보정계수 1 − Σp̄³: 0.9220 (1에 가까울수록 효율적 — 한 범주에 몰리면 작아짐)
+  Mann–Whitney 확률 : 0.4108 = P(중재 > 대조) + ½P(동점), 범주 번호가 클수록 큰 값이라고 볼 때
+```
+
+같은 가정(α 0.05 양측, 검정력 0.9, 연속성 보정 없음)에서 네 절단점으로 이분화해 `prop2`로
+계산하면 군당 545 / **265** / 335 / 872명이 필요합니다(범주 ≥2, ≥3, ≥4, ≥5로 자른 경우 —
+비교에는 반올림한 표시값이 아니라 정확한 누적확률을 썼습니다).
+**가장 유리한 절단점(265명)** 과 비교해도 순서형 그대로 분석하면 **군당 198명** — 25% 적습니다.
+다만 비례오즈가 깨져 효과가 한 절단점에 몰려 있으면 거기서 이분화하는 쪽이 더 적을 수도
+있습니다. 이분형으로 분석할 계획이면 `prop2`로 따로 계산해 큰 쪽을 쓰세요.
+
+`--probs`는 **대조군**의 범주 확률(낮은 범주부터, 합 1)이고, `--or > 1`이면 중재군이
+**낮은 범주 쪽으로** 이동합니다. 오즈비를 직접 정하기 어려우면 예상 중재군 분포를
+`--probs2`로 주세요 — 절단점마다의 오즈비를 계산해 그 기하평균을 계획값으로 쓰고,
+값이 크게 흩어지면(비례오즈 가정 위반) 경고합니다.
+
+`Mann–Whitney 확률`은 "무작위로 한 명씩 뽑았을 때 중재군 쪽 **범주 번호**가 더 클 확률
+(+ 동점의 절반)"입니다. **방향에 주의하세요** — `--or > 1`이면 중재군이 낮은 범주로 이동하므로
+0.5보다 **작은** 값이 좋은 결과입니다(mRS·CTCAE처럼 낮을수록 좋은 척도라면). 이 값은 오즈비보다 심사자·환자에게 설명하기 쉬운 공통언어 효과크기입니다.
+
+### 15) 그 밖의 설계
 
 ```bash
 powerplan prop2 --p1 0.30 --p2 0.50 --power 0.8            # 반응률 30%→50%: 군당 93명
@@ -378,7 +454,7 @@ $ powerplan ttest2 --d 0.4 --power 0.8 --cluster-size 10 --cluster-icc 0.05 --dr
 
 ## Notes / 한계 (정직하게)
 
-- **"정확"이라고 쓴 것은 (1) 평균·ANOVA·반복측정·교차설계의 t·F 검정과 (2) `prop1`의 이항검정뿐입니다.** `prop2`는 정규근사 z, `corr`는 Fisher z, `survival`은 Schoenfeld/Freedman 정규근사, `mcnemar`는 Connor 정규근사, `icc`·`loa`·`kappa`·`diag`는 근사식입니다. 중간분석 경계도 Z 정규근사입니다.
+- **"정확"이라고 쓴 것은 (1) 평균·ANOVA·반복측정·교차설계의 t·F 검정과 (2) `prop1`의 이항검정뿐입니다.** `prop2`는 정규근사 z, `corr`는 Fisher z, `survival`은 Schoenfeld/Freedman 정규근사, `mcnemar`는 Connor 정규근사, `count`는 음이항 log 발생률비의 정규근사, `ordinal`은 Whitehead 비례오즈 정규근사, `icc`·`loa`·`kappa`·`diag`는 근사식입니다. 중간분석 경계도 Z 정규근사입니다.
 - `corr`의 Fisher z 근사는 **정확법보다 0~1명 크게** 나옵니다(계획 단계에서는 보수적이라 안전). 심사자의 G*Power 값과 맞추려면 `--bias-correct`를 쓰세요.
 - `prop2`는 정규근사 z 검정 기준입니다. **Fisher 정확검정**을 쓸 계획이면 5~15% 여유를 두세요. 기대 사건수(n·p)가 군당 5 미만이면 정규근사가 깨집니다. `--continuity`는 검정통계량에 Yates 보정을 적용한 것이며, 표본수를 직접 부풀리는 Casagrande–Pike–Smith 공식과는 몇 명 차이가 날 수 있습니다.
 - `ttest2`는 **등분산**을 가정합니다(Welch를 쓸 계획이면 약 5% 여유). 비모수 검정(Mann–Whitney)을 쓸 계획이면 10% 정도 여유를 두세요.
@@ -392,9 +468,11 @@ $ powerplan ttest2 --d 0.4 --power 0.8 --cluster-size 10 --cluster-icc 0.05 --dr
 - `kappa`는 **평가자 2명·이분형 판정·두 평가자의 유병률이 같다**는 가정의 대표본 분산식입니다. **3범주 이상(예: 수면단계 W/N1/N2/N3/R)이나 가중 κ는 이 식으로 계산할 수 없습니다** — 관심 범주를 하나 골라 이분화하거나 시뮬레이션 기반 계산이 필요합니다.
 - 중간분석(`--interim`)의 경계·팽창계수는 **Z 통계량(정규근사)** 기반입니다(gsDesign·EAST와 같은 방식). 무익성 경계는 `--futility`로 함께 계획할 수 있으나 **비구속적(non-binding)만** 지원합니다 — 구속적 경계는 DSMB가 계속 진행하기로 하면 α가 새기 때문입니다. `anova`·`equiv`에는 적용되지 않습니다.
 - `prop1`은 **대조군이 없는** 설계입니다. 표본수보다 성능목표치 p₀의 근거가 심사에서 더 많이 지적됩니다.
+- `count`는 음이항 log 발생률비의 **정규근사**(Zhu & Lakkis 2014)이며, `--cluster-*`의 설계효과 1 + (m−1)·ICC는 평균·비율을 위해 유도된 식이라 발생률에는 근사의 근사입니다. 1인당 관찰기간을 **평균 하나**로만 반영합니다 — 관찰기간이 크게 흩어지면(절반이 조기 이탈) 실제 검정력은 더 낮습니다. 과산포 k는 사용자가 넣는 **가정**이고, 결과는 여기에 가장 민감합니다(`--sensitivity`는 발생률비만 흔들며 k는 흔들지 않습니다 — k는 직접 바꿔 가며 비교하세요). 0 팽창(zero-inflation), 처치효과가 시간에 따라 변하는 경우, 재발사건 생존모형(Andersen–Gill·WLW)은 다루지 않습니다.
+- `ordinal`은 **비례오즈**를 가정한 Whitehead(1993) 정규근사입니다. `--cluster-*`의 설계효과도 잠재변수 척도의 ICC를 가정한 근사입니다. 절단점마다 오즈비가 다르면(비비례) 이 표본수는 맞지 않으며, `--probs2`를 주면 절단점별 오즈비를 계산해 경고합니다. 국소 대립가설 근사라 오즈비가 1에서 크게 벗어나면(OR ≥ 2) 정확한 최대우도 분산과 최대 몇 % 차이가 납니다. 정확한 Wilcoxon–Mann–Whitney 계산(순열분포)이나 층화 순서형(van Elteren)은 다루지 않습니다.
 - `crossover`는 **이월효과가 없다**고 가정합니다(휴약기간 근거 필요). 생물학적동등성(로그변환 TOST·CV 기반)은 다루지 않습니다.
 - `diag`는 관측이 **서로 독립**이고 참조표준이 **완전하다**고 가정합니다. 수면단계 판독처럼 한 사람에게서 수백 개의 epoch가 나오는 자료에서는 "질환자 199명"이 사람이 아니라 **독립 관측 199개**라는 뜻이 되며, 실제로는 개인 내 상관 때문에 훨씬 더 필요합니다 — 이 툴은 그 보정을 제공하지 않습니다. AUC 비교, 두 검사의 상관을 반영한 짝지은 비교는 다루지 않습니다.
-- **아직 없는 설계** (자주 필요한 순): 공동 1차 평가변수(둘 다 성공해야 하는 설계 — α를 나누는 `--comparisons`는 이 경우 **틀린 보정**입니다), 구속적(binding) 무익성 경계, 교차설계의 비열등성·동등성, **반복 관측이 있는 진단정확도**(수면단계처럼 1인당 수백 epoch — `diag`는 관측이 서로 독립이라고 가정합니다), 평균·평균차의 정밀도(신뢰구간 폭) 기준 표본수, 발생률(Poisson·음이항) 비교, k군 비율 비교(χ²), Simon 2단계 설계, 적응적 표본수 재계산, 생물학적동등성, 생존분석 비열등성(HR 마진), 오즈비·상대위험 마진 기반 이분형 비열등성, AUC 비교·짝지은 진단검사 비교, 다범주·가중 kappa, 군집-교차설계·계단쐐기(stepped-wedge), Welch(부등분산) t 검정, 회귀 다중예측자, 계층화 로그순위, RMST, 순서형·비모수(Mann–Whitney) 정확계산.
+- **아직 없는 설계** (자주 필요한 순): 공동 1차 평가변수(둘 다 성공해야 하는 설계 — α를 나누는 `--comparisons`는 이 경우 **틀린 보정**입니다), 구속적(binding) 무익성 경계, 교차설계의 비열등성·동등성, **반복 관측이 있는 진단정확도**(수면단계처럼 1인당 수백 epoch — `diag`는 관측이 서로 독립이라고 가정합니다), 평균·평균차의 정밀도(신뢰구간 폭) 기준 표본수, k군 비율 비교(χ²), Simon 2단계 설계, 적응적 표본수 재계산, 생물학적동등성, 생존분석 비열등성(HR 마진), 오즈비·상대위험 마진 기반 이분형 비열등성, AUC 비교·짝지은 진단검사 비교, 다범주·가중 kappa, 군집-교차설계·계단쐐기(stepped-wedge), Welch(부등분산) t 검정, 회귀 다중예측자, 계층화 로그순위, RMST, 순서형·비모수(Mann–Whitney)의 **정확**계산(`ordinal`은 정규근사입니다), 층화 순서형(van Elteren), 재발사건 생존모형(Andersen–Gill).
 - 마진(비열등성·동등성)과 "임상적으로 의미있는 차이"는 통계가 아니라 **임상적 판단**입니다. 이 툴은 계산만 해 줍니다. 3상 확증시험이라면 검정력 0.80보다 0.90을 권합니다.
 - 사전연구 기반 계획의 하한은 `--conf`로 조절합니다. **`--conf`는 양측 신뢰수준**이므로 `--conf 0.95`의 하한은 한쪽 꼬리 2.5% 지점입니다(단측 97.5% 하한). "사전연구는 불확실하니 상한/하한으로 보수적으로 잡으라"는 제안 자체는 Browne(1995)과 Kieser & Wassmer(1996)에서 왔지만, 그 두 논문은 **분산(SD)의 상측 신뢰한계**를 다루며 효과크기 하한을 다루지 않습니다 — 여기서 쓰는 방식은 같은 취지의 응용입니다. 기본 0.95는 가장 보수적이며, 너무 커서 계획이 불가능하면 `--conf 0.8`처럼 낮춰 보세요.
 - `mcnemar`는 Connor 정규근사로 표본수를 잡고, **정확 조건부 이항검정의 검정력을 함께 표시**합니다. 정확검정은 이산분포라 보수적이므로(실제 크기 0.05 → 0.032) 그쪽으로 분석할 계획이면 표본수를 더 잡아야 합니다.
@@ -407,7 +485,7 @@ $ powerplan ttest2 --d 0.4 --power 0.8 --cluster-size 10 --cluster-icc 0.05 --dr
 ## 개발
 
 ```bash
-python3 -m pytest tests/ -q     # 1049개 테스트, 완전 오프라인
+python3 -m pytest tests/ -q     # 1166개 테스트, 완전 오프라인
 ```
 
 적대적 검토 이력(무엇을 지적받아 어떻게 고쳤는지)은 [HARDENING.md](HARDENING.md)에 있습니다.

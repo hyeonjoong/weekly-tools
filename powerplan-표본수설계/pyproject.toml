@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "powerplan"
 version = "0.1.0"
-description = "임상연구 표본수·검정력 설계 계산기 — 평균·ANOVA는 비중심 t/F 정확계산(비율·상관·생존은 근사), 기저값 보정(ANCOVA)·반복측정(MMRM)·생존분석·중간분석(군차별설계)·무익성 중단 경계·탈락·군집·다중비교, 사전연구 CSV→효과크기, 프로토콜 문장 자동생성 (표준 라이브러리만)"
+description = "임상연구 표본수·검정력 설계 계산기 — 평균·ANOVA는 비중심 t/F 정확계산(비율·상관·생존은 근사), 기저값 보정(ANCOVA)·반복측정(MMRM)·생존분석·반복사건 발생률(음이항)·순서형 등급(비례오즈)·중간분석(군차별설계)·무익성 중단 경계·탈락·군집·다중비교, 사전연구 CSV→효과크기, 프로토콜 문장 자동생성 (표준 라이브러리만)"
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
@@ -17,7 +17,10 @@ keywords = ["sample size", "statistical power", "ANCOVA", "design effect", "clin
             "group sequential", "alpha spending", "interim analysis", "O'Brien-Fleming",
             "Pocock", "log-rank", "survival", "Schoenfeld", "MMRM", "repeated measures",
             "futility", "beta spending", "non-binding futility", "DSMB",
-            "Frison-Pocock", "McNemar", "Cohen's kappa", "gsDesign"]
+            "Frison-Pocock", "McNemar", "Cohen's kappa", "gsDesign",
+            "negative binomial", "rate ratio", "overdispersion", "recurrent events",
+            "exacerbation rate", "ordinal outcome", "proportional odds", "Whitehead",
+            "Wilcoxon-Mann-Whitney", "modified Rankin Scale"]
 classifiers = [
   "Intended Audience :: Science/Research",
   "License :: OSI Approved :: MIT License",

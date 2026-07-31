@@ -196,6 +196,36 @@ def protocol_sentences(plan: dict) -> dict:
     elif design["key"] == "survival":
         effect_kr = _josa(f"위험비 {_fmt_num(effect['value'], 3)}", "을", "를")
         effect_en = f"a hazard ratio of {_fmt_num(effect['value'], 3)}"
+    elif design["key"] == "count":
+        effect_kr = _josa(
+            f"발생률비 {_fmt_num(effect['value'], 3)}"
+            f"(대조 {_fmt_num(effect['rate1'], 3)}건/{effect['time_unit']} → 중재 "
+            f"{_fmt_num(effect['rate2'], 3)}건/{effect['time_unit']}, 과산포 k = "
+            f"{effect['dispersion']:g}, 1인당 관찰 {effect['exposure']:g}"
+            f"{effect['time_unit']})", "을", "를")
+        unit_en = effect["time_unit"]
+        model_en = ("Poisson (no overdispersion)" if effect["dispersion"] == 0
+                    else f"negative binomial dispersion k = {effect['dispersion']:g}")
+        effect_en = (
+            f"a rate ratio of {_fmt_num(effect['value'], 3)} "
+            f"(control {_fmt_num(effect['rate1'], 3)} vs treatment "
+            f"{_fmt_num(effect['rate2'], 3)} events per {unit_en}, {model_en}, "
+            f"mean exposure {effect['exposure']:g} {unit_en} per participant)")
+    elif design["key"] == "ordinal":
+        # 방향은 문장에서 재구성할 수 없다 — OR > 1이 '낮은 범주 쪽 이동'임을 명시한다.
+        toward_kr = "낮은" if effect["value"] > 1 else "높은"
+        toward_en = "lower" if effect["value"] > 1 else "higher"
+        effect_kr = _josa(
+            f"비례오즈비 {_fmt_num(effect['value'], 3)}"
+            f"(순서형 범주 {effect['categories']}개, 중재군이 {toward_kr} 범주 쪽으로 "
+            f"이동, 대조군 분포 "
+            + " / ".join(f"{x:.3f}" for x in effect["probs1"]) + ")", "을", "를")
+        effect_en = (
+            f"a proportional-odds ratio of {_fmt_num(effect['value'], 3)} "
+            f"across {effect['categories']} ordered categories "
+            f"(shifting the treatment arm toward {toward_en} categories; "
+            "control-group distribution "
+            + ", ".join(f"{x:.3f}" for x in effect["probs1"]) + ")")
     elif design["key"] == "mcnemar":
         effect_kr = _josa(f"불일치 오즈비 {_fmt_num(effect['value'], 3)}", "을", "를")
         effect_en = (f"a discordant odds ratio of {_fmt_num(effect['value'], 3)} "
