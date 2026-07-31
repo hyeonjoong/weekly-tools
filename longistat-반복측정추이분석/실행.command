@@ -5,7 +5,7 @@ cd "$(dirname "$0")" || exit 1
 PY="$(command -v python3 || true)"
 if [ -z "$PY" ]; then
   echo "❌ python3 을 찾을 수 없습니다. https://www.python.org 에서 설치한 뒤 다시 실행하세요."
-  read -r -p "엔터를 누르면 창이 닫힙니다..."
+  read -r -p "엔터를 누르면 창이 닫힙니다..." || true
   exit 1
 fi
 
@@ -18,9 +18,11 @@ cat <<'EOF'
      · 시점/그룹별 기술통계와 결측·탈락 프로파일
      · 정규성(Shapiro-Wilk) · 구형성(Mauchly) 점검 + GG/HF 보정
      · 반복측정 ANOVA / 혼합(군 x 시점) ANOVA, Friedman 교차확인
+     · 선형/이차 추세 대비와 개인별 기울기 (점/주 단위, 탈락자도 포함)
      · 시점 간·군간 사후비교 (Holm 보정)
      · 기저 대비 변화량과 "군간 변화량 차이 + 95% CI"
      · 기저값 보정 ANCOVA (조정평균차 + 95% CI)
+     · 결측 대체 민감도 LOCF/BOCF (결론이 탈락에 흔들리는지)
      · MCID 반응자 비율과 RD/RR/OR/NNT, 신뢰변화지수(RCI)
      · 논문에 바로 넣는 한/영 결과 문장
    을 한 번에 만들어 줍니다. (인터넷 접속 없음, 외부 라이브러리 없음)
@@ -35,11 +37,13 @@ EOF
 echo
 echo "▶ 예제 1/2 — 불면 ISI, 2군(능동/가짜) × 3시점, 탈락 포함"
 echo "  \$ python3 -m longistat.cli examples/isi_serene_예시.csv --id 대상 --time 방문 --value ISI --group 군 \\"
-echo "        --time-order 기저,4주,8주 --primary-time 8주 --mcid 6 --direction lower --reliability 0.9 --recovery-cutoff 7"
+echo "        --time-order 기저,4주,8주 --primary-time 8주 --time-values 0,4,8 --time-unit 주 \\"
+echo "        --mcid 6 --direction lower --reliability 0.9 --recovery-cutoff 7"
 echo
 "$PY" -m longistat.cli examples/isi_serene_예시.csv \
   --id 대상 --time 방문 --value ISI --group 군 \
   --time-order 기저,4주,8주 --primary-time 8주 \
+  --time-values 0,4,8 --time-unit 주 \
   --mcid 6 --direction lower --reliability 0.9 --recovery-cutoff 7
 STATUS1=$?
 
@@ -47,10 +51,11 @@ echo
 echo "========================================================================"
 echo "▶ 예제 2/2 — 와우핏 단어인지도, 1군 × 4시점 (높을수록 좋음), 요약만"
 echo "  \$ python3 -m longistat.cli examples/와우핏_단어인지도_wide예시.csv --wide --id 환자 \\"
-echo "        --columns 기저,4주,8주,12주 --mcid 10 --direction higher --brief"
+echo "        --columns 기저,4주,8주,12주 --time-values 0,4,8,12 --time-unit 주 --mcid 10 --direction higher --brief"
 echo
 "$PY" -m longistat.cli examples/와우핏_단어인지도_wide예시.csv \
   --wide --id 환자 --columns 기저,4주,8주,12주 \
+  --time-values 0,4,8,12 --time-unit 주 \
   --mcid 10 --direction higher --brief
 STATUS2=$?
 
@@ -62,4 +67,4 @@ else
   echo "⚠️ 예제 실행 중 오류가 있었습니다 (종료코드 $STATUS1 / $STATUS2)."
 fi
 echo
-read -r -p "엔터를 누르면 창이 닫힙니다..."
+read -r -p "엔터를 누르면 창이 닫힙니다..." || true
