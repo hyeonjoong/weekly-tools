@@ -15,7 +15,7 @@ from __future__ import annotations
 import math
 import os
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence
 
 from .artifacts import clean_rr
 from .frequency import frequency_domain
@@ -163,10 +163,18 @@ def analyze_rr(rr,
                max_rr: float = 2000.0,
                rel_thresh: float = 0.2,
                nperseg: Optional[int] = None,
-               do_sampen: bool = True) -> HRVResult:
+               do_sampen: bool = True,
+               precleaned_flags: Optional[Sequence[bool]] = None) -> HRVResult:
     """RR(ms) 시계열 하나를 전 지표로 분석해 HRVResult를 반환.
 
     rr: RR/NN 간격(ms) 리스트. (단위 변환은 dataio.load_series 가 미리 수행)
+
+    precleaned_flags: rr 이 **이미 정제된** 값이고 각 박동의 이상 여부를 이미
+      알고 있을 때 그 플래그를 넘깁니다(길이가 rr 과 같아야 함). 이 경우 이상박동
+      탐지/보정을 다시 하지 않습니다 — 구간(epoch) 분석에서 필요합니다: 정제는
+      **기록 전체에서 한 번** 해야 국소 중앙값 기준선이 구간 경계에서 끊기지 않고,
+      구간마다 다시 탐지하면 이미 보간된 값 위에서 탐지가 돌아 이상박동 비율이
+      0 으로 잘못 보고됩니다.
     """
     rr = [float(x) for x in rr]
     n_input = len(rr)
@@ -175,8 +183,16 @@ def analyze_rr(rr,
 
     warnings: List[str] = []
 
-    cleaned, flags = clean_rr(rr, method=clean_method, min_rr=min_rr,
-                              max_rr=max_rr, rel_thresh=rel_thresh)
+    if precleaned_flags is not None:
+        if len(precleaned_flags) != n_input:
+            raise ValueError(
+                "precleaned_flags 길이가 rr 길이와 다릅니다 "
+                f"({len(precleaned_flags)} != {n_input}).")
+        cleaned = list(rr)
+        flags = [bool(f) for f in precleaned_flags]
+    else:
+        cleaned, flags = clean_rr(rr, method=clean_method, min_rr=min_rr,
+                                  max_rr=max_rr, rel_thresh=rel_thresh)
     n_art = sum(1 for f in flags if f)
     pct_art = 100.0 * n_art / len(flags) if flags else 0.0
     if pct_art > 5.0:

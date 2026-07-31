@@ -28,10 +28,13 @@ from typing import Any, List, Optional, Sequence
 
 from . import __version__
 from .analyze import HRVResult, analyze_rr, flat_metrics
-from .dataio import load_manifest, load_series
-from .report import (metrics_to_csv, paired_group, paired_group_to_csv,
-                     render_batch_table, render_comparison,
-                     render_paired_group, render_text)
+from .dataio import load_group_manifest, load_manifest, load_series
+from .report import (group_compare, group_compare_to_csv, metrics_to_csv,
+                     paired_group, paired_group_to_csv, render_batch_table,
+                     render_comparison, render_group_compare,
+                     render_paired_group, render_text, render_windows,
+                     windows_to_csv)
+from .window import DEFAULT_WINDOW_SEC, MIN_WINDOW_BEATS, analyze_windows
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -40,7 +43,9 @@ def _build_parser() -> argparse.ArgumentParser:
         description="심박변이도(HRV) 분석기 — RR/IBI(ms) 또는 순간 HR(bpm) CSV로부터 "
                     "이상박동 보정 후 시간영역·주파수영역(Welch/FFT)·비선형(Poincaré/"
                     "SampEn/DFA) 지표를 계산합니다 (표준 라이브러리만). 여러 파일을 "
-                    "주면 일괄 요약, --compare 로 짝지은 비교를 냅니다.",
+                    "주면 일괄 요약, --compare 로 짝지은 비교, --paired 로 짝지은 "
+                    "코호트 통계, --groups 로 평행군(독립 2군) 비교, --window 로 "
+                    "구간별 추이(추세 검정·SDANN)를 냅니다.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument("csv", nargs="*",
@@ -75,6 +80,24 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--paired", metavar="MANIFEST",
                    help="매니페스트 CSV(기저,개입[,라벨] 열)로 여러 피험자 코호트 "
                         "통계(Wilcoxon·효과크기·HL 신뢰구간·다중비교 보정)를 계산")
+    p.add_argument("--groups", metavar="MANIFEST",
+                   help="평행군(독립 2군) 매니페스트 CSV(파일,군[,피험자] 열)로 "
+                        "군간 비교(Mann–Whitney·Hedges g·HL 이동량 CI·보정 p). "
+                        "각 피험자가 한 군에만 속하는 설계(약물 대 위약)용. "
+                        "**매니페스트에 먼저 나온 군이 기준(대조)** 이 되고 모든 "
+                        "차이는 (나중 군 − 먼저 군) 방향입니다")
+    p.add_argument("--window", type=float, nargs="?", metavar="SEC",
+                   const=DEFAULT_WINDOW_SEC, default=None,
+                   help="파일 1개를 SEC초 구간(epoch)으로 나눠 구간별 지표와 "
+                        f"단조 추세(Mann–Kendall), SDANN·SDNN index 를 계산 "
+                        f"(값 생략 시 {DEFAULT_WINDOW_SEC:.0f}초 = Task Force 표준)")
+    p.add_argument("--step", type=float, default=None, metavar="SEC",
+                   help="구간 시작 간격(초). 기본은 --window 와 동일(겹치지 않음). "
+                        "작게 주면 슬라이딩 창이 되지만 구간이 독립이 아니라 "
+                        "추세 p값이 낙관적이 되고 SDANN 은 생략됩니다")
+    p.add_argument("--min-window-beats", type=int, default=MIN_WINDOW_BEATS,
+                   metavar="N",
+                   help=f"구간을 분석하기 위한 최소 박동 수 (기본 {MIN_WINDOW_BEATS})")
     p.add_argument("--alpha", type=float, default=0.05,
                    help="유의수준 — Hodges–Lehmann 신뢰구간은 1-alpha 수준으로, "
                         "유의성 판정도 이 값 기준 (기본 0.05 → 95%% CI)")
@@ -156,6 +179,49 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
               file=sys.stderr)
         return 2
 
+    # 분석 모드는 서로 배타적입니다. 조용히 하나를 무시하면 사용자는 자기가 요청한
+    # 분석 대신 다른 분석 결과를 보고 있다는 것을 알아채지 못합니다.
+    modes = [name for name, on in (("--paired", bool(args.paired)),
+                                   ("--groups", bool(args.groups)),
+                                   ("--compare", bool(args.compare)),
+                                   ("--window", args.window is not None)) if on]
+    if len(modes) > 1:
+        print(f"입력 오류: {', '.join(modes)} 는 함께 쓸 수 없습니다 "
+              f"(한 번에 한 가지 분석 모드).", file=sys.stderr)
+        return 2
+
+    # ---- 평행군(독립 2군) 비교 (--groups MANIFEST) ----
+    if args.groups:
+        try:
+            rows = load_group_manifest(args.groups)
+        except (ValueError, FileNotFoundError, OSError) as exc:
+            print(f"입력 오류: {exc}", file=sys.stderr)
+            return 2
+        order: List[str] = []
+        for _, gname, _ in rows:
+            if gname not in order:
+                order.append(gname)
+        a_label, b_label = order
+        buckets: dict = {a_label: [], b_label: []}
+        for fpath, gname, label in rows:
+            try:
+                buckets[gname].append(_analyze_file(args, fpath))
+            except Exception as exc:  # noqa: BLE001
+                tag = label or fpath
+                print(f"입력/분석 오류: [{tag}] {exc}", file=sys.stderr)
+                return 2
+        a_res, b_res = buckets[a_label], buckets[b_label]
+        if fmt == "json":
+            g = group_compare(a_res, b_res, alpha=args.alpha)
+            _print_json({"mode": "groups", "group_a": a_label,
+                         "group_b": b_label, **g})
+        elif fmt == "csv":
+            print(group_compare_to_csv(a_res, b_res, alpha=args.alpha), end="")
+        else:
+            print(render_group_compare(a_res, b_res, a_label=a_label,
+                                       b_label=b_label, alpha=args.alpha))
+        return 0
+
     # ---- 짝지은 코호트 통계 (--paired MANIFEST) ----
     if args.paired:
         try:
@@ -186,6 +252,51 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print("입력 오류: CSV 파일을 1개 이상 지정하거나 --paired 를 사용하세요.",
               file=sys.stderr)
         return 2
+
+    # ---- 구간(epoch)별 추이 (--window SEC) ----
+    if args.window is not None:
+        if len(paths) != 1:
+            print("입력 오류: --window 는 파일 1개에만 적용됩니다 "
+                  f"({len(paths)}개가 주어졌습니다). 파일마다 따로 실행하세요.",
+                  file=sys.stderr)
+            return 2
+        path = paths[0]
+        try:
+            rr_ms, meta = load_series(path, col=args.col, unit=args.unit,
+                                      beat_times=args.timestamps)
+            series = analyze_windows(
+                rr_ms, window_sec=args.window, step_sec=args.step,
+                min_beats=args.min_window_beats, source=path,
+                clean_method=args.clean, fs=args.fs, min_rr=args.min_rr,
+                max_rr=args.max_rr, rel_thresh=args.rel_thresh,
+                nperseg=args.nperseg, do_sampen=not args.no_sampen)
+        except Exception as exc:  # noqa: BLE001
+            print(f"입력/분석 오류: {exc}", file=sys.stderr)
+            return 2
+        for key in ("unit_note", "column_note"):
+            if meta.get(key):
+                series.notes.append(meta[key])
+        if meta.get("ragged"):
+            series.notes.append(
+                "행마다 열 개수가 달라(ragged) 일부 행이 무시됐을 수 있습니다. "
+                "--col 로 값 열을 명시하는 것을 권장합니다.")
+        if meta["n_dropped"]:
+            series.notes.append(
+                f"{meta['n_dropped']}개 셀이 비수치/빈칸으로 무시되었습니다.")
+        if meta.get("looks_like_timestamps"):
+            series.notes.append(
+                "값이 누적 박동 발생시각처럼 보입니다 — 간격이 아니라면 "
+                "--timestamps 를 붙이세요.")
+        if fmt == "json":
+            out = series.to_dict()
+            out["mode"] = "window"
+            out["input_meta"] = meta
+            _print_json(out)
+        elif fmt == "csv":
+            print(windows_to_csv(series), end="")
+        else:
+            print(render_windows(series))
+        return 0
 
     if args.compare and len(paths) != 2:
         print("입력 오류: --compare 는 정확히 2개의 파일이 필요합니다.",

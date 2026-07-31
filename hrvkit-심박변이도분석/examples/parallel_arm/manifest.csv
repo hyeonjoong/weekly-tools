@@ -1,0 +1,11 @@
+file,group,subject
+C01.csv,control,C01
+C02.csv,control,C02
+C03.csv,control,C03
+C04.csv,control,C04
+C05.csv,control,C05
+D01.csv,device,D01
+D02.csv,device,D02
+D03.csv,device,D03
+D04.csv,device,D04
+D05.csv,device,D05
