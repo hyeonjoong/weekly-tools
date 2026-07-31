@@ -93,6 +93,8 @@ def render_text(a: Analysis, *, top: int = 10) -> str:
     _events_section(add, a.event_stats, top)
     _active_section(add, a.active, a.stickiness)
     _retention_section(add, a.retention, a.confidence, a.retention_mode)
+    if a.adherence is not None:
+        _adherence_section(add, a.adherence)
     if a.funnel:
         _funnel_section(add, a.funnel, a.confidence)
     _activity_section(add, a)
@@ -192,6 +194,17 @@ def _groups_section(add, g):
     add("  * 군별 값은 모두 사용자당 중앙값입니다 (한 사용자가 여러 번 세어지지 않도록).")
     add("  * 사용시간 = 각 세션의 (첫→마지막 이벤트) 시간의 합. 이벤트가 하나뿐인 세션은")
     add("    0분으로 잡히며, 세션과 세션 사이의 시간은 포함하지 않습니다.")
+    # 군이 3개 이상이면 검정 표가 없으므로, 군별 준수도는 여기에 한 줄로 남긴다.
+    adh_arms = [s for s in g.arms if s.adherence is not None]
+    if adh_arms:
+        parts = []
+        for s in adh_arms:
+            ok, n = s.adherence
+            share = f"{ok}/{n}" + (f" ({_pct(ok / n)})" if n else "")
+            parts.append(f"{_label(s.group, 14)} {share}")
+        for i, line in enumerate(_wrap("* 프로토콜 준수 참여자: " + " · ".join(parts),
+                                       _WRAP_WIDTH - 2, indent="  ")):
+            add("  " + line)
 
     if g.proportions:
         add("")
@@ -245,7 +258,7 @@ def _groups_section(add, g):
     if g.n_tests:
         add(f"  * 다중비교: 이 절의 검정 {g.n_tests}개를 하나의 family 로 보고")
         add("    Holm–Bonferroni 로 보정했습니다 — 판단은 p(Holm) 으로 하세요.")
-        add("    (검정 개수는 --retention/--funnel 에 따라 달라지므로, 보정된 p 값도")
+        add("    (검정 개수는 --retention/--funnel/--adherence-days 에 따라 달라지므로, 보정된 p 값도")
         add("     함께 바뀝니다. 비교 설계를 먼저 정하고 돌리세요.)")
     add("  * 이 비교는 사후(post-hoc) 관찰 분석입니다. 사전에 정한 주요 평가변수가")
     add("    아니라면 확증이 아닌 탐색적 근거로 다루세요.")
@@ -303,6 +316,81 @@ def _retention_section(add, ret: List[Retention], confidence: float, mode: str =
     for r in ret:
         add(f"  day-{r.n:<3} : {_pct(r.rate):>7}  "
             f"(retained {r.retained}/{r.eligible}{_fmt_ci(r.ci, confidence)})")
+
+
+def _josa(word: str, with_batchim: str, without: str) -> str:
+    """한글 조사 선택 — 앞말의 받침 유무에 따라 (이/가, 을/를, 은/는).
+
+    단위 이름이 옵션에 따라 '주'/'기간' 으로 바뀌므로, 문장이 "그 기간를" 처럼
+    깨지지 않도록 조사를 계산한다.
+    """
+    if not word:
+        return without
+    last = word[-1]
+    if not ("가" <= last <= "힣"):
+        return without
+    return with_batchim if (ord(last) - 0xAC00) % 28 else without
+
+
+def _adherence_section(add, ad):
+    """프로토콜 준수도 — 참여자별 연구 주차 기준."""
+    add("")
+    wu = "주" if ad.period_days == 7 else "기간"
+    wu_i, wu_eul, wu_neun = (_josa(wu, "이", "가"), _josa(wu, "을", "를"),
+                             _josa(wu, "은", "는"))
+    span = "주" if ad.period_days == 7 else f"{ad.period_days}일 기간"
+    add(f"[ 프로토콜 준수도 ] (한 {span}에 {ad.min_days}일 이상 사용 = 준수, "
+        f"참여자별 첫 활동일 기준)")
+    def row(label: str, value: str):
+        add("  " + _lj(label, 16) + ": " + value)
+
+    if ad.observation_end is not None:
+        row("관찰 종료일", f"{ad.observation_end} "
+                           f"(로그 전체의 마지막 활동일 — 모든 '완전히 관찰된 "
+                           f"{wu}' 판정의 기준)")
+    if ad.required_weeks is not None:
+        row("관찰 창", f"{ad.window_weeks}{wu} 고정(--adherence-weeks) · "
+                       f"데이터가 온전히 관찰한 최대 {ad.observed_weeks}{wu}")
+    else:
+        row("관찰 창", f"{ad.window_weeks}{wu} "
+                       f"(참여자마다 완전히 관찰된 {wu}만 · 최대 {ad.observed_weeks}{wu})")
+    if ad.n_users:
+        rate = ad.n_adherent_users / ad.n_users
+        who = (f"{ad.required_weeks}{wu} 완주자"
+               if ad.required_weeks is not None
+               else f"관찰 {wu}{wu_i} 1개 이상인 참여자")
+        row("준수 참여자",
+            f"{ad.n_adherent_users}/{ad.n_users}  "
+            f"({_pct(rate)}{_fmt_ci(ad.adherent_ci, ad.confidence)})"
+            f"  ← 자기 관찰 {wu}의 {ad.target * 100:g}% 이상 준수")
+        rng = ad.eligible_weeks_range
+        denom = f"{who} (분모가 된 관찰 {wu} 수: "
+        denom += f"{rng[0]}{wu}" if rng and rng[0] == rng[1] else f"{rng[0]}~{rng[1]}{wu}"
+        row("  └ 분석 집단", denom + ")")
+        row("사용자당 준수율", f"중앙값 {_pct(ad.median_user_rate)} "
+                               f"(참여자별 준수 {wu}÷관찰 {wu})")
+        row(f"연속 준수 {wu}", f"중앙값 {_fmt_num(ad.median_streak)}{wu} "
+                               f"(참여자별 '가장 긴 연속 준수' 의 중앙값)")
+    else:
+        row("준수 참여자", "n/a (분모가 될 참여자가 없습니다 — 아래 ! 안내 참고)")
+    if ad.weeks:
+        head = "주차" if ad.period_days == 7 else "기간"
+        add("  " + _lj(head, 8) + _rj("대상", 8) + _rj("준수", 8) + _rj("준수율", 10)
+            + _lj(f"  {int(round(ad.confidence * 100))}%CI", 22) + _rj("활성일(중앙)", 14))
+        for w in ad.weeks:
+            ci = "" if w.ci is None else f"  [{w.ci[0] * 100:.1f}, {w.ci[1] * 100:.1f}]%"
+            add("  " + _lj(f"{w.week}", 8) + _rj(str(w.eligible), 8)
+                + _rj(str(w.adherent), 8) + _rj(_pct(w.rate), 10)
+                + _lj(ci, 22) + _rj(_fmt_num(w.median_active_days), 14))
+    add(f"  * 대상 = 그 {wu}{wu_eul} 온전히 관찰할 기회가 있던 참여자 (관찰 종료일에 걸친 부분")
+    add(f"    {wu}{wu_neun} 분모에서 제외 — 아직 쓸 시간이 없었던 것을 미준수로 세지 않기 위함).")
+    add("  * 활성일 = 이벤트가 하나라도 있던 날의 수 (하루에 몇 번 썼는지는 세지 않음).")
+    add(f"    '활성일(중앙)' 은 대상 전원(그 {wu} 사용 0일인 사람 포함)의 중앙값입니다.")
+    add(f"  * 뒤 {wu}의 대상은 앞 {wu} 대상의 부분집합이라, {wu} 간 준수율 추세에는")
+    add("    행동 변화뿐 아니라 코호트 구성 변화가 섞여 있습니다.")
+    for note in ad.notes:
+        for i, line in enumerate(_wrap(note, _WRAP_WIDTH - 4, indent="")):
+            add(("  ! " if i == 0 else "    ") + line)
 
 
 def _funnel_section(add, steps: List[FunnelStep], confidence: float):

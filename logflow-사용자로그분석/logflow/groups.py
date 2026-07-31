@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 
+from .adherence import Adherence, adherence
 from .dataio import Event
 from .metrics import funnel
 from .sessionize import Session, sessionize
@@ -80,6 +81,8 @@ class ArmSummary:
     median_active_days: Optional[float]
     retention: Dict[int, Tuple[int, int]] = field(default_factory=dict)  # day-N -> (retained, eligible)
     funnel_completion: Optional[Tuple[int, int]] = None  # (완주자, 1단계 도달자)
+    adherence: Optional[Tuple[int, int]] = None  # (준수 참여자, 분모가 있는 참여자)
+    median_adherence_rate: Optional[float] = None  # 사용자당 준수 주 비율의 중앙값
 
 
 @dataclass
@@ -310,11 +313,20 @@ def compare_groups(
     retention_mode: str = "exact",
     churn_days: int = 7,
     reference: Optional[str] = None,
+    adherence_min_days: Optional[int] = None,
+    adherence_period: int = 7,
+    adherence_target: float = 0.8,
+    adherence_weeks: Optional[int] = None,
 ) -> GroupComparison:
     """군 간 비교 분석을 수행한다 (군이 2개일 때 추론 검정 포함).
 
     reference: 기준군(대조군) 라벨. 비율 차이는 (비교군 − 기준군) 으로 낸다.
     지정하지 않으면 사전순 첫 라벨이 기준군이 된다.
+
+    adherence_min_days 를 주면 프로토콜 준수도(주 N일 이상 사용)도 군별로 계산하고,
+    준수 참여자 비율(비율 비교)과 사용자당 준수 주 비율(분포 비교)을 검정에 추가한다.
+    관찰 종료일은 전체 데이터의 마지막 날로 통일한다 — 군마다 다른 종료일을 쓰면
+    '완전히 관찰된 주' 의 수가 달라져 분모가 불공정해진다.
     """
     if not events:
         raise ValueError("분석할 이벤트가 없습니다 (빈 입력)")
@@ -349,6 +361,7 @@ def compare_groups(
 
     arms: List[ArmSummary] = []
     per_user: Dict[str, Dict[str, Dict[str, float]]] = {}
+    adh_by_group: Dict[str, Adherence] = {}
     for g in groups:
         evs = by_group[g]
         sessions = sessionize(evs, gap_seconds=gap_seconds)
@@ -365,6 +378,21 @@ def compare_groups(
         if funnel_steps:
             steps = funnel(evs, funnel_steps, confidence=confidence)
             fc = (steps[-1].reached, steps[0].reached)
+        adh_counts = None
+        adh_median = None
+        if adherence_min_days is not None:
+            adh = adherence(
+                evs,
+                min_days=adherence_min_days,
+                period_days=adherence_period,
+                target=adherence_target,
+                confidence=confidence,
+                max_weeks=adherence_weeks,
+                end=max_day,
+            )
+            adh_by_group[g] = adh
+            adh_counts = (adh.n_adherent_users, adh.n_users)
+            adh_median = adh.median_user_rate
         arms.append(
             ArmSummary(
                 group=g,
@@ -377,6 +405,8 @@ def compare_groups(
                 median_active_days=median([m["active_days_per_user"] for m in metrics.values()]),
                 retention=ret,
                 funnel_completion=fc,
+                adherence=adh_counts,
+                median_adherence_rate=adh_median,
             )
         )
 
@@ -432,6 +462,31 @@ def compare_groups(
                     )
                 )
 
+        if adherence_min_days is not None:
+            sa, na = arm_a.adherence or (0, 0)
+            sb, nb = arm_b.adherence or (0, 0)
+            per = "주" if adherence_period == 7 else f"{adherence_period}일당"
+            adh_label = (
+                f"프로토콜 준수({per}{adherence_min_days}일↑"
+                f"·{adherence_target * 100:g}%↑)"
+            )
+            d = newcombe_diff_interval(sa, na, sb, nb, confidence)
+            if d is None:
+                notes.append(
+                    f"프로토콜 준수 비교 불가: 완전히 관찰된 주가 1개 이상인 참여자가 "
+                    f"{_short(a_label)} {na}명 / {_short(b_label)} {nb}명 (한쪽이 0명)."
+                )
+            else:
+                proportions.append(
+                    ProportionTest(
+                        label=adh_label,
+                        group_a=a_label, group_b=b_label,
+                        successes_a=sa, n_a=na, successes_b=sb, n_b=nb,
+                        diff=d,
+                        p_value=fisher_exact_two_sided(sa, na - sa, sb, nb - sb),
+                    )
+                )
+
         for key, label, unit in _USER_METRICS:
             xs = [m[key] for m in per_user[a_label].values()]
             ys = [m[key] for m in per_user[b_label].values()]
@@ -440,6 +495,26 @@ def compare_groups(
                 distributions.append(
                     DistributionTest(
                         label=label, unit=unit,
+                        group_a=a_label, group_b=b_label, result=res,
+                    )
+                )
+
+        if adherence_min_days is not None:
+            # 사용자당 '준수 주 비율(%)' — 완전 관찰 주가 없는 참여자는 값이 없어 제외.
+            xs = [u.rate * 100.0 for u in adh_by_group[a_label].users if u.rate is not None]
+            ys = [u.rate * 100.0 for u in adh_by_group[b_label].users if u.rate is not None]
+            res = mann_whitney_u(xs, ys)
+            if res is None:
+                # 조용히 빠지면 Holm family 크기까지 함께 줄어 다른 p 값이 바뀐다.
+                notes.append(
+                    f"사용자당 준수 주 비율 비교 불가: 분모가 있는 참여자가 "
+                    f"{_short(a_label)} {len(xs)}명 / {_short(b_label)} {len(ys)}명 "
+                    f"(한쪽이 0명)."
+                )
+            else:
+                distributions.append(
+                    DistributionTest(
+                        label="사용자당 준수 주 비율", unit="%",
                         group_a=a_label, group_b=b_label, result=res,
                     )
                 )
