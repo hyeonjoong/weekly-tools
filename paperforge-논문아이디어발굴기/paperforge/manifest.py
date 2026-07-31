@@ -55,6 +55,20 @@ MODALITY_ALIASES = {
     "유저테스트": "behavior", "behavioral": "behavior", "log": "behavior",
     "행동": "behavior", "행동로그": "behavior",
     "moa": "moa", "mechanism": "moa",
+    # Clinical / pharma inventories: the endpoint tables, assay results and scans
+    # that survival- and response-rate ideas are actually built on. Without these
+    # keys such a template could never match a real clinical manifest.
+    "clinical": "clinical", "임상": "clinical", "임상기록": "clinical",
+    "crf": "clinical", "ehr": "clinical", "emr": "clinical",
+    "의무기록": "clinical", "chart": "clinical", "outcome": "clinical",
+    "endpoint": "clinical", "임상결과": "clinical", "생존": "clinical",
+    "survival": "clinical",
+    "lab": "lab", "labs": "lab", "검사": "lab", "혈액검사": "lab",
+    "biomarker": "lab", "바이오마커": "lab", "assay": "lab", "생체표지자": "lab",
+    "omics": "lab", "genomic": "lab", "유전체": "lab",
+    "imaging": "imaging", "영상": "imaging", "mri": "imaging", "ct": "imaging",
+    "pet": "imaging", "초음파": "imaging", "xray": "imaging",
+    "영상검사": "imaging",
 }
 
 MODALITY_LABEL_KO = {
@@ -64,6 +78,9 @@ MODALITY_LABEL_KO = {
     "questionnaire": "설문/자기보고",
     "behavior": "행동/유저테스트",
     "moa": "MoA 테스트",
+    "clinical": "임상결과/CRF",
+    "lab": "검사/바이오마커",
+    "imaging": "영상",
 }
 
 
@@ -368,6 +385,19 @@ def _decode_bytes(raw: bytes):
     Korean Excel are frequently CP949/EUC-KR, not UTF-8; we fall back rather
     than crashing, and warn so the user can re-save as UTF-8.
     """
+    # Excel's "Unicode Text (*.txt)" export is UTF-16 with a BOM. Without this
+    # branch it fell through to the latin-1 last resort and the user got
+    # "CSV 헤더에 'modality' 열이 필요합니다" — a diagnosis pointing at the wrong
+    # problem entirely.
+    if raw[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        for enc in ("utf-16",):
+            try:
+                return raw.decode(enc), (
+                    "파일이 UTF-16(엑셀 '유니코드 텍스트')으로 저장돼 있어 그대로 "
+                    "읽었습니다 — 가능하면 UTF-8 CSV로 다시 저장하세요."
+                )
+            except UnicodeDecodeError:
+                pass
     for enc in ("utf-8-sig", "utf-8"):
         try:
             return raw.decode(enc), None

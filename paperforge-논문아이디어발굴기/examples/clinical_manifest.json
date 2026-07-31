@@ -1,0 +1,20 @@
+{
+  "study": "바이오마커 코호트 (예시 데이터 — 실제 환자 데이터가 아닙니다)",
+  "note": "임상/제약용 예시 인벤토리. examples/clinical_pack.json 과 함께 쓰세요: paperforge examples/clinical_manifest.json --templates examples/clinical_pack.json",
+  "datasets": [
+    {"name": "임상 CRF/추적", "modality": "임상", "n": 320,
+     "variables": ["pfs_months", "pfs_event", "os_months", "os_event",
+                   "response_binary", "stage", "ecog", "age", "sex"]},
+    {"name": "중앙검사실 바이오마커", "modality": "검사", "n": 280,
+     "variables": ["pdl1_tps", "ctdna_vaf", "ldh", "crp"]},
+    {"name": "영상 판독(RECIST)", "modality": "영상", "n": 150,
+     "variables": ["target_lesion_sum", "tumor_burden_baseline"]},
+    {"name": "환자보고 결과(PRO)", "modality": "설문", "n": 190,
+     "variables": ["eortc_qlq_c30", "fatigue_score"]}
+  ],
+  "linked_n": {
+    "임상+검사": 240,
+    "임상+영상": 145,
+    "임상+검사+영상": 132
+  }
+}

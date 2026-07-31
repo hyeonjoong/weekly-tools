@@ -142,6 +142,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="예상 중도탈락 비율 (0~1 미만; 권장 모집 N을 상향 보정)",
     )
     p.add_argument(
+        "--max-n", dest="max_n", type=_bounded_int(1_000_000), default=None,
+        metavar="N",
+        help="현실적으로 모집 가능한 최대 표본수 → 초과하는 아이디어에 경고 표시",
+    )
+    p.add_argument(
+        "--feasible-only", dest="feasible_only", action="store_true",
+        help="'충분 가능' 판정 아이디어만 출력 (표본 부족/미상 제외)",
+    )
+    p.add_argument(
         "--effect-scale", dest="effect_scale", type=_positive_float, default=1.0,
         help="가정 효과크기 배율 (>0, 기본 1.0). <1 이면 더 작은 효과 가정 → 권장 N↑",
     )
@@ -215,12 +224,22 @@ def main(argv=None) -> int:
             manifest, alpha=args.alpha, power=args.power, dropout=args.dropout,
             effect_scale=args.effect_scale, templates=templates,
             sided=1 if args.one_sided else 2, n_tests=args.n_tests,
-            repeats=args.repeats, icc=args.icc,
+            repeats=args.repeats, icc=args.icc, max_n=args.max_n,
         )
     except ValueError as exc:
         print(f"분석 오류: {exc}", file=sys.stderr)
         return 2
 
+    # Filter before --top so "top 5 feasible" means five feasible ideas, not
+    # "whatever survives the filter out of the first five".
+    if args.feasible_only:
+        kept = [r for r in results if r.feasible is True]
+        if not kept:
+            manifest.warnings.append(
+                "--feasible-only 로 걸러진 결과가 없습니다 ('충분 가능' 아이디어 "
+                "없음). 표본수를 채우거나 --effect-scale·--max-n 가정을 확인하세요."
+            )
+        results = kept
     if args.top is not None:
         results = results[: args.top]
 
@@ -233,6 +252,8 @@ def main(argv=None) -> int:
         "n_tests": args.n_tests,
         "repeats": args.repeats,
         "icc": args.icc,
+        "max_n": args.max_n,
+        "feasible_only": args.feasible_only,
     }
     report = render_markdown(
         manifest, results, args.alpha, args.power, dropout=args.dropout,
