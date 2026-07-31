@@ -25,7 +25,8 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 __all__ = ["load_long", "load_wide", "load_paired_long", "load_paired_wide",
            "load_binary_long", "load_binary_wide", "load_binary_counts",
-           "load_multi_long", "parse_float", "map_binary_levels",
+           "load_multi_long", "load_ancova_long", "parse_float",
+           "map_binary_levels",
            "summarize_values", "screen_group_labels", "screen_values",
            "sanitize_label"]
 
@@ -758,6 +759,100 @@ def load_multi_long(path: str, value_cols: Sequence[str], group_col: str,
     return out
 
 
+def load_ancova_long(path: str, value_col: str, group_col: str,
+                     covariate_cols: Sequence[str] = (),
+                     factor_cols: Sequence[str] = (),
+                     delimiter: Optional[str] = None,
+                     notes: Optional[List[str]] = None,
+                     missing_out: Optional[Dict[str, int]] = None
+                     ) -> Tuple[List[Tuple[str, float, Tuple[float, ...],
+                                            Tuple[str, ...]]], int]:
+    """Load tidy rows for a covariate-adjusted (ANCOVA) comparison.
+
+        subject,arm,isi_post,isi_base,site
+        S01,drug,9,15,seoul
+
+    Returns ``([(group, y, (covariates...), (factor levels...)), ...], n_dropped)``
+    in file order.  A row is usable only when the outcome, **every** numeric
+    covariate and **every** adjustment factor are present — a regression cannot
+    fill a hole, so this is complete-case by construction, and the count of
+    dropped rows is returned so the report can say how many were lost instead of
+    quietly shrinking the trial.
+    """
+    covariate_cols = list(covariate_cols)
+    factor_cols = list(factor_cols)
+    header, data = _read_rows(path, delimiter, notes)
+    wanted = [value_col, group_col] + covariate_cols + factor_cols
+    for c in wanted:
+        if c not in header:
+            raise ValueError(
+                f"column '{c}' not in header {header}")
+    seen: List[str] = []
+    for c in wanted:
+        if c in seen:
+            raise ValueError(
+                f"열 '{c}' 을(를) 두 가지 역할로 지정했습니다 (결과/그룹/공변량/"
+                f"보정인자 중 하나만 될 수 있습니다).")
+        seen.append(c)
+
+    vi = header.index(value_col)
+    gi = header.index(group_col)
+    ci = [header.index(c) for c in covariate_cols]
+    fi = [header.index(c) for c in factor_cols]
+
+    out: List[Tuple[str, float, Tuple[float, ...], Tuple[str, ...]]] = []
+    missing: Dict[str, int] = {}
+    ungrouped = 0
+    dropped = 0
+    for row in data:
+        grp = row[gi].strip() if gi < len(row) else ""
+        if grp == "" or grp.upper() in _NA_LABELS:
+            ungrouped += 1
+            dropped += 1
+            continue
+        # Key the tally by the *sanitised* label. This dict is emitted verbatim
+        # in the JSON report, and `grp` is a raw cell: point --group at a subject
+        # id column by mistake and every identifier would land in a file that
+        # gets emailed to a collaborator.
+        key = sanitize_label(grp)
+        missing.setdefault(key, 0)
+        y = parse_float(row[vi]) if vi < len(row) else None
+        covs: List[float] = []
+        ok = y is not None
+        for i in ci:
+            v = parse_float(row[i]) if i < len(row) else None
+            if v is None:
+                ok = False
+                break
+            covs.append(v)
+        facs: List[str] = []
+        if ok:
+            for i in fi:
+                cell = _clean_token(row[i]) if i < len(row) else ""
+                if cell == "" or cell.upper() in _NA_LABELS:
+                    ok = False
+                    break
+                facs.append(sanitize_label(cell))
+        if not ok:
+            missing[key] += 1
+            dropped += 1
+            continue
+        out.append((grp, float(y), tuple(covs), tuple(facs)))
+    if not out:
+        raise ValueError(
+            "공변량 보정에 쓸 수 있는 완전한 행이 없습니다 (결과값·공변량·"
+            "보정인자가 모두 채워진 행이 필요합니다) — 열 이름과 자료를 확인하세요.")
+    if missing_out is not None:
+        missing_out.update(missing)
+        if ungrouped:
+            missing_out[""] = ungrouped
+    if notes is not None and ungrouped:
+        notes.append(
+            f"그룹 값이 비어 있거나 결측이라 어느 군에도 배정할 수 없는 행 "
+            f"{ungrouped}개를 제외했습니다.")
+    return out, dropped
+
+
 # --------------------------------------------------------------------------
 # input-integrity screening
 # --------------------------------------------------------------------------
@@ -768,13 +863,17 @@ def load_multi_long(path: str, value_cols: Sequence[str], group_col: str,
 _SENTINELS = (-9.0, -99.0, -999.0, -9999.0, 999.0, 9999.0, 99999.0)
 
 
-def screen_group_labels(labels: Sequence[str], notes: Optional[List[str]]
-                        ) -> None:
+def screen_group_labels(labels: Sequence[str], notes: Optional[List[str]],
+                        what: str = "그룹 라벨") -> None:
     """Warn when two arm labels differ only by case or surrounding whitespace.
 
     ``Active`` and ``active`` are two arms to a computer and one arm to a
     trialist. Left alone, a single mis-typed row silently turns a two-arm trial
     into a three-group Kruskal-Wallis, and nothing in the report says so.
+
+    ``what`` names the column's role, so the same check can cover an ANCOVA
+    adjustment factor (``site``, ``stratum``), where a split level silently
+    burns a degree of freedom instead of adding an arm.
     """
     if notes is None:
         return
@@ -785,9 +884,9 @@ def screen_group_labels(labels: Sequence[str], notes: Optional[List[str]]
         distinct = sorted(set(variants))
         if len(distinct) > 1:
             notes.append(
-                "대소문자/공백만 다른 그룹 라벨이 별개의 군으로 처리되었습니다: "
+                f"대소문자/공백만 다른 {what}이 별개의 수준으로 처리되었습니다: "
                 + ", ".join(repr(v) for v in distinct)
-                + ". 같은 군이라면 CSV에서 표기를 통일하세요.")
+                + ". 같은 것이라면 CSV에서 표기를 통일하세요.")
 
 
 def screen_values(label: str, values: Sequence[float],

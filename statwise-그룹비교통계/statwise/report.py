@@ -9,6 +9,7 @@ import math
 from typing import Any, Dict, List
 
 from .analyze import AnalysisResult
+from .ancova import AncovaResult
 from .binary import BinaryResult
 from .endpoints import CORRECTION_LABELS
 
@@ -16,7 +17,8 @@ __all__ = ["render_text", "render_json", "result_to_dict",
            "render_binary_text", "render_binary_json",
            "binary_to_dict", "binary_sentence",
            "render_multi_text", "render_multi_json", "multi_to_dict",
-           "render_csv", "render_multi_csv"]
+           "render_csv", "render_multi_csv",
+           "render_ancova_text", "render_ancova_json", "ancova_to_dict"]
 
 
 #: Substrings that mark a warning as "the input itself is suspect", as opposed
@@ -265,35 +267,46 @@ def _render_selected(res: AnalysisResult, L) -> None:
 
 
 _MODEL_LABEL = {"student": "Student's t (pooled)", "welch": "Welch",
-                "paired": "paired t"}
+                "paired": "paired t",
+                "ancova": "ANCOVA (공변량 보정 최소제곱)"}
 
 
-def _render_equivalence(res: AnalysisResult, L) -> None:
+def _two_labels(res) -> List[str]:
+    """The compared labels, whichever result type this is."""
+    groups = getattr(res, "groups", None)
+    if groups:
+        return [g.label for g in groups]
+    return list(getattr(res, "group_labels", []))
+
+
+def _render_equivalence(res, L, heading: str = "3b",
+                        estimate: str = "평균차") -> None:
     """Section [3b]: the TOST / non-inferiority verdict, if one was requested."""
     eq = res.equivalence
     if eq is None:
         return
     direction = ""
-    if len(res.groups) == 2:
-        direction = f" ({res.groups[0].label} − {res.groups[1].label})"
+    labels = _two_labels(res)
+    if len(labels) == 2:
+        direction = f" ({labels[0]} − {labels[1]})"
     model = _MODEL_LABEL.get(eq.model, eq.model)
     L("")
     if eq.kind == "tost":
-        L("[3b] 등가성 검정 / Equivalence (TOST)")
+        L(f"[{heading}] 등가성 검정 / Equivalence (TOST)")
         L(f"     등가 마진 margin: [{_num(eq.margin_low)}, {_num(eq.margin_high)}]"
-          f"  (평균차{direction} 기준)")
+          f"  ({estimate}{direction} 기준)")
     else:
         arrow = ("높을수록 좋음 (higher is better)"
                  if eq.direction == "higher_is_better"
                  else "낮을수록 좋음 (lower is better)")
         bound = eq.margin_low if eq.direction == "higher_is_better" else eq.margin_high
-        L("[3b] 비열등성 검정 / Non-inferiority")
-        L(f"     비열등성 마진 margin: {_num(abs(bound))}  (평균차{direction} 기준, {arrow})")
+        L(f"[{heading}] 비열등성 검정 / Non-inferiority")
+        L(f"     비열등성 마진 margin: {_num(abs(bound))}  ({estimate}{direction} 기준, {arrow})")
         side = "하한" if eq.direction == "higher_is_better" else "상한"
         rel = ">" if eq.direction == "higher_is_better" else "<"
         L(f"     → 기각 기준: {int(round(eq.conf * 100))}% 단측 신뢰{side} {rel} "
           f"{_num(bound)}  (점추정값이 아니라 신뢰한계로 판정합니다)")
-    L(f"     평균차 diff = {_num(eq.diff)}, SE = {_num(eq.se)}, "
+    L(f"     {estimate} diff = {_num(eq.diff)}, SE = {_num(eq.se)}, "
       f"df = {_fmt_df(eq.df)}  [t-모형: {model}]")
     if eq.kind == "tost":
         L(f"     H01 (diff ≤ low):  t = {_num(eq.t_low)}, p = {_fmt_p(eq.p_low)}")
@@ -1232,6 +1245,65 @@ def _binary_rows(res: BinaryResult, endpoint: str = "") -> List[List[str]]:
     return rows
 
 
+def _ancova_rows(res, endpoint: str = "") -> List[List[str]]:
+    """Adjusted-mean rows, the omnibus row, and one row per adjusted contrast."""
+    rows: List[List[str]] = []
+    labels = res.group_labels
+    comparison = " vs ".join(labels) if len(labels) <= 3 else \
+        f"{len(labels)} groups"
+    n_all = "|".join(f"{a.label}={a.n}" for a in res.adjusted_means)
+    conf = repr(1.0 - res.alpha)
+    model = "ANCOVA (" + ", ".join(res.covariate_names + res.factor_names) + ")"
+    two = len(labels) == 2
+    rows.append([endpoint, "ancova", comparison, model,
+                 str(res.adjusted_means[0].n) if two else "",
+                 str(res.adjusted_means[1].n) if two else "",
+                 n_all, "group effect (partial eta-squared)",
+                 _csv_num(res.partial_eta_sq), "", "", "",
+                 _csv_num(res.f_statistic),
+                 f"{_csv_num(res.df1)}|{_csv_num(res.df2)}",
+                 _csv_num(res.pvalue), "",
+                 "yes" if res.significant else "no",
+                 "significant difference" if res.significant
+                 else "no significant difference"])
+    for a in res.adjusted_means:
+        rows.append([endpoint, "adjusted-mean", a.label, model, str(a.n), "",
+                     n_all, "adjusted (LS) mean", _csv_num(a.adjusted),
+                     _csv_num(a.ci[0]), _csv_num(a.ci[1]), conf, "",
+                     _csv_num(res.df2), "", "", "", ""])
+    for c in res.contrasts:
+        rows.append([endpoint, "adjusted-contrast", f"{c.a} vs {c.b}", model,
+                     str(c.n_a), str(c.n_b), n_all,
+                     f"adjusted mean difference ({c.a} − {c.b})",
+                     _csv_num(c.diff), _csv_num(c.ci[0]), _csv_num(c.ci[1]),
+                     conf, _csv_num(c.diff / c.se if c.se else float("nan")),
+                     _csv_num(c.df), _csv_num(c.pvalue_raw),
+                     _csv_num(c.pvalue_adj),
+                     "yes" if c.significant else "no",
+                     "significant difference" if c.significant
+                     else "no significant difference"])
+    for e in res.covariate_effects:
+        rows.append([endpoint, "covariate", e.name, model, "", "", n_all,
+                     "slope" if e.kind == "numeric" else "factor level effect",
+                     _csv_num(e.coef), _csv_num(e.ci[0]), _csv_num(e.ci[1]),
+                     conf, _csv_num(e.t), _csv_num(res.df2),
+                     _csv_num(e.pvalue), "", "", ""])
+    if res.equivalence is not None:
+        eq = res.equivalence
+        rows.append([endpoint, eq.kind, comparison, model + " + margin",
+                     str(res.adjusted_means[0].n),
+                     str(res.adjusted_means[1].n) if len(labels) > 1 else "",
+                     n_all, "adjusted mean difference", _csv_num(eq.diff),
+                     _csv_num(eq.ci_low), _csv_num(eq.ci_high), repr(eq.conf),
+                     "", _csv_num(eq.df), _csv_num(eq.pvalue), "",
+                     "yes" if eq.concluded else "no",
+                     ("equivalence concluded" if eq.kind == "tost"
+                      else "non-inferiority concluded") if eq.concluded
+                     else ("equivalence not concluded" if eq.kind == "tost"
+                           else "non-inferiority not concluded")])
+    return rows
+
+
 def _rows_to_csv(rows: List[List[str]]) -> str:
     buf = io.StringIO()
     writer = csv.writer(buf, lineterminator="\n")
@@ -1244,7 +1316,285 @@ def render_csv(res) -> str:
     """A tidy one-row-per-comparison CSV of the results (for Excel / R)."""
     if isinstance(res, BinaryResult):
         return _rows_to_csv(_binary_rows(res))
+    if isinstance(res, AncovaResult):
+        return _rows_to_csv(_ancova_rows(res))
     return _rows_to_csv(_analysis_rows(res))
+
+
+# --------------------------------------------------------------------------
+# ANCOVA rendering
+# --------------------------------------------------------------------------
+
+def _p_phrase(p: float, label: str = "p") -> str:
+    """"p < 0.001" / "p = 0.031" — the form a manuscript sentence needs."""
+    if p != p:
+        return f"{label} = NaN"
+    return f"{label} < 0.001" if p < 0.001 else f"{label} = {p:.3f}"
+
+
+def _ancova_sentence(res) -> str:
+    """A paste-ready Methods+Results sentence for the adjusted comparison."""
+    terms = []
+    if res.covariate_names:
+        terms.append(", ".join(res.covariate_names) + "을(를) 공변량으로")
+    if res.factor_names:
+        terms.append(", ".join(res.factor_names) + "을(를) 보정인자로")
+    conf = int(round((1.0 - res.alpha) * 100))
+    parts = [
+        f"{res.outcome}은(는) {', '.join(terms)} 포함한 공분산분석"
+        f"(ANCOVA)으로 비교하였다."]
+    if len(res.adjusted_means) == 2 and res.contrasts:
+        c = res.contrasts[0]
+        a = next(m for m in res.adjusted_means if m.label == c.a)
+        b = next(m for m in res.adjusted_means if m.label == c.b)
+        parts.append(
+            f"보정평균은 {a.label} {_num(a.adjusted)} "
+            f"({conf}% CI {_num(a.ci[0])}–{_num(a.ci[1])}), "
+            f"{b.label} {_num(b.adjusted)} "
+            f"({conf}% CI {_num(b.ci[0])}–{_num(b.ci[1])})였고, "
+            f"보정된 평균차({c.a} − {c.b})는 {_num(c.diff)} "
+            f"({conf}% CI {_num(c.ci[0])}–{_num(c.ci[1])}), "
+            f"{_p_phrase(c.pvalue_raw)}였다.")
+    else:
+        parts.append(
+            f"그룹 효과는 F({_fmt_df(res.df1)}, {_fmt_df(res.df2)})="
+            f"{_num(res.f_statistic)}, {_p_phrase(res.pvalue)}, "
+            f"부분 η²={_num(res.partial_eta_sq)}였다 "
+            f"(기준군 {res.reference}, 쌍별 비교는 "
+            f"{CORRECTION_LABELS.get(res.correction, res.correction)} 보정).")
+    verdict = ("유의한 차이가 있었다" if res.significant
+               else "유의한 차이는 관찰되지 않았다")
+    parts.append(f"유의수준 {res.alpha}에서 {verdict}.")
+    if res.slopes is not None and res.slopes.homogeneous is False:
+        parts.append(
+            "다만 기울기 동질성 가정이 기각되어(그룹×공변량 상호작용 "
+            f"{_p_phrase(res.slopes.pvalue)}) 하나의 보정된 차이로 요약하는 데는 "
+            "한계가 있다.")
+    return " ".join(parts)
+
+
+def render_ancova_text(res) -> str:
+    lines: List[str] = []
+    L = lines.append
+    L("=" * 66)
+    L("  statwise — 공변량 보정 그룹 비교 (ANCOVA) / Adjusted comparison")
+    L("=" * 66)
+
+    w = max(16, min(30, max((len(a.label) for a in res.adjusted_means),
+                            default=0) + 1))
+    conf = int(round((1.0 - res.alpha) * 100))
+
+    # Size the numeric columns to their own content. Fixed 9/11-wide columns
+    # fused every number into one digit string as soon as a value reached ~1e6,
+    # which is ordinary for viral load (copies/mL), KRW amounts and raw counts --
+    # the report is the deliverable, so an unreadable table is a real defect.
+    def _cw(values, minimum: int) -> int:
+        widest = max((len(_num(v)) for v in values
+                      if v == v and math.isfinite(v)), default=0)
+        return max(minimum, min(_MAX_NUM_WIDTH + 4, widest + 2))
+
+    def _ciw(pairs) -> int:
+        widest = max((len(f"[{_num(lo)}, {_num(hi)}]") for lo, hi in pairs),
+                     default=0)
+        return max(23, min(2 * _MAX_NUM_WIDTH + 8, widest + 2))
+
+    L("")
+    L("[1] 모형 / Model")
+    L(f"    결과변수 outcome : {res.outcome}")
+    L(f"    공변량 covariates: "
+      f"{', '.join(res.covariate_names) if res.covariate_names else '(없음)'}")
+    L(f"    보정인자 factors : "
+      f"{', '.join(res.factor_names) if res.factor_names else '(없음)'}")
+    if len(res.adjusted_means) > 2:
+        L(f"    기준군 reference : {res.reference}  "
+          f"[기준군 대비 차이 = (다른 군 − {res.reference})]")
+        L(f"      ↳ 아래 [4]에는 기준군을 포함하지 않는 쌍도 **모두** 나오며, "
+          f"다중비교 보정은 그 전체 가족에 적용됩니다.")
+    else:
+        L(f"    기준군 reference : {res.reference}  "
+          f"[차이 = (다른 군 − {res.reference})]")
+    L(f"    분석 n = {res.n_used}"
+      + (f" (결측으로 제외 {res.n_dropped}행)" if res.n_dropped else ""))
+    if any(res.missing.values()):
+        detail = ", ".join(f"{g or '(군 없음)'}={c}"
+                           for g, c in res.missing.items() if c)
+        L(f"    군별 제외 행수 excluded rows: {detail}")
+    L(f"    잔차 표준편차 σ = {_num(res.sigma)}, "
+      f"R²={_num(res.r_squared)}, 수정 R²={_num(res.adj_r_squared)}")
+
+    L("")
+    L("[2] 보정평균 / Adjusted (LS) means")
+    mw = _cw([a.raw_mean for a in res.adjusted_means]
+             + [a.adjusted for a in res.adjusted_means], 11)
+    sw = _cw([a.se for a in res.adjusted_means], 9)
+    cw = _ciw([a.ci for a in res.adjusted_means])
+    vw = _cw([v for a in res.adjusted_means for v in a.covariate_means], 11)
+    cov_head = "".join(f"{_elide(c, vw - 1):>{vw}}" for c in res.covariate_names)
+    L(f"    {'group':<{w}}{'n':>5}{'raw mean':>{mw}}{'adjusted':>{mw}}"
+      f"{'SE':>{sw}}{f'{conf}% CI':>{cw}}{cov_head}")
+    for a in res.adjusted_means:
+        ci = f"[{_num(a.ci[0])}, {_num(a.ci[1])}]"
+        covs = "".join(f"{_num(v, 2):>{vw}}" for v in a.covariate_means)
+        L(f"    {_elide(a.label, w):<{w}}{a.n:>5}{_num(a.raw_mean):>{mw}}"
+          f"{_num(a.adjusted):>{mw}}{_num(a.se):>{sw}}{ci:>{cw}}{covs}")
+    if res.covariate_names:
+        L(f"    (마지막 열들 = 그룹별 공변량 평균 — 기저 균형을 눈으로 확인하세요)")
+
+    L("")
+    L("[3] 그룹 효과 / Omnibus test of the group term")
+    L(f"    F({_fmt_df(res.df1)}, {_fmt_df(res.df2)})={_num(res.f_statistic)}, "
+      f"p={_fmt_p(res.pvalue)}, 부분 η²={_num(res.partial_eta_sq)}")
+    sig = "통계적으로 유의함" if res.significant else "유의하지 않음"
+    L(f"    유의수준 α={res.alpha}: {sig}")
+
+    L("")
+    L("[4] 보정된 그룹 차이 / Adjusted differences")
+    label = CORRECTION_LABELS.get(res.correction, res.correction)
+    multi = len(res.contrasts) > 1
+    dw = _cw([c.diff for c in res.contrasts], 11)
+    sw2 = _cw([c.se for c in res.contrasts], 9)
+    cw2 = _ciw([c.ci for c in res.contrasts])
+    head = (f"    {'comparison':<{2 * w + 4}}{'차이':>{dw}}{'SE':>{sw2}}"
+            f"{f'{conf}% CI':>{cw2}}")
+    head += f"{'p':>9}" + (f"{'p(adj)':>9}" if multi else "")
+    L(head)
+    for c in res.contrasts:
+        ci = f"[{_num(c.ci[0])}, {_num(c.ci[1])}]"
+        star = " *" if c.significant else ""
+        line = (f"    {_elide(c.a + ' − ' + c.b, 2 * w + 3):<{2 * w + 4}}"
+                f"{_num(c.diff):>{dw}}{_num(c.se):>{sw2}}{ci:>{cw2}}"
+                f"{_fmt_p(c.pvalue_raw):>9}")
+        if multi:
+            line += f"{_fmt_p(c.pvalue_adj):>9}"
+        L(line + star)
+    if multi:
+        L(f"    (* = {label} 보정 후 α={res.alpha}에서 유의. 신뢰구간은 "
+          f"**비교 1건 기준(비보정)** 이므로 별표와 결론이 다를 수 있습니다.)")
+
+    if res.covariate_effects:
+        L("")
+        L("[5] 공변량 효과 / Covariate & factor effects")
+        tw = max(20, min(40, max(len(e.name) for e in res.covariate_effects) + 1))
+        bw = _cw([e.coef for e in res.covariate_effects], 11)
+        sw3 = _cw([e.se for e in res.covariate_effects], 9)
+        cw3 = _ciw([e.ci for e in res.covariate_effects])
+        L(f"    {'term':<{tw}}{'coef':>{bw}}{'SE':>{sw3}}"
+          f"{f'{conf}% CI':>{cw3}}{'t':>9}{'p':>9}")
+        for e in res.covariate_effects:
+            ci = f"[{_num(e.ci[0])}, {_num(e.ci[1])}]"
+            L(f"    {_elide(e.name, tw):<{tw}}"
+              f"{_num(e.coef):>{bw}}{_num(e.se):>{sw3}}{ci:>{cw3}}"
+              f"{_num(e.t):>9}{_fmt_p(e.pvalue):>9}")
+
+    L("")
+    L("[6] 가정 점검 / Assumption checks")
+    s = res.slopes
+    if s is not None and s.pvalue is not None:
+        verdict = ("기울기 동질성 위배 근거 없음" if s.homogeneous
+                   else "기울기 동질성 위배 의심")
+        L(f"    기울기 동질성(그룹×공변량): F({_fmt_df(s.df1)}, "
+          f"{_fmt_df(s.df2)})={_num(s.statistic)}, p={_fmt_p(s.pvalue)}"
+          f"  → {verdict}")
+    elif s is not None:
+        L(f"    기울기 동질성: (건너뜀) {s.note}")
+    if res.resid_normal_p is not None:
+        verdict = ("정규성 위배 근거 없음" if res.resid_normal_p > res.alpha_norm
+                   else "정규성 위배 의심")
+        L(f"    잔차 정규성 Shapiro-Wilk: p={_fmt_p(res.resid_normal_p)}"
+          f"  → {verdict}")
+    else:
+        L("    잔차 정규성: (건너뜀 — n<3 또는 n>5000)")
+    if res.resid_levene_p is not None and res.resid_levene_p == res.resid_levene_p:
+        verdict = ("등분산 위배 근거 없음" if res.resid_levene_p > res.alpha_norm
+                   else "등분산 위배 의심")
+        L(f"    잔차 등분산 Levene(median): p={_fmt_p(res.resid_levene_p)}"
+          f"  → {verdict}")
+
+    _render_equivalence(res, L, heading="7", estimate="보정된 평균차")
+
+    _render_warnings(res, L)
+    _render_sentence(res, L, _ancova_sentence(res))
+    L("")
+    return "\n".join(lines)
+
+
+def ancova_to_dict(res) -> Dict[str, Any]:
+    out: Dict[str, Any] = {
+        "schema": "statwise/ancova/1",
+        "analysis": "ancova",
+        "outcome": res.outcome,
+        "covariates": list(res.covariate_names),
+        "factors": list(res.factor_names),
+        "reference": res.reference,
+        "alpha": res.alpha,
+        "alpha_norm": res.alpha_norm,
+        "n_used": res.n_used,
+        "n_dropped": res.n_dropped,
+        "model": {
+            "sigma": _jnum(res.sigma),
+            "r_squared": _jnum(res.r_squared),
+            "adj_r_squared": _jnum(res.adj_r_squared),
+            "df_resid": _jnum(res.df2),
+        },
+        "group_effect": {
+            "f": _jnum(res.f_statistic),
+            "df1": _jnum(res.df1),
+            "df2": _jnum(res.df2),
+            "pvalue": _jnum(res.pvalue),
+            "partial_eta_squared": _jnum(res.partial_eta_sq),
+            "significant": bool(res.significant),
+        },
+        "adjusted_means": [
+            {"label": a.label, "n": a.n, "raw_mean": _jnum(a.raw_mean),
+             "adjusted": _jnum(a.adjusted), "se": _jnum(a.se),
+             "ci_low": _jnum(a.ci[0]), "ci_high": _jnum(a.ci[1]),
+             "covariate_means": [_jnum(v) for v in a.covariate_means]}
+            for a in res.adjusted_means],
+        "contrasts": [
+            {"a": c.a, "b": c.b, "difference": _jnum(c.diff), "se": _jnum(c.se),
+             "df": _jnum(c.df), "ci_low": _jnum(c.ci[0]),
+             "ci_high": _jnum(c.ci[1]), "pvalue": _jnum(c.pvalue_raw),
+             "pvalue_adj": _jnum(c.pvalue_adj),
+             "significant": bool(c.significant), "n_a": c.n_a, "n_b": c.n_b}
+            for c in res.contrasts],
+        "covariate_effects": [
+            {"name": e.name, "kind": e.kind, "coef": _jnum(e.coef),
+             "se": _jnum(e.se), "t": _jnum(e.t), "pvalue": _jnum(e.pvalue),
+             "ci_low": _jnum(e.ci[0]), "ci_high": _jnum(e.ci[1])}
+            for e in res.covariate_effects],
+        "assumptions": {
+            "slope_homogeneity": (
+                None if res.slopes is None else {
+                    "f": _jnum(res.slopes.statistic),
+                    "df1": _jnum(res.slopes.df1),
+                    "df2": _jnum(res.slopes.df2),
+                    "pvalue": _jnum(res.slopes.pvalue),
+                    "homogeneous": res.slopes.homogeneous,
+                    "note": res.slopes.note}),
+            "residual_normality_p": _jnum(res.resid_normal_p),
+            "residual_levene_p": _jnum(res.resid_levene_p),
+        },
+        "correction": res.correction,
+        "missing": dict(res.missing),
+        "warnings": list(res.warnings),
+        "sentence": _ancova_sentence(res),
+    }
+    if res.equivalence is not None:
+        eq = res.equivalence
+        out["equivalence"] = {
+            "kind": eq.kind, "difference": _jnum(eq.diff),
+            "ci_low": _jnum(eq.ci_low), "ci_high": _jnum(eq.ci_high),
+            "conf": _jnum(eq.conf), "pvalue": _jnum(eq.pvalue),
+            "df": _jnum(eq.df), "concluded": bool(eq.concluded),
+            "margin_low": _jnum(eq.margin_low),
+            "margin_high": _jnum(eq.margin_high),
+            "direction": eq.direction, "model": eq.model}
+    return out
+
+
+def render_ancova_json(res, indent: int = 2) -> str:
+    return json.dumps(ancova_to_dict(res), ensure_ascii=False, indent=indent,
+                      allow_nan=False)
 
 
 def render_multi_csv(multi) -> str:

@@ -6,7 +6,7 @@
 실행**하고, 효과크기(신뢰구간 포함 — 모든 구간의 신뢰수준은 `--alpha` 를 따릅니다)와
 **논문에 붙일 문장 초안**까지 출력합니다.
 
-연속형 결과만이 아닙니다. 임상시험 프로토콜에 실제로 들어 있는 나머지 세 가지도
+연속형 결과만이 아닙니다. 임상시험 프로토콜에 실제로 들어 있는 나머지 네 가지도
 한 도구에서 처리합니다:
 
 - **이진(반응자/이상반응) 결과** — `--binary`: 반응률(Wilson CI), 카이제곱/Fisher
@@ -15,6 +15,9 @@
   아니라 **"임상적으로 같다/뒤지지 않는다"** 를 TOST로 검정.
 - **여러 엔드포인트 동시 분석** — `--values isi,psqi,hrv`: 엔드포인트별로 알맞은
   검정을 돌리고 **엔드포인트 간 다중비교까지 보정**한 요약표.
+- **공변량 보정(ANCOVA)** — `--covariate isi_base --adjust-factor site`: RCT의 표준
+  1차 분석. 보정평균(LS mean)·보정된 군간 차이·공변량 기울기와 **기울기 동질성**
+  점검까지.
 
 결과는 사람이 읽는 텍스트뿐 아니라 **JSON**과 **정돈된 CSV 결과표**로도 뽑아
 파이프라인이나 엑셀에 바로 넣을 수 있습니다(`--format`, `--output`).
@@ -181,7 +184,7 @@ statwise examples/isi_change_by_dose.csv --wide
     eta-squared = 0.758  (large)
 
 [5] 사후검정 / Post-hoc (Holm-Bonferroni 보정)
-    comparison                        n  difference                  95% CI   p(adj)   effect sig
+    comparison                        n  difference             95% CI(비보정)   p(adj)   effect sig
     low vs mid                    12/12       -3.00          [-4.22, -1.78]   <0.001    -2.00   *
     low vs high                   12/12       -6.00          [-7.22, -4.78]   <0.001    -4.01   *
     mid vs high                   12/12       -3.00          [-4.22, -1.78]   <0.001    -2.00   *
@@ -313,7 +316,109 @@ statwise examples/isi_pre_post_paired.csv --paired --value isi --group time \
   표시**합니다.
 - **마진은 통계가 아니라 임상적 결정입니다.** 도구는 절대 대신 정해 주지 않습니다.
 
-### 5) 여러 엔드포인트 한 번에 + 엔드포인트 간 다중비교 보정
+### 5) 공변량 보정(ANCOVA) — RCT의 표준 1차 분석
+
+무작위배정 임상시험에서 연속형 1차 평가변수의 **사전 지정된 1차 분석은 t-검정이
+아니라 공분산분석(ANCOVA)** 인 경우가 대부분입니다: 사후 측정값을 **치료군 + 그
+환자 자신의 기저값**(+ 층화인자)으로 회귀합니다. ICH E9 §5.7이 다루는 **사전 지정된
+공변량 보정**이 바로 이것입니다(E9가 ANCOVA를 의무화하는 것은 아니며, 보정을 사전에
+정할 것과 **보정하지 않은 분석도 함께 제시할 것**을 요구합니다). 장식이 아닙니다 —
+기저값과 결과의 상관이 r이면 잔차분산의 약 r²가 제거되어 잔차분산이 커지는 일은 없고,
+기저 상관이 웬만큼 있으면 사후값 비교보다도 변화량(change score) t-검정보다도 **검정력이
+높습니다**(다만 자유도를 1 더 쓰므로 상관이 0에 가까운 소표본에서는 아주 약간 손해).
+또 기저 불균형이 있을 때 변화량 분석과 달리 **편향되지 않습니다**(Lord's paradox).
+
+```bash
+# 기저 ISI로 보정한 3군 비교 (기준군 = placebo), 기관(site)까지 층화 보정
+statwise examples/isi_ancova_baseline.csv \
+    --value isi_week8 --group arm \
+    --covariate isi_base --adjust-factor site --reference placebo
+```
+
+```
+[1] 모형 / Model
+    결과변수 outcome : isi_week8
+    공변량 covariates: isi_base
+    보정인자 factors : site
+    기준군 reference : placebo  [기준군 대비 차이 = (다른 군 − placebo)]
+      ↳ 아래 [4]에는 기준군을 포함하지 않는 쌍도 **모두** 나오며, 다중비교 보정은 그 전체 가족에 적용됩니다.
+    분석 n = 88 (결측으로 제외 2행)
+    잔차 표준편차 σ = 2.441, R²=0.759, 수정 R²=0.747
+
+[2] 보정평균 / Adjusted (LS) means
+    group               n   raw mean   adjusted       SE                 95% CI   isi_base
+    drug_low           30     14.077     14.038    0.446       [13.151, 14.924]      17.10
+    drug_high          28     12.225     12.221    0.461       [11.303, 13.139]      17.07
+    placebo            30     16.463     16.506    0.446       [15.619, 17.392]      17.03
+    (마지막 열들 = 그룹별 공변량 평균 — 기저 균형을 눈으로 확인하세요)
+
+[3] 그룹 효과 / Omnibus test of the group term
+    F(2, 83)=22.571, p=<0.001, 부분 η²=0.352
+    유의수준 α=0.05: 통계적으로 유의함
+
+[4] 보정된 그룹 차이 / Adjusted differences
+    comparison                                   차이       SE                 95% CI        p   p(adj)
+    drug_low − drug_high                      1.817    0.642         [0.541, 3.093]    0.006    0.006 *
+    drug_low − placebo                       -2.468    0.630       [-3.722, -1.214]   <0.001   <0.001 *
+    drug_high − placebo                      -4.285    0.642       [-5.561, -3.009]   <0.001   <0.001 *
+    (* = Holm-Bonferroni (family-wise) 보정 후 α=0.05에서 유의. 신뢰구간은 **비교 1건 기준(비보정)** 이므로 별표와 결론이 다를 수 있습니다.)
+
+[5] 공변량 효과 / Covariate & factor effects
+    term                         coef       SE                 95% CI        t        p
+    isi_base                    1.221    0.083         [1.056, 1.386]   14.707   <0.001
+    site=seoul (vs busan)      -0.553    0.526        [-1.599, 0.493]   -1.051    0.296
+
+[6] 가정 점검 / Assumption checks
+    기울기 동질성(그룹×공변량): F(2, 81)=0.092, p=0.912  → 기울기 동질성 위배 근거 없음
+    잔차 정규성 Shapiro-Wilk: p=0.160  → 정규성 위배 근거 없음
+```
+
+무엇을 계산하는가:
+
+- **보정평균(adjusted / LS mean)** — 수치 공변량을 **전체 평균**에, 보정인자는 각
+  수준에 **동일 가중치**를 주어 예측한 값(`emmeans` 기본 규약)과 그 신뢰구간. 관측된
+  군평균(raw mean)과 나란히 찍히므로 보정이 무엇을 바꿨는지 바로 보입니다.
+- **보정된 군간 차이**와 신뢰구간·p값. 3군 이상이면 쌍별 비교에 Holm(기본) 또는 BH
+  보정을 적용합니다.
+- **그룹 항의 omnibus F 검정** — 그룹 더미를 뺀 모형을 다시 적합해 비교하는 방식
+  (상호작용이 없는 모형이므로 Type II = Type III)과 부분 η².
+- **공변량·보정인자 계수**와 t-검정 — 보정이 실제로 값어치가 있었는지 읽을 수 있습니다.
+- **기울기 동질성 검정** — 그룹 × 공변량 상호작용을 넣은 모형과의 F 검정 (수치
+  공변량이 있을 때만; `--adjust-factor` 만 쓰면 검정할 기울기가 없어 생략하고 그렇게
+  표시합니다). 유의하면
+  "치료효과가 기저값에 따라 다르다"는 뜻이므로 하나의 보정된 차이로 요약하지 말라고
+  경고합니다.
+- **잔차** 정규성(Shapiro-Wilk)과 **잔차** 등분산(Levene) — 원자료가 아니라 모형이
+  실제로 가정하는 대상에 대해 점검합니다.
+- `--equivalence-margin` / `--ni-margin` 을 함께 주면 **보정된 평균차**에 대해 TOST /
+  비열등성 검정을 수행합니다(**2군일 때만**; 3군 이상이면 경고와 함께 건너뜁니다).
+
+반드시 알아야 할 것:
+
+- **공변량은 무작위배정 *전에* 측정된 것이어야 합니다.** 치료 시작 후에 측정한 값
+  (중간 방문 수치, 순응도, 부작용 발생 여부)을 넣으면 매개변수·충돌변수를 통해
+  치료효과가 편향되고, **그 편향은 자료만으로는 절대 확인할 수 없습니다.** 도구는
+  이 경고를 매번 출력합니다 — 산술로는 두 경우를 구분할 방법이 없기 때문입니다.
+- ANCOVA는 결과–공변량 관계가 **직선**이라고 가정합니다. 곡선이면 보정이 불완전합니다.
+- 결측이 있는 행은 **완전자료(complete-case)** 로 제외하고, 제외한 행 수를 보고합니다.
+- 공변량이 그룹 안에서 상수이거나 다른 공변량과 중복(선형종속)이면 조용히 이상한 값을
+  내놓지 않고 **거부**합니다. 잔차가 사실상 0이 되면(결과값 자체가 들어간 변수를 넣은
+  전형적 실수) 그 사실도 경고합니다.
+- 3군 이상이면 **모든 쌍**(k(k−1)/2개)의 보정된 차이가 나오고, 다중비교 보정은 그
+  **전체 가족**에 적용됩니다. `--reference` 는 부호와 기준 코딩만 고정할 뿐 비교 대상을
+  기준군 대비로 **줄이지 않습니다**. `--reference` 를 생략하면 기준군은 CSV에서 **마지막
+  으로 처음 등장한 군**이 되므로, 부호를 재현하려면 항상 지정하세요.
+- `--covariate` / `--adjust-factor` 는 long 형식 전용이라 `--wide`, `--paired`,
+  `--binary`, `--columns` 와 함께 쓸 수 없고, **`--values`(다중 엔드포인트)와도 함께 쓸
+  수 없습니다** — 보정이 필요한 엔드포인트는 하나씩 따로 실행한 뒤 p값을 직접 보정하세요.
+  `--no-posthoc` 와 `--test` 도 이 경로에는 적용되지 않으며, 조용히 무시하지 않고
+  오류로 거부합니다.
+- 군이 60개를 넘으면 계산·보고 양쪽에서 의미가 없어 **거부**합니다 (`--group` 이 대상
+  ID나 날짜 열을 가리키는 실수를 잡기 위한 안전장치).
+- 그룹 비교만 목적이라면 `--covariate` 없이 쓰던 자동 선택 경로가 그대로 유효합니다.
+  ANCOVA는 **사전 지정된 모형**이므로 정규성·등분산으로 검정을 바꾸지 않습니다.
+
+### 6) 여러 엔드포인트 한 번에 + 엔드포인트 간 다중비교 보정
 
 엔드포인트 8개를 α=0.05로 각각 검정하면 **적어도 하나가 우연히 유의할 확률이 약 34%**
 입니다. `--values` 는 엔드포인트별로 알맞은 검정을 돌린 뒤 **엔드포인트 패밀리 전체에
@@ -355,7 +460,8 @@ statwise examples/hrv_two_arm.csv --value rmssd_ms --group arm --format json
 `schema`, 기술통계, 선택된 검정, 효과크기(±CI), 사후검정, 경고, 논문 문장을 담은
 안정적인 JSON을 출력합니다(NaN/Inf는 `null` 로 안전 처리). 스크립트에서 `jq` 등으로
 바로 파싱할 수 있습니다. 스키마는 모드별로 `statwise/analysis/1`(연속형),
-`statwise/binary/1`(이진), `statwise/multi/1`(다중 엔드포인트) 입니다.
+`statwise/binary/1`(이진), `statwise/multi/1`(다중 엔드포인트),
+`statwise/ancova/1`(공변량 보정) 입니다.
 
 ### CSV 결과표 · 파일로 저장
 
@@ -377,7 +483,9 @@ ci_low, ci_high, ci_conf, statistic, df, pvalue, pvalue_adj, significant, verdic
 
 `kind` 로 행의 종류를 구분합니다: `continuous` / `paired` / `binary`(주검정 1행),
 `binary-effect`(같은 비교의 RR·OR·NNT — 이진 결과 하나가 여러 행이 됩니다),
-`post-hoc`(사후검정), `tost` / `noninferiority`(마진 검정).
+`post-hoc`(사후검정), `tost` / `noninferiority`(마진 검정), 그리고 공변량 보정에서는
+`ancova`(그룹 효과 1행) / `adjusted-mean`(군별 보정평균) / `adjusted-contrast`(보정된
+군간 차이) / `covariate`(공변량·보정인자 계수).
 
 ### 옵션
 
@@ -392,9 +500,11 @@ ci_low, ci_high, ci_conf, statistic, df, pvalue, pvalue_adj, significant, verdic
 | `--alpha 0.05` | 유의수준 |
 | `--alpha-norm 0.05` | 정규성/등분산 판정용 유의수준 |
 | `--correction holm\|bh` | 사후검정 다중비교 보정 (Holm 기본 / BH=FDR) |
-| `--no-posthoc` | 3그룹 이상에서 사후검정 생략 |
+| `--no-posthoc` | 3그룹 이상에서 사후검정 생략 (ANCOVA 경로에는 적용 불가) |
 | `--reference GROUP` | (독립 비교) 기준(대조) 그룹 고정 — 차이 = (다른 그룹 − 기준) |
 | `--test auto\|student\|welch\|mannwhitney` | (연속형 2그룹) 검정을 **사전 지정** (SAP용) |
+| `--covariate a,b` | 공변량 보정(ANCOVA) — 기저값 등 **수치형** 공변량 열 (long 형식 전용) |
+| `--adjust-factor site,stratum` | (ANCOVA) **범주형** 보정인자 열 (기관·층화인자). 단독 사용 가능 |
 | `--event-is benefit\|harm` | (`--binary`) 사건이 이로운지 해로운지. 이름은 **사건의 성격과 위험차의 부호를 함께** 봐서 정합니다 — 이로운 사건인데 시험군에서 *덜* 나왔다면 NNH가 맞습니다 |
 | `--overwrite` | (`--output`) 기존 파일 덮어쓰기 허용 |
 | `--values a,b,c` | 결과 열 여러 개를 한 번에 (엔드포인트 간 보정 포함) |
@@ -506,9 +616,14 @@ ICH E9를 따르는 규제 대상 분석이라면 **`--test` 로 사전 지정�
   주검정이 순위검정일 때의 TOST는 평균차 t-모형 근사이며 경고를 표시합니다.
   **비율(이진 결과)에 대한 등가/비열등성 검정은 아직 미구현**이며, 시도하면 조용히
   다른 계산을 하지 않고 명시적으로 거부합니다.
-- **대응 이진 자료(McNemar)**, **생존분석**, **공변량 보정(ANCOVA)**, **반복측정
-  ANOVA/혼합모형**, **다중대체(multiple imputation)** 는 범위 밖입니다. 결측은
-  분석에서 제외하고 그 개수를 CONSORT식으로 보고할 뿐, 대체하지 않습니다.
+- **공변량 보정(ANCOVA)** 은 `--covariate` / `--adjust-factor` 로 지원합니다. 단
+  **고정효과 선형모형 하나**만 적합합니다: 그룹 × 공변량 상호작용을 포함한 모형,
+  반복측정/혼합모형(random effect), 비선형 공변량 항은 범위 밖입니다. 기울기
+  동질성이 기각되면 그 사실을 경고로 알릴 뿐 모형을 바꾸지 않습니다. 또 ANCOVA는
+  **완전자료(complete-case)** 로 계산하며, 제외된 행 수를 보고할 뿐 대체하지 않습니다.
+- **대응 이진 자료(McNemar)**, **생존분석**, **반복측정 ANOVA/혼합모형**,
+  **다중대체(multiple imputation)** 는 범위 밖입니다. 결측은 분석에서 제외하고 그
+  개수를 CONSORT식으로 보고할 뿐, 대체하지 않습니다.
 - **다중 엔드포인트 보정**은 omnibus p값들에 대해서만 적용합니다(엔드포인트 안의
   사후검정은 별도 패밀리). 계층적 검정(gatekeeping)이나 사전 지정 순서 검정은
   지원하지 않습니다.
@@ -573,6 +688,18 @@ d = result_to_dict(res)          # JSON-safe dict (NaN/Inf -> None)
 
 b = compare_binary([("device", (15, 24)), ("sham", (5, 24))])
 print(render_binary_text(b))
+
+# 공변량 보정 (ANCOVA): 한 행이 한 대상
+from statwise import AncovaRecord, run_ancova
+from statwise.report import render_ancova_text
+# 한 군당 최소 2행씩 — 실제로는 전체 대상 목록이 들어갑니다
+records = [AncovaRecord("drug", 11.8, (14.0,), ("busan",)),
+           AncovaRecord("drug", 14.2, (17.0,), ("seoul",)),
+           AncovaRecord("placebo", 16.1, (15.0,), ("seoul",)),
+           AncovaRecord("placebo", 19.4, (18.0,), ("busan",))]
+anc = run_ancova(records, covariate_names=["base"], factor_names=["site"],
+                 outcome="isi_week8", reference="placebo")
+print(render_ancova_text(anc))
 ```
 
 JSON 출력에는 텍스트 리포트에 없는 항목도 들어 있습니다 — 그룹별 평균의 신뢰구간
@@ -583,7 +710,7 @@ JSON 출력에는 텍스트 리포트에 없는 항목도 들어 있습니다 �
 ## Tests
 
 ```bash
-python3 -m pytest    # 517 tests, 전부 오프라인, SciPy/statsmodels 참조값과 대조
+python3 -m pytest    # 609 tests, 전부 오프라인, SciPy/statsmodels 참조값과 대조
 ```
 
 ## License
