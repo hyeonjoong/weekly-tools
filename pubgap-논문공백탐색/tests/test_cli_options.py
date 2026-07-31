@@ -105,6 +105,8 @@ _CSV_EXPECTED_HEADER = {
     "evidence": "tier,label,count,share",
     "topic-evidence": "term,n_articles,n_interventional",
     "angles": "term,qualifier,n_term",
+    "population": "term,group,axis,label,n_articles,observed",
+    "population-profile": "group,axis,label,count,base,share",
 }
 
 

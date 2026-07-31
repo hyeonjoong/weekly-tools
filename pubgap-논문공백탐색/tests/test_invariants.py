@@ -16,6 +16,10 @@ from pubgap.report import build_report, json_safe, render_csv, render_markdown
 from pubgap.report import CSV_SECTIONS
 
 TERMS = [f"Term {i}" for i in range(14)]
+# 체크 태그를 어휘에 넣어야 **대상집단 축**도 이 성질검사(표 구조·JSON 유효성·
+# 모든 CSV 섹션)에 함께 걸린다. 넣기 전에는 그 절이 늘 비어 통과했다.
+CHECK_TAG_TERMS = ["Humans", "Male", "Female", "Adult", "Middle Aged", "Aged",
+                   "Aged, 80 and over", "Child", "Animals"]
 PUB_TYPES = [
     [], ["Journal Article"],
     ["Journal Article", "Randomized Controlled Trial"],
@@ -38,7 +42,8 @@ def _random_corpus(rng: random.Random, n_max: int = 40):
                 year=year,
                 journal=rng.choice(["J A", "J B", "저널 | C"]),
                 title="t",
-                mesh=rng.sample(TERMS, k),
+                mesh=(rng.sample(TERMS, k)
+                      + rng.sample(CHECK_TAG_TERMS, rng.randint(0, 4))),
                 keywords=rng.sample(["kw1", "kw2"], rng.randint(0, 2)),
                 pub_types=list(rng.choice(PUB_TYPES)),
             )

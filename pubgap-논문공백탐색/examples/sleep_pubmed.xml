@@ -1,7 +1,9 @@
 <?xml version="1.0" ?>
 <!-- 합성(synthetic) 예시 데이터입니다. 실제 PubMed 논문이 아니며(PMID 3000000x는 가짜),
      pubgap 의 동향/공백 분석을 오프라인으로 시연하기 위해 만든 것입니다.
-     EEG 가 호흡/심박과 일부러 함께 나오지 않도록 구성해 '공백' 출력을 보여줍니다. -->
+     EEG 가 호흡/심박과 일부러 함께 나오지 않도록 구성해 '공백' 출력을 보여줍니다.
+     연령·성별 체크 태그(Humans/Male/Female/Adult/Aged…)도 합성으로 붙여, '대상집단
+     공백'(진정제·멜라토닌 연구에 고령자가 빠져 있음)을 함께 시연합니다. -->
 <PubmedArticleSet>
   <PubmedArticle>
     <MedlineCitation>
@@ -39,6 +41,27 @@
         <MeshHeading>
           <DescriptorName UI="D00012" MajorTopicYN="N">Autonomic Nervous System</DescriptorName>
           <QualifierName UI="Q000502" MajorTopicYN="N">physiology</QualifierName>
+        </MeshHeading>
+              <MeshHeading>
+          <DescriptorName UI="D006801" MajorTopicYN="N">Humans</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D008297" MajorTopicYN="N">Male</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D005260" MajorTopicYN="N">Female</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D000328" MajorTopicYN="N">Adult</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D008875" MajorTopicYN="N">Middle Aged</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D000368" MajorTopicYN="N">Aged</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D000369" MajorTopicYN="N">Aged, 80 and over</DescriptorName>
         </MeshHeading>
       </MeshHeadingList>
     </MedlineCitation>
@@ -79,6 +102,24 @@
           <DescriptorName UI="D00022" MajorTopicYN="N">Sleep Initiation and Maintenance Disorders</DescriptorName>
           <QualifierName UI="Q000503" MajorTopicYN="N">physiopathology</QualifierName>
         </MeshHeading>
+              <MeshHeading>
+          <DescriptorName UI="D006801" MajorTopicYN="N">Humans</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D008297" MajorTopicYN="N">Male</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D005260" MajorTopicYN="N">Female</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D000328" MajorTopicYN="N">Adult</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D055815" MajorTopicYN="N">Young Adult</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D008875" MajorTopicYN="N">Middle Aged</DescriptorName>
+        </MeshHeading>
       </MeshHeadingList>
     </MedlineCitation>
   </PubmedArticle>
@@ -117,6 +158,27 @@
         <MeshHeading>
           <DescriptorName UI="D00032" MajorTopicYN="N">Respiratory Rate</DescriptorName>
           <QualifierName UI="Q000502" MajorTopicYN="N">physiology</QualifierName>
+        </MeshHeading>
+              <MeshHeading>
+          <DescriptorName UI="D006801" MajorTopicYN="N">Humans</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D008297" MajorTopicYN="N">Male</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D005260" MajorTopicYN="N">Female</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D000328" MajorTopicYN="N">Adult</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D008875" MajorTopicYN="N">Middle Aged</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D000368" MajorTopicYN="N">Aged</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D000293" MajorTopicYN="N">Adolescent</DescriptorName>
         </MeshHeading>
       </MeshHeadingList>
     </MedlineCitation>
@@ -158,6 +220,24 @@
           <DescriptorName UI="D00042" MajorTopicYN="N">Heart Rate</DescriptorName>
           <QualifierName UI="Q000502" MajorTopicYN="N">physiology</QualifierName>
         </MeshHeading>
+              <MeshHeading>
+          <DescriptorName UI="D006801" MajorTopicYN="N">Humans</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D008297" MajorTopicYN="N">Male</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D005260" MajorTopicYN="N">Female</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D000328" MajorTopicYN="N">Adult</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D008875" MajorTopicYN="N">Middle Aged</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D000368" MajorTopicYN="N">Aged</DescriptorName>
+        </MeshHeading>
       </MeshHeadingList>
     </MedlineCitation>
   </PubmedArticle>
@@ -196,6 +276,21 @@
         <MeshHeading>
           <DescriptorName UI="D00052" MajorTopicYN="N">Arousal</DescriptorName>
           <QualifierName UI="Q000502" MajorTopicYN="N">physiology</QualifierName>
+        </MeshHeading>
+              <MeshHeading>
+          <DescriptorName UI="D006801" MajorTopicYN="N">Humans</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D008297" MajorTopicYN="N">Male</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D005260" MajorTopicYN="N">Female</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D000328" MajorTopicYN="N">Adult</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D055815" MajorTopicYN="N">Young Adult</DescriptorName>
         </MeshHeading>
       </MeshHeadingList>
     </MedlineCitation>
@@ -236,6 +331,24 @@
           <DescriptorName UI="D00062" MajorTopicYN="N">Autonomic Nervous System</DescriptorName>
           <QualifierName UI="Q000502" MajorTopicYN="N">physiology</QualifierName>
         </MeshHeading>
+              <MeshHeading>
+          <DescriptorName UI="D006801" MajorTopicYN="N">Humans</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D008297" MajorTopicYN="N">Male</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D005260" MajorTopicYN="N">Female</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D000328" MajorTopicYN="N">Adult</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D008875" MajorTopicYN="N">Middle Aged</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D000368" MajorTopicYN="N">Aged</DescriptorName>
+        </MeshHeading>
       </MeshHeadingList>
     </MedlineCitation>
   </PubmedArticle>
@@ -274,6 +387,27 @@
         <MeshHeading>
           <DescriptorName UI="D00072" MajorTopicYN="N">Heart Rate</DescriptorName>
           <QualifierName UI="Q000502" MajorTopicYN="N">physiology</QualifierName>
+        </MeshHeading>
+              <MeshHeading>
+          <DescriptorName UI="D006801" MajorTopicYN="N">Humans</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D008297" MajorTopicYN="N">Male</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D005260" MajorTopicYN="N">Female</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D000328" MajorTopicYN="N">Adult</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D008875" MajorTopicYN="N">Middle Aged</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D000368" MajorTopicYN="N">Aged</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D000293" MajorTopicYN="N">Adolescent</DescriptorName>
         </MeshHeading>
       </MeshHeadingList>
     </MedlineCitation>
@@ -314,6 +448,24 @@
           <DescriptorName UI="D00082" MajorTopicYN="N">Sleep</DescriptorName>
           <QualifierName UI="Q000502" MajorTopicYN="N">physiology</QualifierName>
         </MeshHeading>
+              <MeshHeading>
+          <DescriptorName UI="D006801" MajorTopicYN="N">Humans</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D008297" MajorTopicYN="N">Male</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D005260" MajorTopicYN="N">Female</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D000328" MajorTopicYN="N">Adult</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D008875" MajorTopicYN="N">Middle Aged</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D000368" MajorTopicYN="N">Aged</DescriptorName>
+        </MeshHeading>
       </MeshHeadingList>
     </MedlineCitation>
   </PubmedArticle>
@@ -347,6 +499,21 @@
         </MeshHeading>
         <MeshHeading>
           <DescriptorName UI="D00091" MajorTopicYN="N">Relaxation</DescriptorName>
+        </MeshHeading>
+              <MeshHeading>
+          <DescriptorName UI="D006801" MajorTopicYN="N">Humans</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D008297" MajorTopicYN="N">Male</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D005260" MajorTopicYN="N">Female</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D000328" MajorTopicYN="N">Adult</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D055815" MajorTopicYN="N">Young Adult</DescriptorName>
         </MeshHeading>
       </MeshHeadingList>
     </MedlineCitation>
@@ -388,6 +555,24 @@
           <DescriptorName UI="D00102" MajorTopicYN="N">Parasympathetic Nervous System</DescriptorName>
           <QualifierName UI="Q000502" MajorTopicYN="N">physiology</QualifierName>
         </MeshHeading>
+              <MeshHeading>
+          <DescriptorName UI="D006801" MajorTopicYN="N">Humans</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D008297" MajorTopicYN="N">Male</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D005260" MajorTopicYN="N">Female</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D000328" MajorTopicYN="N">Adult</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D008875" MajorTopicYN="N">Middle Aged</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D000368" MajorTopicYN="N">Aged</DescriptorName>
+        </MeshHeading>
       </MeshHeadingList>
     </MedlineCitation>
   </PubmedArticle>
@@ -427,6 +612,24 @@
           <DescriptorName UI="D00112" MajorTopicYN="N">Memory</DescriptorName>
           <QualifierName UI="Q000502" MajorTopicYN="N">physiology</QualifierName>
         </MeshHeading>
+              <MeshHeading>
+          <DescriptorName UI="D006801" MajorTopicYN="N">Humans</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D008297" MajorTopicYN="N">Male</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D005260" MajorTopicYN="N">Female</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D000328" MajorTopicYN="N">Adult</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D055815" MajorTopicYN="N">Young Adult</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D008875" MajorTopicYN="N">Middle Aged</DescriptorName>
+        </MeshHeading>
       </MeshHeadingList>
     </MedlineCitation>
   </PubmedArticle>
@@ -465,6 +668,21 @@
         <MeshHeading>
           <DescriptorName UI="D00122" MajorTopicYN="N">Acoustic Stimulation</DescriptorName>
           <QualifierName UI="Q000379" MajorTopicYN="N">methods</QualifierName>
+        </MeshHeading>
+              <MeshHeading>
+          <DescriptorName UI="D006801" MajorTopicYN="N">Humans</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D008297" MajorTopicYN="N">Male</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D005260" MajorTopicYN="N">Female</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D000328" MajorTopicYN="N">Adult</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D055815" MajorTopicYN="N">Young Adult</DescriptorName>
         </MeshHeading>
       </MeshHeadingList>
     </MedlineCitation>
@@ -506,6 +724,27 @@
           <DescriptorName UI="D00132" MajorTopicYN="N">Heart Rate</DescriptorName>
           <QualifierName UI="Q000502" MajorTopicYN="N">physiology</QualifierName>
         </MeshHeading>
+              <MeshHeading>
+          <DescriptorName UI="D006801" MajorTopicYN="N">Humans</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D008297" MajorTopicYN="N">Male</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D005260" MajorTopicYN="N">Female</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D000328" MajorTopicYN="N">Adult</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D008875" MajorTopicYN="N">Middle Aged</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D000368" MajorTopicYN="N">Aged</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D000369" MajorTopicYN="N">Aged, 80 and over</DescriptorName>
+        </MeshHeading>
       </MeshHeadingList>
     </MedlineCitation>
   </PubmedArticle>
@@ -544,6 +783,24 @@
         <MeshHeading>
           <DescriptorName UI="D00142" MajorTopicYN="N">Monitoring, Physiologic</DescriptorName>
           <QualifierName UI="Q000379" MajorTopicYN="N">methods</QualifierName>
+        </MeshHeading>
+              <MeshHeading>
+          <DescriptorName UI="D006801" MajorTopicYN="N">Humans</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D008297" MajorTopicYN="N">Male</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D005260" MajorTopicYN="N">Female</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D000328" MajorTopicYN="N">Adult</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D008875" MajorTopicYN="N">Middle Aged</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D000368" MajorTopicYN="N">Aged</DescriptorName>
         </MeshHeading>
       </MeshHeadingList>
     </MedlineCitation>
@@ -584,6 +841,27 @@
           <DescriptorName UI="D00152" MajorTopicYN="N">Autonomic Nervous System</DescriptorName>
           <QualifierName UI="Q000502" MajorTopicYN="N">physiology</QualifierName>
         </MeshHeading>
+              <MeshHeading>
+          <DescriptorName UI="D006801" MajorTopicYN="N">Humans</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D008297" MajorTopicYN="N">Male</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D005260" MajorTopicYN="N">Female</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D000328" MajorTopicYN="N">Adult</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D008875" MajorTopicYN="N">Middle Aged</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D000368" MajorTopicYN="N">Aged</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D000293" MajorTopicYN="N">Adolescent</DescriptorName>
+        </MeshHeading>
       </MeshHeadingList>
     </MedlineCitation>
   </PubmedArticle>
@@ -622,6 +900,24 @@
         <MeshHeading>
           <DescriptorName UI="D00162" MajorTopicYN="N">Monitoring, Physiologic</DescriptorName>
           <QualifierName UI="Q000379" MajorTopicYN="N">methods</QualifierName>
+        </MeshHeading>
+              <MeshHeading>
+          <DescriptorName UI="D006801" MajorTopicYN="N">Humans</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D008297" MajorTopicYN="N">Male</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D005260" MajorTopicYN="N">Female</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D000328" MajorTopicYN="N">Adult</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D008875" MajorTopicYN="N">Middle Aged</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D000368" MajorTopicYN="N">Aged</DescriptorName>
         </MeshHeading>
       </MeshHeadingList>
     </MedlineCitation>
@@ -662,6 +958,27 @@
         <MeshHeading>
           <DescriptorName UI="D00172" MajorTopicYN="N">Sleep</DescriptorName>
           <QualifierName UI="Q000502" MajorTopicYN="N">physiology</QualifierName>
+        </MeshHeading>
+              <MeshHeading>
+          <DescriptorName UI="D006801" MajorTopicYN="N">Humans</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D008297" MajorTopicYN="N">Male</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D005260" MajorTopicYN="N">Female</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D000328" MajorTopicYN="N">Adult</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D008875" MajorTopicYN="N">Middle Aged</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D000368" MajorTopicYN="N">Aged</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D000369" MajorTopicYN="N">Aged, 80 and over</DescriptorName>
         </MeshHeading>
       </MeshHeadingList>
     </MedlineCitation>
@@ -706,6 +1023,24 @@
           <DescriptorName UI="D00183" MajorTopicYN="N">Autonomic Nervous System</DescriptorName>
           <QualifierName UI="Q000502" MajorTopicYN="N">physiology</QualifierName>
         </MeshHeading>
+              <MeshHeading>
+          <DescriptorName UI="D006801" MajorTopicYN="N">Humans</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D008297" MajorTopicYN="N">Male</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D005260" MajorTopicYN="N">Female</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D000328" MajorTopicYN="N">Adult</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D055815" MajorTopicYN="N">Young Adult</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D008875" MajorTopicYN="N">Middle Aged</DescriptorName>
+        </MeshHeading>
       </MeshHeadingList>
     </MedlineCitation>
   </PubmedArticle>
@@ -747,6 +1082,21 @@
           <DescriptorName UI="D00202" MajorTopicYN="N">Sleep</DescriptorName>
           <QualifierName UI="Q000187" MajorTopicYN="N">drug effects</QualifierName>
         </MeshHeading>
+              <MeshHeading>
+          <DescriptorName UI="D006801" MajorTopicYN="N">Humans</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D008297" MajorTopicYN="N">Male</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D005260" MajorTopicYN="N">Female</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D000328" MajorTopicYN="N">Adult</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D008875" MajorTopicYN="N">Middle Aged</DescriptorName>
+        </MeshHeading>
       </MeshHeadingList>
     </MedlineCitation>
   </PubmedArticle>
@@ -783,6 +1133,24 @@
         <MeshHeading>
           <DescriptorName UI="D00201" MajorTopicYN="N">Sleep</DescriptorName>
           <QualifierName UI="Q000187" MajorTopicYN="N">drug effects</QualifierName>
+        </MeshHeading>
+              <MeshHeading>
+          <DescriptorName UI="D006801" MajorTopicYN="N">Humans</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D008297" MajorTopicYN="N">Male</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D005260" MajorTopicYN="N">Female</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D000328" MajorTopicYN="N">Adult</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D008875" MajorTopicYN="N">Middle Aged</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D055815" MajorTopicYN="N">Young Adult</DescriptorName>
         </MeshHeading>
       </MeshHeadingList>
     </MedlineCitation>
@@ -823,6 +1191,27 @@
           <DescriptorName UI="D00202" MajorTopicYN="N">Sleep</DescriptorName>
           <QualifierName UI="Q000187" MajorTopicYN="N">drug effects</QualifierName>
         </MeshHeading>
+              <MeshHeading>
+          <DescriptorName UI="D006801" MajorTopicYN="N">Humans</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D008297" MajorTopicYN="N">Male</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D005260" MajorTopicYN="N">Female</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D000328" MajorTopicYN="N">Adult</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D008875" MajorTopicYN="N">Middle Aged</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D000368" MajorTopicYN="N">Aged</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D000369" MajorTopicYN="N">Aged, 80 and over</DescriptorName>
+        </MeshHeading>
       </MeshHeadingList>
     </MedlineCitation>
   </PubmedArticle>
@@ -859,6 +1248,21 @@
         <MeshHeading>
           <DescriptorName UI="D00201" MajorTopicYN="N">Sleep</DescriptorName>
           <QualifierName UI="Q000187" MajorTopicYN="N">drug effects</QualifierName>
+        </MeshHeading>
+              <MeshHeading>
+          <DescriptorName UI="D006801" MajorTopicYN="N">Humans</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D008297" MajorTopicYN="N">Male</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D005260" MajorTopicYN="N">Female</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D000328" MajorTopicYN="N">Adult</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D008875" MajorTopicYN="N">Middle Aged</DescriptorName>
         </MeshHeading>
       </MeshHeadingList>
     </MedlineCitation>
@@ -899,6 +1303,21 @@
         <MeshHeading>
           <DescriptorName UI="D00202" MajorTopicYN="N">Sleep</DescriptorName>
         </MeshHeading>
+              <MeshHeading>
+          <DescriptorName UI="D006801" MajorTopicYN="N">Humans</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D008297" MajorTopicYN="N">Male</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D005260" MajorTopicYN="N">Female</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D000328" MajorTopicYN="N">Adult</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D008875" MajorTopicYN="N">Middle Aged</DescriptorName>
+        </MeshHeading>
       </MeshHeadingList>
     </MedlineCitation>
   </PubmedArticle>
@@ -934,6 +1353,24 @@
         <MeshHeading>
           <DescriptorName UI="D00201" MajorTopicYN="N">Sleep Initiation and Maintenance Disorders</DescriptorName>
           <QualifierName UI="Q000188" MajorTopicYN="N">drug therapy</QualifierName>
+        </MeshHeading>
+              <MeshHeading>
+          <DescriptorName UI="D006801" MajorTopicYN="N">Humans</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D008297" MajorTopicYN="N">Male</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D005260" MajorTopicYN="N">Female</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D000328" MajorTopicYN="N">Adult</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D008875" MajorTopicYN="N">Middle Aged</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D055815" MajorTopicYN="N">Young Adult</DescriptorName>
         </MeshHeading>
       </MeshHeadingList>
     </MedlineCitation>
@@ -976,6 +1413,21 @@
           <DescriptorName UI="D00302" MajorTopicYN="N">Sleep</DescriptorName>
           <QualifierName UI="Q000187" MajorTopicYN="N">drug effects</QualifierName>
         </MeshHeading>
+              <MeshHeading>
+          <DescriptorName UI="D006801" MajorTopicYN="N">Humans</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D008297" MajorTopicYN="N">Male</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D005260" MajorTopicYN="N">Female</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D000328" MajorTopicYN="N">Adult</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D008875" MajorTopicYN="N">Middle Aged</DescriptorName>
+        </MeshHeading>
       </MeshHeadingList>
     </MedlineCitation>
   </PubmedArticle>
@@ -1016,6 +1468,21 @@
           <DescriptorName UI="D00302" MajorTopicYN="N">Sleep</DescriptorName>
           <QualifierName UI="Q000187" MajorTopicYN="N">drug effects</QualifierName>
         </MeshHeading>
+              <MeshHeading>
+          <DescriptorName UI="D006801" MajorTopicYN="N">Humans</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D008297" MajorTopicYN="N">Male</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D005260" MajorTopicYN="N">Female</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D000328" MajorTopicYN="N">Adult</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D008875" MajorTopicYN="N">Middle Aged</DescriptorName>
+        </MeshHeading>
       </MeshHeadingList>
     </MedlineCitation>
   </PubmedArticle>
@@ -1051,6 +1518,21 @@
         <MeshHeading>
           <DescriptorName UI="D00301" MajorTopicYN="N">Respiration</DescriptorName>
           <QualifierName UI="Q000187" MajorTopicYN="N">drug effects</QualifierName>
+        </MeshHeading>
+              <MeshHeading>
+          <DescriptorName UI="D006801" MajorTopicYN="N">Humans</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D008297" MajorTopicYN="N">Male</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D005260" MajorTopicYN="N">Female</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D000328" MajorTopicYN="N">Adult</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D008875" MajorTopicYN="N">Middle Aged</DescriptorName>
         </MeshHeading>
       </MeshHeadingList>
     </MedlineCitation>
@@ -1092,6 +1574,24 @@
         <MeshHeading>
           <DescriptorName UI="D00302" MajorTopicYN="N">Electroencephalography</DescriptorName>
           <QualifierName UI="Q000379" MajorTopicYN="N">methods</QualifierName>
+        </MeshHeading>
+              <MeshHeading>
+          <DescriptorName UI="D006801" MajorTopicYN="N">Humans</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D008297" MajorTopicYN="N">Male</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D005260" MajorTopicYN="N">Female</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D000328" MajorTopicYN="N">Adult</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D008875" MajorTopicYN="N">Middle Aged</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D055815" MajorTopicYN="N">Young Adult</DescriptorName>
         </MeshHeading>
       </MeshHeadingList>
     </MedlineCitation>

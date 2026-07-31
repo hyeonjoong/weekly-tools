@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import List, Optional, Sequence
 
 from . import __version__
-from .analyze import GAP_SORTS
+from .analyze import GAP_SORTS, POPULATION_SORTS, is_non_topical
 from .records import (
     Article,
     apply_include_keywords,
@@ -105,9 +105,11 @@ def _load_articles(
 
     # 후처리(순서 있음): 대표주제 한정 → 키워드 보강/폴백 → 연도 필터.
     if args.major_topics_only:
-        before = sum(1 for a in articles if a.mesh)
+        # '주제가 비었다'는 판정은 **주제어**로만 한다 — apply_major_only 는 체크 태그
+        # (대상집단·근거 축의 신호)를 일부러 남기므로 mesh 가 비지 않는다.
+        before = sum(1 for a in articles if any(not is_non_topical(m) for m in a.mesh))
         articles = apply_major_only(articles)
-        after = sum(1 for a in articles if a.mesh)
+        after = sum(1 for a in articles if any(not is_non_topical(m) for m in a.mesh))
         if not after:
             print(
                 "경고: --major-topics-only 를 켰지만 대표(별표) MeSH 주제가 하나도 "
@@ -134,8 +136,16 @@ def _load_articles(
             )
     if args.min_year is not None or args.max_year is not None:
         articles = filter_years(articles, args.min_year, args.max_year)
+    # 제외 목록을 적용하고도 분석할 주제가 남는가. **분석에 실제로 쓰이는 주제**로
+    # 판정해야 한다 — 체크 태그(Humans/Aged/Female…)는 기본적으로 주제 분석에서
+    # 빠지므로, 이것만 남았는데도 "주제가 남았다"고 보면 경고가 조용히 사라진다.
+    _dropped = {e.strip().lower() for e in exclude_terms}
+    _topical = (
+        (lambda t: True) if args.include_check_tags
+        else (lambda t: not is_non_topical(t))
+    )
     if exclude_terms and articles and not any(
-        [t for t in a.mesh if t.strip().lower() not in {e.strip().lower() for e in exclude_terms}]
+        any(t.strip().lower() not in _dropped and _topical(t) for t in a.mesh)
         for a in articles
     ):
         print(
@@ -237,6 +247,10 @@ def _build_meta(args: argparse.Namespace, state: dict, exclude_terms: List[str])
             "angle_min_expected": args.angle_min_expected,
             "angle_max_lift": args.angle_max_lift,
             "angle_hide_implausible": args.angle_hide_implausible,
+            "population": not args.no_population,
+            "population_top_k": args.population_top_k,
+            "population_min_articles": args.population_min_articles,
+            "population_sort": args.population_sort,
             "fuzzy_dedup": not args.no_fuzzy_dedup,
             "top_mesh": args.top_mesh,
             "top_journals": args.top_journals,
@@ -434,7 +448,8 @@ def _gap_top_k(value: str) -> int:
     iv = _nonneg_int(value)
     if iv > MAX_GAP_TOP_K:
         raise argparse.ArgumentTypeError(
-            f"{MAX_GAP_TOP_K} 이하여야 합니다(쌍 검정이 K² 로 늘어 실행이 매우 느려집니다): {iv}"
+            f"{MAX_GAP_TOP_K} 이하여야 합니다(검정 수가 K 에 따라 빠르게 늘어 "
+            f"실행이 느려지고 q(FDR)도 나빠집니다): {iv}"
         )
     return iv
 
@@ -568,6 +583,22 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--no-angles", action="store_true",
         help="MeSH 부주제어(qualifier) 기반 '연구 각도 공백' 분석을 끔",
+    )
+    p.add_argument(
+        "--no-population", action="store_true",
+        help="MeSH 연령·성별 체크 태그 기반 '대상집단 공백' 분석을 끔",
+    )
+    p.add_argument(
+        "--population-top-k", type=_gap_top_k, default=12,
+        help="대상집단 공백을 볼 빈출 주제 상위 K (기본 12)",
+    )
+    p.add_argument(
+        "--population-min-articles", type=_positive_int, default=5,
+        help="대상집단 검정에 넣을 주제의 최소 논문 수 (기본 5)",
+    )
+    p.add_argument(
+        "--population-sort", choices=POPULATION_SORTS, default="deficit",
+        help="대상집단 공백 정렬: deficit(부족 편수) | share(비중) | q | lift (기본 deficit)",
     )
     p.add_argument(
         "--angle-top-k", type=_gap_top_k, default=12,
@@ -746,6 +777,10 @@ def main(argv: Optional[List[str]] = None) -> int:
             angle_min_expected=args.angle_min_expected,
             angle_max_lift=args.angle_max_lift,
             angle_hide_implausible=args.angle_hide_implausible,
+            population=not args.no_population,
+            population_top_k=args.population_top_k,
+            population_min_articles=args.population_min_articles,
+            population_sort=args.population_sort,
             meta=None if args.no_meta else _build_meta(args, state, exclude_terms),
             topic_source=state.get("topic_source", "mesh"),
             total_available=state.get("total_available"),
@@ -764,6 +799,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                 "angles": (args.no_angles, "--no-angles"),
                 "evidence": (args.no_evidence, "--no-evidence"),
                 "topic-evidence": (args.no_evidence, "--no-evidence"),
+                "population": (args.no_population, "--no-population"),
+                "population-profile": (args.no_population, "--no-population"),
             }.get(args.csv_section)
             if off and off[0]:
                 print(

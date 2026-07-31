@@ -1406,8 +1406,26 @@ def topics_from_keywords(articles: Sequence[Article]) -> Tuple[List[Article], bo
 # 분석 전 변환(옵션) — 대표주제 한정 / 키워드 보강 / 연도 필터
 # --------------------------------------------------------------------------- #
 def apply_major_only(articles: List[Article]) -> List[Article]:
-    """각 논문의 분석용 주제(mesh)를 '대표(major) 주제'로 교체한 새 리스트."""
-    return [replace(a, mesh=list(a.mesh_major)) for a in articles]
+    """각 논문의 분석용 주제(mesh)를 '대표(major) 주제'로 교체한 새 리스트.
+
+    단, **색인 표목**(체크 태그 Humans/Aged/Female…, 연구설계 표제어)은 그대로 남긴다.
+    이들은 애초에 '주제'가 아니라 다른 축(대상집단·근거 tier)의 신호이고, 별표가
+    붙는 일이 사실상 없어서 함께 지우면 그 축들이 통째로 사라진다. 예전에는 그 결과
+    "이 입력에는 연령·성별 태그가 없습니다 — PubMed XML 로 받으세요"라고, 방금 준
+    efetch XML 을 두고 엉뚱한 안내를 냈다. 주제 분석에서는 기본적으로 제외되므로
+    (`strip_check_tags`) 이 축들만 살아남는다.
+    """
+    from .analyze import is_non_topical
+
+    out: List[Article] = []
+    for a in articles:
+        major = list(a.mesh_major)
+        keep = {m.lower() for m in major}
+        major += [
+            m for m in a.mesh if is_non_topical(m) and m.lower() not in keep
+        ]
+        out.append(replace(a, mesh=major))
+    return out
 
 
 def apply_include_keywords(articles: List[Article]) -> List[Article]:
@@ -1433,13 +1451,20 @@ def apply_include_keywords(articles: List[Article]) -> List[Article]:
             if kl:
                 canon.setdefault(kl, k)
 
+    # 저자 키워드는 **색인 체크 태그가 될 수 없다**. 그런데 표준형 통일은 대소문자를
+    # 무시하므로 키워드 'female'/'aged' 가 MeSH 표기 'Female'/'Aged' 로 승격되고,
+    # 그 순간 대상집단 축(연령·성별)과 근거 tier 는 그것을 **색인자가 단 태그**로
+    # 세어 버린다 — 없는 공백을 q=0.001 짜리로 만들어 낸다. 경계에서 막는다.
+    from .analyze import CHECK_TAGS
+
+    blocked = {t.lower() for t in CHECK_TAGS}
     out: List[Article] = []
     for a in articles:
         merged = list(a.mesh)
         seen = {m.lower() for m in a.mesh}
         for k in a.keywords:
             kl = k.lower()
-            if kl and kl not in seen:
+            if kl and kl not in seen and kl not in blocked:
                 merged.append(canon[kl])  # 표준형으로 병합
                 seen.add(kl)
         out.append(replace(a, mesh=merged))
