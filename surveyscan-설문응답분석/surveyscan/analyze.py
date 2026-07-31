@@ -301,6 +301,23 @@ def analyze(
                 out_of_range.append({"item": it, "count": len(bad),
                                      "examples": examples})
 
+    # 값이 있는데 숫자로 못 읽은 셀 — 조용히 '결측'으로 묻으면 N·결측률·α가 틀어진다.
+    # (텍스트 라벨 '매우그렇다', 소수점 콤마 '3,5', '3점', 제로폭공백, 엑셀 아포스트로피 등)
+    unreadable = [
+        {"item": it, "count": int(data.unreadable[it]["count"]),
+         "examples": list(data.unreadable[it]["examples"])}
+        for it in items_all
+        if it in data.unreadable
+    ]
+
+    # 분석 문항에 응답이 하나도 없는 행 — Qualtrics/구글폼이 헤더 아래 남기는
+    # 문항문구·ImportId 메타데이터 행이 '응답자'로 잡히면 N과 결측률이 부풀려진다.
+    empty_rows = [
+        (data.source_lines[i] if i < len(data.source_lines) else i + 2)
+        for i, row in enumerate(data.rows)
+        if all(row.get(it) is None for it in items_all)
+    ]
+
     descriptives = [item_descriptives(data, it) for it in items_all]
     subscales = [
         analyze_subscale(data, name, items, cfg, conf)
@@ -328,6 +345,9 @@ def analyze(
             if item_freq else None
         ),
         "out_of_range": out_of_range,
+        "unreadable": unreadable,
+        "empty_rows": empty_rows,
+        "skipped_blank_lines": list(getattr(data, "skipped_blank_lines", [])),
         "descriptives": descriptives,
         "subscales": subscales,
         # 하위척도 간 상관(변별타당도). 하위척도가 1개면 None.

@@ -28,6 +28,14 @@ class ConfigError(ValueError):
 
 SCORE_METHODS = ("mean", "sum")
 
+# config에서 인식하는 최상위 키. 여기 없는 키는 오타로 보고 오류를 낸다.
+# (예: "reverse_item" 오타 → 역문항이 조용히 적용되지 않아 α가 틀리게 나온다.)
+# '_' 로 시작하는 키는 주석용으로 허용한다(예: "_메모": "2026-07 ISI 설정").
+KNOWN_KEYS = frozenset(
+    {"subscales", "reverse_items", "scale_min", "scale_max",
+     "min_valid_ratio", "score_method"}
+)
+
 
 @dataclass
 class SurveyConfig:
@@ -64,6 +72,24 @@ def load_config(path: str) -> SurveyConfig:
 def _from_dict(raw: dict) -> SurveyConfig:
     if not isinstance(raw, dict):
         raise ConfigError("config 최상위는 객체(JSON object)여야 합니다.")
+
+    # 오타 키를 조용히 무시하지 않는다 — 'reverse_item' 같은 오타는 역문항 재코딩을
+    # 통째로 건너뛰게 만들어 α·점수를 틀리게 하고, 사용자는 알아챌 방법이 없다.
+    unknown_keys = [
+        k for k in raw
+        if not (isinstance(k, str) and (k in KNOWN_KEYS or k.startswith("_")))
+    ]
+    if unknown_keys:
+        hints = []
+        for k in sorted(map(str, unknown_keys)):
+            near = [kk for kk in KNOWN_KEYS if kk.startswith(str(k)[:4])]
+            hints.append(f"{k}" + (f" (혹시 '{near[0]}'?)" if near else ""))
+        raise ConfigError(
+            "config에 알 수 없는 키가 있습니다: " + ", ".join(hints)
+            + ". 사용 가능한 키: " + ", ".join(sorted(KNOWN_KEYS))
+            + " (메모는 '_' 로 시작하는 키를 쓰세요)"
+        )
+
     subscales = raw.get("subscales")
     if not isinstance(subscales, dict) or not subscales:
         raise ConfigError("'subscales'는 비어있지 않은 객체여야 합니다.")
@@ -73,6 +99,16 @@ def _from_dict(raw: dict) -> SurveyConfig:
             raise ConfigError(f"하위척도 '{name}'의 문항 목록이 비어있거나 리스트가 아닙니다.")
         if not all(isinstance(i, str) for i in items):
             raise ConfigError(f"하위척도 '{name}'의 문항 이름은 모두 문자열이어야 합니다.")
+        # 같은 하위척도 안의 문항 중복은 손으로 JSON을 쓸 때 흔한 복붙 실수인데,
+        # 그대로 두면 k와 문항간 상관이 부풀려져 α가 실제보다 높게 나온다.
+        # (서로 다른 하위척도가 같은 문항을 공유하는 것은 정상이므로 허용한다.)
+        dupes = sorted({i for i in items if items.count(i) > 1})
+        if dupes:
+            raise ConfigError(
+                f"하위척도 '{name}'에 같은 문항이 중복되어 있습니다: "
+                + ", ".join(dupes)
+                + " (중복은 α를 부풀립니다 — 한 번만 적으세요)"
+            )
         parsed[str(name)] = list(items)
 
     reverse_items = raw.get("reverse_items", [])

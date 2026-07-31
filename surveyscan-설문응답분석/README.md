@@ -17,6 +17,8 @@ python3 -m pip install -e .
 
 설치 없이도 실행할 수 있습니다: `python3 -m surveyscan.cli ...`
 
+설치하면 `surveyscan` 명령도 생기지만, pip 스크립트 폴더가 PATH에 없으면 `command not found` 가 납니다. 그럴 때는 아래 예시처럼 `python3 -m surveyscan.cli` 를 쓰세요 (이 문서의 모든 예시는 그 형태입니다).
+
 ## 사용법 / Usage
 
 입력 CSV는 **행=응답자, 열=문항**, 첫 행은 헤더(문항 이름)입니다. 빈 칸과 `NA/N/A/NaN/.` 등은 결측으로 처리합니다.
@@ -44,7 +46,7 @@ python3 -m pip install -e .
 - `score_method`: `"mean"`(가용문항 평균, 기본) 또는 `"sum"`(비례배분 총합). ISI·PHQ-9·GAD-7 등 임상 척도는 보통 **총합**으로 보고합니다. `--score-method` 로도 덮어쓸 수 있습니다. 총합 방식은 일부 문항이 결측이어도 `min_valid_ratio`를 넘으면 가용문항 평균×문항수로 **비례배분(pro-rate)** 합니다.
 
 ```bash
-surveyscan examples/sleep_survey.csv --config examples/sleep_config.json --id-col ID
+python3 -m surveyscan.cli examples/sleep_survey.csv --config examples/sleep_config.json --id-col ID
 ```
 
 ### 2) 설정 없이 빠르게
@@ -52,7 +54,7 @@ surveyscan examples/sleep_survey.csv --config examples/sleep_config.json --id-co
 ID 컬럼만 빼면 숫자 컬럼 전체를 하나의 척도(`전체`)로 보고 분석합니다.
 
 ```bash
-surveyscan examples/sleep_survey.csv --id-col ID
+python3 -m surveyscan.cli examples/sleep_survey.csv --id-col ID
 ```
 
 ### 주요 옵션
@@ -98,14 +100,19 @@ surveyscan examples/sleep_survey.csv --id-col ID
 
   ▶ 불면증상(ISI)  (문항 7개)
      Cronbach α = 0.909  [우수]  95% CI [0.856, 0.948]   (완전응답 37명; listwise 제외 3명)
-     SEM 0.273   MDC₉₅ 0.756   표준화 α 0.908
+     McDonald ω 0.917   SEM 0.273   MDC₉₅ 0.756   표준화 α 0.908
      평균 문항간 r 0.585 (범위 0.25~0.76)
      하위척도 점수(평균): 2.16 ± 0.89  95% CI [1.87, 2.45]  (점수산출 40명)
      바닥효과 1명(2.5%, =0)   천장효과 0명(0%, =4)
-     문항                문항-총점 r       α(문항제거시)
-     ----------------------------------------
-     ISI6                0.510          0.916  ← 제거시 α↑(검토)
+     문항  문항-총점 r  α(문항제거시)
+     --------------------------------
+     ISI6        0.510          0.916  ← 제거시 α↑(검토)
      ...
+
+[ 하위척도 간 상관 (변별타당도) ]
+  하위척도 A    하위척도 B       r     N
+  --------------------------------------
+  불면증상(ISI) 주간기능     0.742    40
 ```
 
 > `--format md` 로 같은 결과를 Markdown 표(논문 초안·GitHub·노션 붙여넣기용)로,

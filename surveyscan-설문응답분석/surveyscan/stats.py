@@ -165,13 +165,20 @@ def cronbach_alpha_ci(
 def sem_from_alpha(sd_total: Optional[float], alpha: Optional[float]) -> Optional[float]:
     """측정의 표준오차 SEM = SD_총점 · sqrt(1-α).
 
-    α>1(드물게 발생 가능) 이면 1-α<0 이 되어 정의불가 → None.
+    고전검사이론에서 SEM = σ_E = SD·√(1-ρ) 이고 신뢰도 ρ∈[0,1] 이므로 SEM ≤ SD 이다.
+    따라서 α 가 [0,1] 밖이면 SEM 은 정의되지 않는다 → None.
+
+    - α>1: 이 추정량에서는 사실상 발생하지 않지만 방어적으로 막는다.
+    - α<0: 역문항 재코딩 누락 등으로 평균 문항간 상관이 음수일 때 실제로 발생한다.
+      이때 sqrt(1-α)>1 이 되어 SEM 이 SD 보다 커지는 불가능한 값이 나오고,
+      그 값으로 계산한 MDC₉₅ 는 척도 범위의 절반을 넘기도 한다. 틀린 숫자를
+      보고하느니 산출불가로 남긴다(리포트는 '-' 로 표기).
     """
     if sd_total is None or alpha is None:
         return None
-    if alpha > 1.0:
+    if alpha < 0.0 or alpha > 1.0:
         return None
-    return sd_total * math.sqrt(max(0.0, 1.0 - alpha))
+    return sd_total * math.sqrt(1.0 - alpha)
 
 
 def t_ci_mean(
