@@ -601,3 +601,83 @@ replace, and that the offline test guard covers `CrossrefClient.search`.
   (typos), which the `"retract"` substring match misses. Not worth fuzzy-matching.
 - 200 references still means 200 serial HTTPS round-trips. `--cache` makes the
   *re-run* instant; the first run is unchanged.
+
+## 2026-07-31 — Excel/Word input, reference-list profile, and one review round
+
+### Added (new capability, with tests)
+
+- **`--profile`** — descriptive statistics for the reference list as a whole,
+  computed from records already fetched (no extra lookup): DOI/PMID coverage,
+  publication-year median/IQR/range, median reference age, **Price index**
+  (share published within the last 5 years — the standard answer to "your
+  references are out of date"), journal spread, Crossref document types,
+  per-reference integrity-flag counts, and `--self-cite Kim,Park` for the
+  self-citation share. `--as-of YEAR` pins the age reference year so a run is
+  reproducible. Appears in the text report, as a `## Reference profile` section
+  in Markdown, as `{"references": …, "profile": …}` in JSON (the plain array is
+  unchanged without the flag), and on **stderr** for `--report csv` so a
+  redirected table stays clean. Built *before* `--ignore`: hiding a report line
+  must not edit what the reference list is made of.
+- **`.xlsx` and `.docx` input** (stdlib `zipfile` + `xml.etree`, no new deps).
+  A workbook is converted to a table and parsed by column; a Word file to one
+  line per paragraph, footnotes and endnotes included. `--sheet NAME|N` picks a
+  worksheet. Untrusted-input caps: expanded size, member count, member size,
+  row/column counts, and any part declaring a DOCTYPE is refused (`xml.etree`
+  *does* expand internal-subset entities — billion laughs).
+
+### Found by the review round and fixed
+
+*Four independent reviewers (correctness / edge cases / docs honesty / tests
++ security), one round, all findings verified before fixing.*
+
+- **PII leak (the serious one).** A converted worksheet went through format
+  *auto-detection*; a real extraction sheet (banner row, or no DOI/PMID/Title
+  column) fails the CSV detector and fell through to the free-text parser, which
+  marks rows `heuristic_fields=True` — and `--suggest-doi` then sends the row's
+  raw text to `api.crossref.org`. Verified emitting
+  `query.bibliographic=S-001,4429981,"subject 88213 relapsed, PHQ9=19",…`. An
+  `.xlsx` is now always parsed as a table, and a workbook with no reference
+  table is a usage error rather than a run over junk rows.
+- **Data loss, silent, at exit 0.** A banner row above the header destroyed the
+  whole column mapping; a cover/patient tab could out-score the real table
+  (sheets are now scored on the references they *yield*); a missing
+  `sharedStrings.xml` blanked every cell; `MAX_ROWS` truncated a sheet silently;
+  Word footnotes/endnotes were never read; a Shift+Enter-separated reference
+  list collapsed into one reference, dropping every DOI but the first; a
+  `.doc`/`.xls`/PDF decoded as mojibake and was "checked".
+- **Wrong data, reported as the author's mistake.** Duplicate/out-of-order cell
+  refs shifted columns; a negative shared-string index returned another cell's
+  text; Excel phonetic hints (`rPh`) were appended to CJK titles; Word text-box
+  content was emitted twice and welded together into a non-existent DOI reported
+  as broken.
+- **Statistics.** Crossref years are now bounded (a mis-deposited `99999999`
+  moved the median to 50,001,009) and booleans rejected; journal grouping folds
+  punctuation and keys off the *sanitised* name; a non-string `type` no longer
+  leaks a Python repr; rounding is half-up so `0.125` prints as `0.13` beside
+  its own `1/8`; the profile's duplicate per-status block (which contradicted
+  `references[].status` under `--ignore` in the same JSON) is gone.
+- **Injection.** `profile_lines`/`profile_markdown` did not escape `|` or fold
+  newlines (`\n` is not a C0 control char), so an ordinary `journal={A | B}`
+  field forged a Markdown table row; `OfficeError` messages echoed ZIP member
+  names with ANSI escapes intact. Both fixed, both pinned by tests.
+- **Silent no-ops.** `--self-cite ",,"` disabled the profile without a word;
+  `--as-of` without `--profile` did nothing silently; `--encoding` was ignored
+  for Office input without saying so.
+- **Docs.** The README profile block is now real output (it was hand-aligned and
+  omitted a line the code always prints); the Korean 사용법 claimed the
+  year-source split appears on screen (it is in the JSON); the journal-grouping
+  claim was softened to what the code does (punctuation yes, abbreviations no);
+  `--help` now names `.xlsx`/`.docx`; the whole-document `.docx` behaviour, the
+  offline "years are all as-cited" caveat, and paragraph-vs-reference counting
+  are stated rather than implied.
+
+### Test quality
+
+Reviewer mutation testing killed every mutation of the new boundaries (Price
+index `<=5`, older-than-10 `>10`, q1/q3, DOCTYPE guard, sparse-cell padding,
+sheet choice, profile-before-ignore). Surviving mutants are now covered:
+`--as-of`'s current-year default, `MAX_MEMBER_BYTES`, dedup of `--self-cite`
+names (the old assertion was a substring of the buggy output), tab-order
+tie-breaking, and sanitisation of Crossref `type`/self-cite names into JSON and
+Markdown. Two weak assertions were tightened (`code in (0, 1)`; a CSV width
+check that split on commas instead of parsing CSV). Suite: 669 tests, offline.

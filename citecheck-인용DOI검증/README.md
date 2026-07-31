@@ -4,7 +4,8 @@
 
 `citecheck` reads a **BibTeX** (`.bib`), **RIS** (EndNote/Zotero/Mendeley),
 **CSL-JSON** (Zotero/Better BibTeX/pandoc), **CSV/TSV** reference table
-(Excel/Sheets/Covidence), or plain reference list, looks every DOI up on
+(Excel/Sheets/Covidence), **Excel workbook** (`.xlsx`), **Word document**
+(`.docx`), or plain reference list, looks every DOI up on
 [Crossref](https://www.crossref.org/), and flags the mistakes that quietly slip
 into reference lists:
 
@@ -29,6 +30,13 @@ into reference lists:
 - 🆔 **PMID↔DOI mismatch** (with `--pubmed`) — the PMID and DOI you cited point
   to *different* papers (a classic copy-paste-from-two-records slip).
 - 👯 **Duplicate DOIs / PMIDs** — the same paper cited under two different keys.
+- 📊 **A profile of the reference list itself** (with `--profile`) — DOI
+  coverage, the publication-year median/IQR, median reference age, the **Price
+  index** (share published within the last 5 years), journal spread, Crossref
+  document types, integrity-flag counts, and optional **self-citation** share.
+  These are the numbers a desk editor or reviewer asks for ("your references are
+  out of date", "how many of these are preprints?"), and they cost no extra
+  lookup — they are computed from the records already fetched.
 - 🔎 **Missing DOIs, found** (with `--suggest-doi`) — for a reference that cites
   no DOI, citecheck searches Crossref by title/author/year and reports the DOI of
   a confident match, so you can add it instead of hunting for it by hand. And if
@@ -83,7 +91,8 @@ python3 -m citecheck references.json
 # Check a reference table kept in Excel/Sheets/Covidence (CSV or TSV)
 python3 -m citecheck included_studies.csv
 # (input format is auto-detected; force it with
-#  --format bibtex|ris|csljson|csv|text)
+#  --format bibtex|ris|csljson|csv|text. .xlsx/.docx are detected from the
+#  file's own bytes and converted before that.)
 
 # Check a plain-text reference list (one per line or blank-line separated)
 python3 -m citecheck refs.txt --format text
@@ -101,6 +110,16 @@ python3 -m citecheck references.bib --report markdown
 # Also cross-check every PMID against PubMed (fuller retraction coverage +
 # PMID/DOI consistency). Needs internet access to eutils.ncbi.nlm.nih.gov.
 python3 -m citecheck references.bib --pubmed
+
+# Check the reference table straight out of Excel, or the reference list
+# straight out of the Word manuscript — no export step
+python3 -m citecheck included_studies.xlsx
+python3 -m citecheck manuscript.docx
+
+# Profile the reference list as a whole (median age, Price index, journals...)
+python3 -m citecheck references.bib --profile
+python3 -m citecheck references.bib --profile --as-of 2026   # reproducible ages
+python3 -m citecheck references.bib --self-cite Kim,Park     # implies --profile
 
 # For references that cite no DOI, search Crossref and report the DOI to add
 python3 -m citecheck references.bib --suggest-doi
@@ -230,6 +249,8 @@ Output is ordered **errors first, then warnings, then verified** — on a
 | RIS | a `TY  - ` record header | `TI`/`T1`, `AU`/`A1`, `PY`/`Y1`, `JO`/`JF`/`T2`, `DO`, `AN` (PMID) |
 | CSL-JSON | a JSON array/object of citation items | `title`, `author`, `issued`, `container-title`, `DOI`, `PMID` |
 | CSV / TSV | a header row naming a DOI/PMID/title column | columns matched **by name**, not position — `DOI`, `Article DOI`, `PMID`, `Title`, `Authors`, `Year`, `Journal`/`Source`, `Study ID` and many aliases |
+| Excel `.xlsx` | a ZIP container holding `xl/workbook.xml` | converted to a CSV table (same column matching); the sheet that best looks like a reference table is used, in workbook tab order |
+| Word `.docx` | a ZIP container holding `word/document.xml` | converted to text, **one reference per paragraph** |
 | plain text | anything else | doi + (guessed) author/year/pmid, one ref per line/paragraph |
 
 A **CSV/TSV** table is how a systematic review's included-studies list usually
@@ -237,6 +258,36 @@ lives (Excel, Sheets, Covidence, Rayyan, EndNote's tab-delimited export).
 citecheck sniffs the delimiter (`,` `\t` `;` `|`), matches columns by name in any
 order or capitalisation, and — if the DOI is parked in a "Notes" or "URL" column
 instead of a DOI column — still finds it by scanning the row.
+
+**Excel input (`.xlsx`).** Converted to a CSV table and parsed **as a table** —
+the same column-alias matching described above, never as free text. Rows above
+the header (a banner such as "Included studies (n=42)") are dropped, and when a
+workbook has several tabs the one that yields the most identifiable references
+wins, so a workbook that opens on a cover/PRISMA-counts tab still reads
+correctly. citecheck prints which worksheet it read; `--sheet NAME|N` overrides
+the choice (`--sheet "Included studies"`, `--sheet 2`). If no sheet holds a
+recognisable reference table you get a usage error naming the problem, not a
+silent run over junk rows. That a worksheet is always parsed by column is also a
+*privacy* property: the free-text path sends a reference's raw line to Crossref
+when `--suggest-doi` is on, and a clinical extraction sheet's row includes its
+Study-ID, MRN and notes columns.
+
+**Word input (`.docx`).** Converted to one line per paragraph — including
+footnotes and endnotes, where many manuscripts keep their citations — and
+checked as plain text, with the reduced checking described in the next
+paragraph (a Word file carries no structured fields). Two things to know:
+citecheck checks the **whole document**, so every non-reference paragraph is
+reported as "No DOI found" (paste just the reference list into a file, or add
+`--ignore no-doi`, before using `--strict` as a gate); and a DOI that appears
+*only* as a hyperlink target with different display text ("[Link]") is not
+recovered, because the URL lives in the relationships part.
+
+Both formats are treated as untrusted input: the archive's expanded size, member
+count and row count are capped, and a part declaring a DOCTYPE is refused
+(entity-expansion defence). `--encoding` does not apply to them (OOXML is always
+UTF-8) and citecheck says so if you pass it. A binary file that is *not* an
+Office ZIP — a legacy `.doc`/`.xls`, a PDF, an image — is named and refused
+(exit 2) instead of being decoded as mojibake and "checked".
 
 **Structured vs. plain-text input.** With structured BibTeX/RIS/CSL-JSON fields,
 all of the above checks run. In plain-text/`--format text` mode the author and
@@ -255,6 +306,62 @@ file.
 spreadsheet formula when a co-author opens the file. Terminal control characters
 are stripped from every report format — including JSON, where a raw escape would
 otherwise reach a terminal via `jq -r`.
+
+### Profiling the reference list (`--profile`)
+
+`--profile` adds a block of descriptive statistics about the reference list as a
+whole. Every number is computed from records already fetched, so it costs no
+extra network call.
+
+```
+Reference profile (ages measured against 2026)
+  references            42
+  with a DOI            40 (95.2%)
+  compared to Crossref  40 (95.2%)
+  publication year      median 2018 (IQR 2013.3–2021.8, range 1998–2025)
+  median age            8 years (n=38; 4 references with no year excluded)
+  Price index           0.34 (13/38 published within 5 years)
+  older than 10 years   14 (36.8%)
+  journals              29 distinct across 42 references; top: The Lancet (5), New England Journal of Medicine (4), BMJ (3), JAMA (3), Circulation (2)
+  Crossref types        journal-article 38, posted-content 2
+  integrity flags       correction 3
+  self-citations        3 of 40 (7.5%) match Kim
+  (years are Crossref's where a record was retrieved, otherwise as cited; the Price index is the share published within the last 5 years)
+```
+
+(The `self-citations` line appears only with `--self-cite`; the `with a PMID`
+line only when some reference carries one.)
+
+How each number is defined (so you can recompute it by hand, and so a reviewer
+can trust it):
+
+| Metric | Definition |
+|--------|------------|
+| publication year | Crossref's **earliest** publication year where a record was retrieved, otherwise the year **as cited**. Which source was used for how many references is reported in the JSON output; references with no year at all are excluded and counted. |
+| quartiles | linear interpolation between order statistics (`statistics.quantiles(..., method="inclusive")` — the same convention as R type 7 and numpy's default). |
+| age | `as-of year − publication year`; `--as-of YEAR` pins it (default: the current year) so a run is reproducible. |
+| Price index | share of references with age ≤ 5 (Price, 1970). Denominator = references with a known year, printed alongside. |
+| older than 10 years | age > 10, strictly. |
+| journals | grouped on the normalised name — diacritics, case, a leading article and punctuation are folded, so "Lancet", "The Lancet", "Lancet." and "lancet" are one journal — and Crossref's own container name is preferred over the cited one. Abbreviations are *not* resolved: if neither has a Crossref record to canonicalise it, "N Engl J Med" and "New England Journal of Medicine" still count as two. |
+| integrity flags | counted **per reference**, not per finding — a paper with both an erratum and a corrigendum is one corrected reference. |
+| self-citations | `--self-cite Kim,Park`: references whose author list (Crossref's, else the cited first author) contains that surname at ≥ 0.90 similarity, diacritic-folded. Denominator = references with any known author. |
+
+The profile is built **before** `--ignore` is applied: `--ignore` hides report
+lines, it does not change what the reference list is made of. (For the same
+reason it carries no per-status counts — those would contradict the
+`references[].status` values in the same JSON document, which *are* post-ignore.)
+
+Two honest caveats. Offline (or behind a proxy), no Crossref record is
+retrieved, so the years are entirely "as cited" and `compared to Crossref` reads
+`0 (0%)` — read that line first. And on free-text or `.docx` input, `references`
+counts *paragraphs*, not verified reference entries.
+
+Where it appears: appended to the text report; as a `## Reference profile`
+section in `--report markdown`; and in `--report json` the payload becomes
+`{"references": [...], "profile": {...}}`. **Without** `--profile` the JSON
+report stays exactly what it always was — a plain array — so existing CI scripts
+are unaffected. With `--report csv` the profile goes to **stderr**, leaving
+`> out.csv` a clean table for Excel.
 
 ### Retraction & integrity-flag detection
 

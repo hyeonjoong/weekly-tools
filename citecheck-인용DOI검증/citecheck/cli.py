@@ -17,6 +17,7 @@ from typing import Optional
 from . import __version__
 from .core import (
     CODES,
+    CONTROL_CHARS_RE,
     CheckResult,
     CrossrefClient,
     DiskCache,
@@ -25,8 +26,16 @@ from .core import (
     PubMedClient,
     WARNING,
     check_reference,
+    sanitize_text,
+)
+from .office import (
+    OfficeError,
+    binary_input_hint,
+    convert_office_bytes,
+    looks_like_zip,
 )
 from .parsers import count_malformed_entries, detect_format, parse_references
+from .profile import build_profile, profile_lines, profile_markdown
 
 DEFAULT_CACHE_PATH = os.path.join(
     os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"),
@@ -45,12 +54,10 @@ _SYMBOL = {OK: "✓", WARNING: "!", ERROR: "✗"}
 
 # Strip C0/C1 control characters (incl. ESC) from any externally sourced text
 # before printing, so a crafted BibTeX title or poisoned Crossref record cannot
-# inject ANSI/terminal escape sequences into the terminal.
-_CONTROL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
-
-
-def _sanitize(text: str) -> str:
-    return _CONTROL_RE.sub("", text)
+# inject ANSI/terminal escape sequences into the terminal. The pattern itself
+# lives in core so citecheck.profile shares this one control (see core).
+_CONTROL_RE = CONTROL_CHARS_RE
+_sanitize = sanitize_text
 
 
 def _color(text: str, severity: str, enabled: bool) -> str:
@@ -136,6 +143,10 @@ def _print_result(result: CheckResult, use_color: bool, verbose: bool) -> None:
 
 
 def _to_json(results: list[CheckResult]) -> str:
+    return json.dumps(_json_payload(results), indent=2, ensure_ascii=False)
+
+
+def _json_payload(results: list[CheckResult]) -> list:
     payload = []
     for r in results:
         payload.append(
@@ -160,7 +171,7 @@ def _to_json(results: list[CheckResult]) -> str:
                 ],
             }
         )
-    return json.dumps(payload, indent=2, ensure_ascii=False)
+    return payload
 
 
 def _csv_safe(value: str) -> str:
@@ -357,6 +368,42 @@ def _cache_ttl_days(value: str) -> float:
     return f
 
 
+# Bounds for --as-of. Not a style preference: an age is `as_of - year`, so a
+# typo'd `--as-of 20255` silently turns every reference into an 18,000-year-old
+# one and reports a Price index of 0.00 with a straight face.
+MIN_PROFILE_YEAR = 1600
+MAX_PROFILE_YEAR = 2200
+
+
+def _profile_year(value: str) -> int:
+    try:
+        year = int(value, 10)
+    except ValueError:
+        raise argparse.ArgumentTypeError("must be a 4-digit year, e.g. 2026") from None
+    if not MIN_PROFILE_YEAR <= year <= MAX_PROFILE_YEAR:
+        raise argparse.ArgumentTypeError(
+            f"must be between {MIN_PROFILE_YEAR} and {MAX_PROFILE_YEAR}"
+        )
+    return year
+
+
+def _parse_self_cite(raw: str) -> tuple:
+    """Split a --self-cite value into surnames (deduplicated, order preserved)."""
+    names = [tok.strip() for tok in (raw or "").replace(";", ",").split(",") if tok.strip()]
+    return tuple(dict.fromkeys(names))
+
+
+def _read_input(path: str) -> tuple[Optional[bytes], Optional[str]]:
+    """Read the input file (or stdin) as bytes. Returns (bytes, error message)."""
+    if path == "-":
+        return sys.stdin.buffer.read(), None
+    try:
+        with open(path, "rb") as fh:
+            return fh.read(), None
+    except OSError as e:
+        return None, f"citecheck: cannot read {path}: {e}"
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="citecheck",
@@ -368,7 +415,8 @@ def build_parser() -> argparse.ArgumentParser:
         "input",
         nargs="?",
         default="-",
-        help="Input file (.bib / .ris / .json / .csv / text). '-' for stdin.",
+        help="Input file (.bib / .ris / .json / .csv / .xlsx / .docx / text). "
+        "'-' for stdin.",
     )
     p.add_argument(
         "--format",
@@ -376,7 +424,14 @@ def build_parser() -> argparse.ArgumentParser:
         default="auto",
         help="Input format: bibtex, ris (EndNote/Zotero), csljson (Zotero/pandoc), "
         "csv (Excel/Sheets/Covidence reference table, also TSV), text, or "
-        "auto-detect (default).",
+        "auto-detect (default). .xlsx/.docx are recognised from the file's own "
+        "bytes and converted first (a worksheet is then read as csv).",
+    )
+    p.add_argument(
+        "--sheet",
+        metavar="NAME|N",
+        help="For an .xlsx input, the worksheet to read (name, or 1-based tab "
+        "number). Default: the sheet yielding the most references.",
     )
     p.add_argument(
         "--report",
@@ -393,7 +448,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--encoding",
         help="Force the input file encoding (e.g. latin-1, cp949). "
-        "Default: auto-detect (UTF-8/BOM, then cp949, then latin-1).",
+        "Default: auto-detect (UTF-8/BOM, then cp949, then latin-1). "
+        "Does not apply to .xlsx/.docx (their XML is always UTF-8).",
     )
     p.add_argument("--mailto", help="Your email — sent to Crossref/PubMed in the request header to "
                    "join the faster 'polite' API pool.")
@@ -451,6 +507,28 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Exit non-zero on warnings too (not just errors).",
     )
+    p.add_argument(
+        "--profile",
+        action="store_true",
+        help="Also report descriptive statistics for the reference list as a whole: "
+        "DOI coverage, publication-year median/IQR, median age, Price index "
+        "(share published within the last 5 years), journal spread, Crossref "
+        "document types and integrity flags. Costs no extra lookups.",
+    )
+    p.add_argument(
+        "--as-of",
+        type=_profile_year,
+        metavar="YEAR",
+        help="Year that --profile measures reference ages against "
+        "(default: the current year).",
+    )
+    p.add_argument(
+        "--self-cite",
+        metavar="SURNAME[,SURNAME...]",
+        default="",
+        help="Count how many references are self-citations of these author "
+        "surnames (implies --profile).",
+    )
     p.add_argument("-v", "--verbose", action="store_true", help="Also show verified references.")
     p.add_argument("--no-color", action="store_true", help="Disable coloured output.")
     p.add_argument("--version", action="version", version=f"citecheck {__version__}")
@@ -485,35 +563,123 @@ def run(
         )
         return EXIT_USAGE
 
-    if args.input == "-":
-        raw = sys.stdin.buffer.read()
-    else:
-        try:
-            with open(args.input, "rb") as fh:
-                raw = fh.read()
-        except OSError as e:
-            print(f"citecheck: cannot read {args.input}: {e}", file=sys.stderr)
-            return EXIT_USAGE
-
-    try:
-        text, encoding = _decode(raw, override=args.encoding)
-    except LookupError:
-        print(f"citecheck: unknown encoding: {args.encoding}", file=sys.stderr)
+    self_cite = _parse_self_cite(args.self_cite)
+    # `--self-cite ",,"` parses to nothing. Silently treating that as "no
+    # profile requested" meant a user who asked for a self-citation count got a
+    # normal run and no hint that their argument was empty.
+    if args.self_cite.strip() and not self_cite:
+        print(
+            "citecheck: --self-cite lists no surname — give one or more, "
+            "e.g. --self-cite Kim,Park.",
+            file=sys.stderr,
+        )
         return EXIT_USAGE
-    if encoding not in ("utf-8", "utf-8-sig") and not args.encoding:
+    want_profile = args.profile or bool(self_cite)
+    if args.as_of is not None and not want_profile:
+        print(
+            "citecheck: note: --as-of has no effect without --profile "
+            "(it only sets the year reference ages are measured against).",
+            file=sys.stderr,
+        )
+
+    raw, read_error = _read_input(args.input)
+    if raw is None:
+        print(read_error, file=sys.stderr)
+        return EXIT_USAGE
+
+    # An .xlsx / .docx arrives as a ZIP container, not text. Convert it here —
+    # before decoding — so the whole downstream pipeline (format detection, the
+    # CSV column-alias table, the free-text parser) is untouched by it.
+    office_kind = office_detail = None
+    if looks_like_zip(raw):
+        try:
+            converted = convert_office_bytes(raw, sheet=args.sheet)
+        except OfficeError as e:
+            # `e` embeds names from inside an untrusted archive — sanitize before
+            # it reaches a terminal (office._echo already does, belt and braces).
+            print(
+                f"citecheck: cannot read {args.input} as an Office file: "
+                f"{_sanitize(str(e))}",
+                file=sys.stderr,
+            )
+            return EXIT_USAGE
+        if converted is None:
+            print(
+                f"citecheck: {args.input} looks like a ZIP archive but not an .xlsx "
+                f"or .docx. Export your references to .bib/.ris/.csv/.txt first.",
+                file=sys.stderr,
+            )
+            return EXIT_USAGE
+        text, office_kind, office_detail = converted
+        encoding = office_kind
+    else:
+        # A .doc/.xls/.pdf is not a ZIP and would otherwise decode as latin-1
+        # mojibake and be "checked" as a reference at exit 0.
+        hint = binary_input_hint(raw)
+        if hint:
+            print(f"citecheck: cannot read {args.input}: {hint}.", file=sys.stderr)
+            return EXIT_USAGE
+        try:
+            text, encoding = _decode(raw, override=args.encoding)
+        except LookupError:
+            print(f"citecheck: unknown encoding: {args.encoding}", file=sys.stderr)
+            return EXIT_USAGE
+    if office_kind == "xlsx":
+        print(
+            f"citecheck: note: read {args.input} as an Excel workbook — "
+            f"worksheet {_sanitize(office_detail or '?')!r}"
+            f"{'' if args.sheet else ' (the sheet yielding the most references; use --sheet to choose)'}.",
+            file=sys.stderr,
+        )
+    elif office_kind == "docx":
+        print(
+            f"citecheck: note: read {args.input} as a Word document — one reference "
+            f"per paragraph, including footnotes/endnotes. Word files carry no "
+            f"structured fields, so author/year/journal are not compared "
+            f"(see the README); every non-reference paragraph is reported as "
+            f"'No DOI found'.",
+            file=sys.stderr,
+        )
+    elif encoding not in ("utf-8", "utf-8-sig") and not args.encoding:
         print(
             f"citecheck: note: input was not UTF-8; decoded as {encoding}. "
             f"Use --encoding to override if author names look wrong.",
             file=sys.stderr,
         )
+    if office_kind and args.encoding:
+        print(
+            "citecheck: note: --encoding does not apply to .xlsx/.docx "
+            "(their XML is always UTF-8); it was ignored.",
+            file=sys.stderr,
+        )
 
-    refs = parse_references(text, fmt=args.format)
+    # A converted worksheet is *structured* data and must be parsed as a table,
+    # not auto-detected. This is a privacy control, not a nicety: if the CSV
+    # detector rejects the sheet, `auto` falls through to the free-text parser,
+    # which marks every row `heuristic_fields=True` — and `--suggest-doi` then
+    # sends that row's raw text (Study ID, MRN, clinical notes and all) to
+    # api.crossref.org as a query string. Forcing `csv` keeps the row's fields
+    # confined to their named columns, exactly as for a hand-saved .csv.
+    fmt = args.format
+    if office_kind == "xlsx" and fmt == "auto":
+        fmt = "csv"
+
+    refs = parse_references(text, fmt=fmt)
     if not refs:
+        if office_kind == "xlsx":
+            print(
+                f"citecheck: no reference table found in {args.input} "
+                f"(worksheet {_sanitize(office_detail or '?')!r}). A reference table "
+                f"needs a header row naming a DOI, PMID or Title column; use "
+                f"--sheet to pick a different worksheet.",
+                file=sys.stderr,
+            )
+            return EXIT_USAGE
         print("citecheck: no references found in input.", file=sys.stderr)
         return EXIT_USAGE
 
     # Report BibTeX entries that were present but could not be parsed.
-    resolved_fmt = args.format
+    resolved_fmt = fmt
     if resolved_fmt == "auto":
         resolved_fmt = detect_format(text)
     if resolved_fmt == "bibtex":
@@ -583,6 +749,16 @@ def run(
 
     _flag_duplicate_dois(results)
     _flag_duplicate_pmids(results)
+
+    # Built BEFORE --ignore is applied, deliberately: the profile answers "what
+    # is this reference list actually made of", and a user who hides `correction`
+    # from the per-reference report has not made those corrections stop existing.
+    # --ignore silences the report; it must not quietly edit the statistics.
+    profile = None
+    if want_profile:
+        as_of = args.as_of if args.as_of is not None else time.localtime().tm_year
+        profile = build_profile(results, as_of_year=as_of, self_cite=self_cite)
+
     # Applied after every check has run, so --ignore only silences the *report*
     # — it never skips a lookup, and so can never change what else was found.
     n_ignored = _apply_ignores(results, ignored)
@@ -593,11 +769,27 @@ def run(
 
     report = "json" if args.json else args.report
     if report == "json":
-        print(_to_json(results))
+        # Without --profile the payload stays exactly what it has always been: a
+        # JSON *array* of references. Wrapping it unconditionally would break
+        # every CI script already indexing into it, so the object form appears
+        # only when the user asked for the extra data.
+        if profile is not None:
+            print(json.dumps({"references": _json_payload(results), "profile": profile},
+                             indent=2, ensure_ascii=False))
+        else:
+            print(_to_json(results))
     elif report == "csv":
         print(_to_csv(results))
+        if profile is not None:
+            # The CSV report is a table with one row per reference; appending
+            # profile rows would corrupt it for the co-author who opens it in
+            # Excel. So it goes to stderr, leaving `--report csv > out.csv` clean.
+            for line in profile_lines(profile):
+                print(line, file=sys.stderr)
     elif report == "markdown":
         print(_to_markdown(results))
+        if profile is not None:
+            print(profile_markdown(profile))
     else:
         for r in results:
             _print_result(r, use_color, args.verbose)
@@ -613,6 +805,10 @@ def run(
                 f"from the cache at {args.cache}; entries expire after "
                 f"{args.cache_ttl:g} days)"
             )
+        if profile is not None:
+            print()
+            for line in profile_lines(profile):
+                print(_sanitize(line))
 
     has_error = any(r.status == ERROR for r in results)
     has_warning = any(r.status == WARNING for r in results)
