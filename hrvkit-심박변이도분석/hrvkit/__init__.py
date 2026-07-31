@@ -11,7 +11,7 @@ RSA/HRV ↑ → 서파수면)을 정량화하기 위한 도구로 설계되었�
 from .artifacts import clean_rr, detect_artifacts
 from .timedomain import time_domain, geometric_indices
 from .nonlinear import poincare, sample_entropy, dfa, dfa_alpha
-from .frequency import frequency_domain
+from .frequency import frequency_domain, lombscargle_psd
 from .analyze import HRVResult, analyze_rr, flat_metrics
 from .stats import (wilcoxon_signed_rank, paired_summary, hodges_lehmann,
                     wilcoxon_ci, holm_adjust, benjamini_hochberg,
@@ -35,6 +35,7 @@ __all__ = [
     "dfa",
     "dfa_alpha",
     "frequency_domain",
+    "lombscargle_psd",
     "analyze_rr",
     "flat_metrics",
     "HRVResult",
@@ -69,4 +70,4 @@ __all__ = [
     "group_compare_to_csv",
 ]
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
