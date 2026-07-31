@@ -8,12 +8,13 @@ echo "  두 집단(또는 여러 집단)의 CSV를 넣으면 정규성·등분�
 echo "  알맞은 검정(t / Welch / Mann-Whitney / ANOVA / Kruskal-Wallis)을"
 echo "  자동으로 골라 실행하고, 효과크기와 논문용 문장까지 출력합니다."
 echo "  이진(예/아니오) 결과, 등가성·비열등성(TOST), 여러 엔드포인트 동시"
-echo "  분석까지 한 도구에서 처리합니다."
+echo "  분석, 기저값 보정(ANCOVA)까지 한 도구에서 처리합니다."
 echo ""
 echo "  내 데이터로 실행:"
 echo "    python3 -m statwise.cli 내파일.csv --value 값열 --group 그룹열"
 echo "    python3 -m statwise.cli 내파일.csv --wide      (각 열이 그룹)"
 echo "    python3 -m statwise.cli 내파일.csv --binary --value 반응 --group 군"
+echo "    python3 -m statwise.cli 내파일.csv --value 사후 --group 군 --covariate 기저"
 echo "=================================================================="
 echo ""
 
@@ -67,6 +68,12 @@ echo "### 예제 6) 엔드포인트 4개 동시 분석 + 엔드포인트 간 다
 echo "\$ statwise examples/multi_endpoint_two_arm.csv --values isi_change,psqi_change,rmssd_ms,ess_change --group arm --reference sham --brief"
 echo ""
 run examples/multi_endpoint_two_arm.csv --values isi_change,psqi_change,rmssd_ms,ess_change --group arm --reference sham --brief
+
+echo ""
+echo "### 예제 7) 기저값 보정 3군 비교(ANCOVA) — RCT의 표준 1차 분석"
+echo "\$ statwise examples/isi_ancova_baseline.csv --value isi_week8 --group arm --covariate isi_base --adjust-factor site --reference placebo"
+echo ""
+run examples/isi_ancova_baseline.csv --value isi_week8 --group arm --covariate isi_base --adjust-factor site --reference placebo
 
 echo ""
 read -p "엔터를 누르면 창이 닫힙니다..." || true

@@ -27,6 +27,12 @@ Equivalence / non-inferiority:
 Several endpoints at once, corrected across the family:
     statwise data.csv --values isi,psqi,hrv --group arm
 
+Covariate-adjusted comparison (ANCOVA) -- the usual primary analysis in an RCT:
+    statwise data.csv --value isi_post --group arm --covariate isi_base \
+            --reference placebo
+    statwise data.csv --value isi_post --group arm --covariate isi_base,age \
+            --adjust-factor site --reference placebo
+
 Machine-readable output:
     statwise data.csv --wide --format json
     statwise data.csv --wide --format csv -o results.csv
@@ -42,14 +48,17 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 from . import __version__
 from .analyze import EquivalenceSpec, analyze, analyze_paired
+from .ancova import AncovaRecord, run_ancova
 from .binary import compare_binary
-from .dataio import (load_binary_counts, load_binary_long, load_binary_wide,
-                     load_long, load_multi_long, load_paired_long,
-                     load_paired_wide, load_wide, screen_group_labels,
-                     screen_values, summarize_values)
+from .dataio import (load_ancova_long, load_binary_counts,
+                     load_binary_long, load_binary_wide, load_long,
+                     load_multi_long, load_paired_long, load_paired_wide,
+                     load_wide, screen_group_labels, screen_values,
+                     summarize_values)
 from .endpoints import run_endpoints
 from .equivalence import parse_margin
-from .report import (render_binary_json, render_binary_text, render_csv,
+from .report import (render_ancova_json, render_ancova_text,
+                     render_binary_json, render_binary_text, render_csv,
                      render_json, render_multi_csv, render_multi_json,
                      render_multi_text, render_text)
 
@@ -59,7 +68,12 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="statwise",
         description="그룹 비교 통계 자동 선택기 — 정규성/등분산 점검 후 t-검정·"
                     "Welch·Mann-Whitney·ANOVA·Welch-ANOVA·Kruskal-Wallis를 골라 "
-                    "실행하고(+대응표본 paired), 효과크기와 논문용 문장까지 출력합니다.",
+                    "실행하고(+대응표본 paired), 효과크기와 논문용 문장까지 "
+                    "출력합니다. 이진(yes/no) 결과(--binary: RD·RR·OR·NNT + "
+                    "χ²/Fisher), 등가성·비열등성(--equivalence-margin/--ni-margin: "
+                    "TOST), 여러 엔드포인트 동시 분석(--values), 공변량 "
+                    "보정(--covariate/--adjust-factor: ANCOVA 보정평균·보정된 "
+                    "군간 차이)도 같은 명령으로 처리합니다.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument("csv", help="입력 CSV 파일 경로")
@@ -75,6 +89,15 @@ def _build_parser() -> argparse.ArgumentParser:
                         "(기본 holm, bh=FDR, none=보정 없음)")
     p.add_argument("--brief", action="store_true",
                    help="(--values) 요약표만 출력하고 엔드포인트별 상세 리포트는 생략")
+    p.add_argument("--covariate", metavar="COL[,COL2,...]",
+                   help="(long 형식) 공변량 보정 비교(ANCOVA). 기저값 등 수치형 "
+                        "공변량 열을 지정하면 보정평균(LS mean)·보정된 평균차·"
+                        "기울기 동질성 검정까지 계산합니다. 무작위배정 **전에** "
+                        "측정된 변수만 넣으세요.")
+    p.add_argument("--adjust-factor", metavar="COL[,COL2,...]",
+                   help="(--covariate와 같은 ANCOVA 경로) 범주형 보정인자 열 "
+                        "(예: 기관 site, 층화인자 stratum). 단독으로도 쓸 수 "
+                        "있습니다.")
     p.add_argument("--wide", action="store_true",
                    help="wide 형식(각 열이 하나의 그룹)")
     p.add_argument("--columns",
@@ -192,6 +215,8 @@ def _equivalence_spec(args: argparse.Namespace) -> Optional[EquivalenceSpec]:
                       ("--event-value", args.event_value),
                       ("--values", args.values),
                       ("--columns", args.columns),
+                      ("--covariate", args.covariate),
+                      ("--adjust-factor", args.adjust_factor),
                       ("--output", args.output)):
         if val is not None and str(val).strip() == "":
             raise ValueError(
@@ -495,6 +520,29 @@ def _reject_inapplicable_flags(args: argparse.Namespace) -> None:
             "(이진 결과는 --binary-test 를 쓰세요).")
     if args.overwrite and not args.output:
         raise ValueError("--overwrite 는 --output 과 함께만 의미가 있습니다.")
+    if args.covariate or args.adjust_factor:
+        which = "--covariate" if args.covariate else "--adjust-factor"
+        for flag, bad in (("--wide", args.wide), ("--paired", args.paired),
+                          ("--binary", args.binary),
+                          ("--columns", bool(args.columns)),
+                          ("--values", bool(args.values))):
+            if bad:
+                raise ValueError(
+                    f"{which} 는 {flag} 와 함께 쓸 수 없습니다. 공변량 보정은 "
+                    f"한 행이 한 대상인 long 형식(--value/--group)에서만 "
+                    f"정의됩니다.")
+        if not args.value or not args.group:
+            raise ValueError(
+                f"{which} 를 쓰려면 --value(결과 열)와 --group(그룹 열)을 모두 "
+                f"지정해야 합니다.")
+        if args.test != "auto":
+            raise ValueError(
+                "--test 는 공변량 보정(ANCOVA)에 적용되지 않습니다 — 보정 모형은 "
+                "항상 최소제곱 선형모형입니다.")
+        if args.no_posthoc:
+            raise ValueError(
+                "--no-posthoc 는 공변량 보정(ANCOVA)에 적용되지 않습니다. "
+                "보정된 쌍별 차이는 결과의 본체라 생략할 수 없습니다.")
     # An asymmetric equivalence margin is stated relative to a specific
     # direction; without a pinned reference the direction is whatever the CSV
     # row order gave, so the same margin can flip from "equivalent" to "not".
@@ -550,6 +598,48 @@ def _run_continuous(args: argparse.Namespace, delim: Optional[str],
     return 0
 
 
+def _run_ancova(args: argparse.Namespace, delim: Optional[str],
+                notes: List[str]) -> int:
+    """Covariate-adjusted comparison (ANCOVA) of one continuous endpoint."""
+    covs = _split_columns(args.covariate, "--covariate") or []
+    facs = _split_columns(args.adjust_factor, "--adjust-factor") or []
+    missing: Dict[str, int] = {}
+    records, dropped = load_ancova_long(args.csv, args.value, args.group, covs,
+                                        facs, delim, notes,
+                                        missing_out=missing)
+    screen_group_labels([r[0] for r in records], notes)
+    labels = []
+    for r in records:
+        if r[0] not in labels:
+            labels.append(r[0])
+    for lab in labels:
+        screen_values(f"{args.value}/{lab}",
+                      [r[1] for r in records if r[0] == lab], notes)
+    for j, name in enumerate(covs):
+        screen_values(name, [r[2][j] for r in records], notes)
+    for j, name in enumerate(facs):
+        screen_group_labels([r[3][j] for r in records], notes,
+                            what=f"보정인자 '{name}'의 수준")
+    if args.reference and args.reference not in labels:
+        raise ValueError(
+            f"--reference '{args.reference}' 은(는) 데이터에 있는 그룹이 "
+            f"아닙니다. 그룹 {len(labels)}개 중 일부: {summarize_values(labels)}")
+    result = run_ancova(
+        [AncovaRecord(g, y, c, f) for g, y, c, f in records],
+        covariate_names=covs, factor_names=facs, outcome=args.value,
+        alpha=args.alpha, alpha_norm=args.alpha_norm,
+        correction=args.correction, reference=args.reference,
+        equivalence=args.eq_spec, missing=missing, n_dropped=dropped)
+    result.warnings.extend(notes)
+    if args.format == "json":
+        _write(render_ancova_json(result), args)
+    elif args.format == "csv":
+        _write(render_csv(result), args)
+    else:
+        _write(render_ancova_text(result), args)
+    return 0
+
+
 def _dispatch(args: argparse.Namespace) -> int:
     """Pick the pipeline for the requested mode. Raises ValueError on bad input."""
     _validate_alphas(args)
@@ -557,6 +647,8 @@ def _dispatch(args: argparse.Namespace) -> int:
     _reject_inapplicable_flags(args)         # then the mode/direction rules
     delim = _resolve_delimiter(args.delimiter)
     notes: List[str] = []
+    if args.covariate or args.adjust_factor:
+        return _run_ancova(args, delim, notes)
     if args.values:
         return _run_multi(args, delim, notes)
     if args.binary:
@@ -579,7 +671,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 2
     except ArithmeticError as exc:
         # OverflowError / ZeroDivisionError from values around 1e300 or 1e-300
-        print(f"입력 오류: 값의 크기가 극단적이라 계산할 수 없습니다 ({exc}). "
+        detail = exc.args[-1] if exc.args else exc
+        print(f"입력 오류: 값의 크기가 극단적이라 계산할 수 없습니다 ({detail}). "
               f"단위를 바꾸거나(예: ng -> mg) 자료 오류가 없는지 확인하세요.",
               file=sys.stderr)
         return 2
