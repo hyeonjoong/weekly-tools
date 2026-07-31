@@ -8,9 +8,13 @@
 |---|---|---|
 | **연속형** (호흡수, RMSSD, 농도…) | `agreestat data.csv -a A -b B` | **Bland–Altman**(bias·95% LoA·CI), **ICC(2,1)/ICC(3,1)**, **Lin's CCC**, **반복성**, **방법비교 회귀(Deming·Passing–Bablok, CLSI EP09)**, 참고용 Pearson r·대응 t |
 | **범주형/순서형** (수면단계, 등급, 양성/음성…) | `agreestat data.csv --categorical -a A -b B` | **Cohen's kappa**·**가중 kappa**, **Gwet's AC1/AC2**, **Scott's pi**, **Krippendorff's alpha**, **범주별 일치도(PPA/NPA)**, **kappa 역설 진단**, **주변 동질성 검정** |
+| **평가자 3명 이상 · 연속형** (판독의 3명…) | `agreestat data.csv --raters "A,B,C"` | **ICC(1,1)/(2,1)/(3,1)**과 **ICC(1,k)/(2,k)/(3,k)** + CI, **평가자 간 계통차이 F검정**, **SEM(절대일치·일관성)·MDC95**, **s_w·재현성계수**, **쌍별 bias·LoA·CCC** |
+| **평가자 3명 이상 · 범주형** | `agreestat data.csv --raters "A,B,C" --categorical` | **Fleiss' kappa**(+범주별), **Gwet's AC1**, **Krippendorff's alpha**, **쌍별 Cohen's kappa·Light's kappa**, 부트스트랩 CI |
 
 > "두 방법이 같은 **숫자**를 주는가?"와 "두 평가자가 같은 **범주**를 매기는가?"는
-> 서로 다른 통계가 필요합니다. `agreestat`는 둘 다 다룹니다.
+> 서로 다른 통계가 필요합니다. `agreestat`는 둘 다, **평가자 2명이든 여러 명이든**
+> 다룹니다. 입력은 **넓은 형식**(열 = 방법)과 **긴/tidy 형식**(`--long`, 한 행 = 한
+> 측정) 모두 받습니다.
 
 ---
 
@@ -44,7 +48,7 @@ validation work directly.
 - **kappa 역설** — 한 범주가 대부분이면 일치도가 90%여도 kappa는 0에 가깝습니다.
   (도구가 자동 감지해 Gwet's AC1·PABAK을 함께 보고합니다.)
 - **전체 kappa는 어느 범주가 문제인지 숨깁니다** — 예제에서 kappa=0.694는 "상당함"
-  이지만, 범주별로 보면 **N1만 0.301**이고 나머지는 0.84 수준입니다.
+  이지만, 범주별로 보면 **N1만 0.301**이고 나머지는 0.74–0.85 수준입니다.
 - **주변 편향** — 한쪽이 특정 범주를 체계적으로 더 자주 쓰는지는 kappa로 안 보입니다
   (McNemar/Stuart–Maxwell로 검정).
 - **군집(피험자 내 반복)** — 한 사람에게서 나온 수백 epoch를 독립으로 세면 신뢰구간이
@@ -195,6 +199,105 @@ agreestat 등급.csv --categorical --ordinal --categories "0,1,2,3" --min-kappa 
 가볍게 취급합니다. `--min-kappa 0.6`은 **점추정이 아니라 신뢰구간 하한**으로 기준 충족을
 판정합니다(작은 표본에서 점추정만 보면 과대주장이 되기 때문).
 
+### 5) 평가자·방법이 **3개 이상** — `--raters`
+
+판독의 3명이 같은 영상을 읽거나, 세 assay를 같은 검체에 돌린 설계입니다.
+
+```
+case_id,reader_A,reader_B,reader_C
+C001,mild,mild,moderate
+C002,severe,severe,severe
+...
+```
+
+```bash
+# 연속형: 판독의 3명의 종양 크기 (ICC 6종 + SEM/MDC95 + 쌍별 LoA)
+agreestat examples/tumor_size_long.csv --long \
+    --id-col subject_id --method-col reader --value-col size_mm
+
+# 범주형·순서형: 판독의 3명의 병변 등급 (Fleiss kappa + AC1 + Krippendorff alpha)
+agreestat examples/lesion_grade_three_readers.csv \
+    --raters "reader_A,reader_B,reader_C" --categorical --ordinal \
+    --categories "mild,moderate,severe"
+```
+
+연속형 리포트의 핵심:
+
+```
+[2] 급내상관계수 ICC / Intraclass correlation
+    model             ICC  CI                         해석
+    ICC(1,1)        0.996  [95% CI 0.989, 0.999]      excellent / 매우 좋음
+    ICC(2,1)        0.996  [95% CI 0.989, 0.999]      excellent / 매우 좋음
+    ICC(3,1)        0.996  [95% CI 0.989, 0.999]      excellent / 매우 좋음
+    ICC(1,3)        0.999  [95% CI 0.996, 1.000]      excellent / 매우 좋음
+    ICC(2,3)        0.999  [95% CI 0.996, 1.000]      excellent / 매우 좋음
+    ICC(3,3)        0.999  [95% CI 0.996, 1.000]      excellent / 매우 좋음
+
+    해석 기준(Koo & Li 2016): <0.5 낮음 / 0.5–0.75 보통 / 0.75–0.9 좋음 / >0.9 매우 좋음
+    — 등급은 점추정이 아니라 신뢰구간 하한으로 판단하세요.
+
+    분산분석 평균제곱: MSR(대상)=347.990, MSC(평가자)=0.273, MSE=0.500, MSW=0.481
+    평가자 간 계통차이 검정: F(2, 22) = 0.545, p = 0.588  → 유의한 평가자 편향 없음
+
+[3] 측정오차 / Measurement error  (단위: 입력 자료와 동일)
+    SEM  (절대일치 기준, √MSW)  = 0.694   ← ICC(2,1)과 짝을 이루는 값
+    SEM  (일관성 기준, √MSE)    = 0.707   ← 평가자 간 계통차이를 제외
+    MDC95 = 1.96·√2·SEM(절대일치) = 1.923
+    s_w  (개체내 표준편차 √MSW) = 0.694
+    재현성 계수 2.77·s_w        = 1.922
+```
+
+**(·,1)은 평가자 한 명의 신뢰도, (·,k)는 k명 평균의 신뢰도**입니다 — 실제 임상에서
+한 명이 읽는다면 (·,1)을, 여러 명의 평균을 쓴다면 (·,k)를 보고하세요. **MDC95**는
+추적관찰에서 "진짜 변화"를 판정하는 문턱값으로 쓸 수 있습니다 — 매번 **같은 평가자**가
+측정한다면 일관성 SEM(√MSE) 기반의 더 작은 값을, 평가자가 바뀔 수 있으면 위의
+절대일치 기준 값을 쓰세요.
+
+범주형 리포트의 핵심:
+
+```
+[2] 다중 평가자 일치도 계수 / Multi-rater coefficients
+    전체 관측 일치율 P̄a         = 0.667
+    우연 일치 확률 P̄e (Fleiss)  = 0.338
+    Fleiss' kappa (비가중)       = 0.496  [95% CI 0.242, 0.698]  → moderate / 보통
+        ⚑ CI 하한 0.242 기준 등급은 'fair / 약함' 입니다 — 등급은 점추정이 아니라
+          CI 하한으로 판단하세요(Landis & Koch 등급은 관례일 뿐입니다).
+        H0(kappa=0) 검정: z = 5.42, p = <0.001 (SE0 = 0.0916)
+    Gwet's AC1                   = 0.502  [95% CI 0.302, 0.713]
+    Krippendorff's alpha (ordinal) = 0.734  [95% CI 0.533, 0.856]  (사용 대상 20건)
+    쌍별 가중(quadratic) kappa 평균 (Light) = 0.726
+```
+
+`--ordinal`을 줘도 **headline Fleiss kappa는 비가중**입니다(가중 kappa는 Fleiss에
+정의되지 않습니다). 순서 정보를 반영한 지표는 Krippendorff's alpha(ordinal)와
+쌍별 가중 kappa이며, `--min-kappa` 판정도 비가중 Fleiss 기준임을 리포트가 명시합니다.
+
+### 6) 긴(long/tidy) 형식 입력 — `--long`
+
+REDCap·EDC·R 파이프라인이 뱉는 "한 행 = 한 측정" 형식을 그대로 읽어 넓은 형식으로
+변환합니다.
+
+```
+subject_id,reader,size_mm
+P01,radiologist1,22.4
+P01,radiologist2,23.0
+P01,radiologist3,21.8
+P02,radiologist1,15.1
+...
+```
+
+```bash
+agreestat 종양_long.csv --long --id-col subject_id --method-col reader --value-col size_mm
+
+# 방법 두 개만 골라 평소의 A vs B 리포트로:
+agreestat 종양_long.csv --long --id-col subject_id --method-col reader \
+    --value-col size_mm --raters "radiologist1,radiologist2" --accept 3
+```
+
+방법이 2개면 Bland–Altman·ICC·CCC·회귀가 그대로 나오고, 3개 이상이면 다중 평가자
+리포트로 자동 전환됩니다. **같은 (ID, 방법) 조합이 두 번 있으면 오류로 멈춥니다** —
+평균이나 마지막 값을 몰래 쓰면 결과가 조용히 달라지기 때문입니다.
+
 ### 옵션
 
 | 옵션 | 의미 |
@@ -214,6 +317,22 @@ agreestat 등급.csv --categorical --ordinal --categories "0,1,2,3" --min-kappa 
 | `--markdown [PATH]` | 결과를 논문 부록용 마크다운 표로 출력(경로 생략 시 화면) |
 | `--plot-data PATH` | Bland–Altman 플롯 데이터(mean, diff)를 CSV로 저장(R/Excel/Python에서 바로 작도) |
 | `--svg PATH` | Bland–Altman 플롯을 SVG 파일로 저장(외부 라이브러리 없이) |
+
+**다중 평가자 / 긴 형식 옵션**
+
+| 옵션 | 의미 |
+|------|------|
+| `--raters "A,B,C"` | 평가자/방법 열을 직접 나열. **3개 이상이면 다중 평가자 분석**, 2개면 평소의 A vs B 리포트. `--long`과 함께 쓰면 분석에 포함할 방법 이름(과 순서)을 뜻합니다 |
+| `--long` | 입력이 긴(long/tidy) 형식임 — 아래 세 옵션이 모두 필요합니다 |
+| `--id-col COL` | (`--long`) 대상 ID 열 |
+| `--method-col COL` | (`--long`) 방법/평가자 **이름**이 들어 있는 열 |
+| `--value-col COL` | (`--long`) 측정값 또는 판정 라벨이 들어 있는 열 |
+
+다중 평가자 모드에서는 `--alpha` `--json` `--markdown` `--encoding` 이 그대로 동작하고,
+범주형에서는 `--categorical` `--ordinal` `--weights` `--categories` `--min-kappa`
+`--bootstrap` `--seed` `--na` 를 함께 쓸 수 있습니다. 두 방법 전용 옵션
+(`--percent` `--accept*` `--target-loa-hw` `--at` `--plot-data` `--svg`)은 평가자가
+3명 이상이면 정의되지 않으므로 오류로 알려 줍니다.
 
 **범주형 전용 옵션** (`--categorical`과 함께 사용; 연속형 전용 옵션과는 함께 쓸 수 없고
 섞어 쓰면 오류로 알려 줍니다)
@@ -282,7 +401,8 @@ agreestat examples/sleep_stage_clustered.csv --categorical \
   판정하고, **필요 표본수(`--target-loa-hw`)**는 목표 LoA-CI 정밀도로부터 역산합니다.
 - **ICC**: 피험자 × 방법(2열) 이원배치 ANOVA의 평균제곱에서
   **ICC(2,1)**(이원 랜덤, 절대일치, 단일측정)과 **ICC(3,1)**(이원 혼합, 일관성)을
-  계산합니다. CI는 F 기반 정확법(Shrout & Fleiss 1979; McGraw & Wong 1996).
+  계산합니다. ICC(3,1)의 CI는 F 기반 **정확법**(Shrout & Fleiss 1979), ICC(2,1)의
+  CI는 Satterthwaite 합성 자유도를 쓰는 **근사법**(McGraw & Wong 1996, ICC(A,1))입니다.
   기본으로 **ICC(2,1)**(절대일치)을 보고 권장합니다 — 두 방법을 서로 바꿔 쓰려면
   일관성이 아니라 절대일치가 필요하기 때문입니다. 해석은 Koo & Li(2016):
   <0.5 낮음 / 0.5–0.75 보통 / 0.75–0.9 좋음 / >0.9 매우 좋음.
@@ -306,6 +426,50 @@ agreestat examples/sleep_stage_clustered.csv --categorical \
   판정합니다. 권장 회귀는 기본 Passing–Bablok(강건), 오차가 정규·등분산이면 Deming입니다.
 - **Pearson r + 대응 t검정**: 참고용입니다. **r은 일치도가 아닙니다** — 계통편향을
   감지하지 못하므로 리포트에서 명시적으로 경고합니다. (대응 t검정 = bias≠0 검정.)
+
+### 평가자 3명 이상(`--raters`)
+
+- **ICC 계열**: 대상 × 평가자 표의 일원/이원배치 ANOVA 평균제곱(MSR, MSC, MSE, MSW)에서
+  Shrout & Fleiss(1979)·McGraw & Wong(1996)의 여섯 형태를 모두 계산합니다 —
+  **ICC(1,1)/(1,k)** (일원 랜덤: 대상마다 평가자가 다름), **ICC(2,1)/(2,k)** (이원 랜덤,
+  절대일치), **ICC(3,1)/(3,k)** (이원 혼합, 일관성). 단일측정 CI는 ICC(1,1)·ICC(3,1)이
+  F 분포 기반 정확법, ICC(2,1)은 Satterthwaite 근사법이고,
+  평균측정 CI는 단일측정 한계의 Spearman–Brown 변환 `k·r/(1+(k−1)·r)` 입니다
+  ((1,k)·(3,k)에서는 직접 F 공식과 대수적으로 동일하며, (2,k)는 R `psych::ICC`와 같은
+  관례). 여섯 값과 CI 모두 `pingouin.intraclass_corr`와 교차검증되고, Shrout & Fleiss
+  원논문 표(.17/.29/.71 → .44/.62/.91)를 테스트로 고정해 두었습니다.
+- **평가자 간 계통차이**: `F = MSC/MSE`, df = (k−1, (n−1)(k−1)). 유의하면 어떤 평가자가
+  일관되게 높/낮게 읽는다는 뜻이며, 그 결과 절대일치 ICC(2,1)이 일관성 ICC(3,1)보다
+  낮아집니다(도구가 편차가 가장 큰 평가자를 지목해 경고합니다).
+- **측정오차**: 절대일치 기준 `SEM = √MSW`(평가자 간 계통차이를 **포함** — ICC(2,1)과
+  짝을 이룹니다)와 일관성 기준 `SEM = √MSE`(계통차이 제외)를 함께 보고하고,
+  `MDC95 = 1.96·√2·SEM(절대일치)`를 냅니다. `MSW = MSE + (MSC−MSE)/n` 이므로 √MSE를
+  쓰면 상수 편향만 있는 평가자 조합에서 MDC95가 0으로 나오는 함정이 있습니다.
+  `2.77·s_w`는 같은 평가자의 반복측정을 뜻하는 Bland–Altman 반복성 계수가 아니라
+  평가자 간 **재현성(reproducibility)** 계수로 해석해야 합니다.
+- **쌍별 표**: 모든 평가자 쌍에 대해 bias, sd(diff), 95% LoA, Lin's CCC.
+- **Fleiss' kappa**(Fleiss 1971, **비가중**): `κ=(P̄a−P̄e)/(1−P̄e)`, `P̄e=Σp_j²`.
+  `z` 검정은 **H0(κ=0) 전용** 표준오차
+  `√(2·[S²−Σp_jq_j(q_j−p_j)]/(n·m(m−1)))/S`, `S=Σp_jq_j=1−P̄e`
+  (R `irr::kappam.fleiss`와 동일 — 몬테카를로로 검증). 점추정은
+  `statsmodels.stats.inter_rater.fleiss_kappa`와 1e-15로 교차검증됩니다.
+  **신뢰구간은 이 SE가 아니라 대상 단위 부트스트랩**으로 냅니다. 가중 kappa는
+  Fleiss에 적용되지 않으므로 `--ordinal`이어도 headline은 비가중이며,
+  `--min-kappa` 판정도 비가중 기준입니다(리포트에 명시).
+- **범주별 Fleiss kappa**: `κ_j = 1 − Σ_i n_ij(m−n_ij) / (n·m(m−1)·p_j(1−p_j))`
+  (Fleiss, Levin & Paik 2003) — 전체 kappa가 감추는 "특정 등급만 안 맞음"을 드러냅니다.
+- **Gwet's AC1 (다중 평가자)**: `p_a = mean_i Σ_j n_ij(n_ij−1)/(m(m−1))`,
+  `p_e = (1/(q−1))Σ_j π_j(1−π_j)`. 한 범주 쏠림에 강건하며, kappa와 크게 벌어지면
+  유병률 역설로 경고합니다.
+- **Krippendorff's alpha (다중 평가자)**: 일치행렬(coincidence matrix)에서
+  `α = 1 − D_o/D_e`. 각 대상은 평가 수 `m_u`로 가중되어 **평가자 수가 대상마다 달라도**
+  쓸 수 있고, 2명 이상 평가된 모든 대상을 사용합니다. nominal/ordinal 모두
+  `krippendorff` PyPI 패키지와 1e-14로 교차검증됩니다.
+- **CI(Fleiss·AC1·alpha)**: 대상을 복원추출하는 **부트스트랩 백분위 구간**입니다
+  (기본 B=2000, `--seed`로 재현). 세 계수를 한 번의 재표본 루프에서 함께 계산하고,
+  자료 크기 대비 계산량이 과도하면 반복 수를 줄이고 **그 사실을 경고**합니다.
+- **쌍별 Cohen's kappa**와 그 평균(**Light's kappa**) — 쌍마다 완전자료만 쓰고 n을
+  함께 표시합니다.
 
 ### 범주형(`--categorical`)
 
@@ -351,6 +515,12 @@ agreestat examples/sleep_stage_clustered.csv --categorical \
   ICC/CCC를 제외**합니다. (Bland–Altman의 bias·LoA와 그 신뢰구간은 여전히 계산됩니다.)
 - 입력에 `inf`·`-inf`·`1e999`(→무한대) 같은 비정상 수치가 있으면 해당 쌍을 제외하고
   개수를 경고합니다(한 셀의 무한대가 전체 통계를 오염시키지 못하도록).
+- CSV는 **진짜 줄바꿈에서만** 레코드를 나눕니다. 셀 안의 수직탭(`\x0b`)·폼피드·NEL
+  (`\x85`) 같은 문자나 따옴표로 감싼 줄바꿈이 레코드를 쪼개 대상을 잃거나 없는 대상을
+  만들어내지 않습니다.
+- **`--accept` 판정은 LoA 점추정으로 하되, LoA 자체의 신뢰구간이 허용한계를 넘으면
+  그 사실을 경고하고 논문용 문장도 "확정할 수 없었다"로 바뀝니다** — 표본이 작을 때
+  점추정만 보고 교환가능을 주장하지 않도록.
 - 한국어 Excel에서 저장한 CSV는 보통 CP949/EUC-KR 인코딩입니다 — 자동 감지하며,
   안 되면 `--encoding cp949`로 지정하세요.
 - **방법비교 회귀**는 검증법(A)을 기준법(B)에 회귀합니다(`-b`가 기준). Passing–Bablok은
@@ -363,8 +533,9 @@ agreestat examples/sleep_stage_clustered.csv --categorical \
 
 ### 범주형 분석의 한계
 
-- **범주형은 2명(2열) 완전자료만** 지원합니다. 평가자가 3명 이상인 설계(Fleiss' kappa)나
-  결측이 있는 설계는 아직 지원하지 않습니다 — 결측이 있는 행은 짝 단위로 제외됩니다.
+- **`--categorical`(Cohen's kappa 계열)은 2명(2열) 완전자료**를 다룹니다 — 결측이 있는
+  행은 짝 단위로 제외됩니다. 평가자가 3명 이상이면 `--raters`(Fleiss' kappa·AC1·
+  Krippendorff alpha)를 쓰세요.
 - **군집(피험자 내 반복) 자료에서 `-s`를 주지 않으면 신뢰구간이 너무 좁습니다.** 각 행을
   독립으로 가정하기 때문입니다(위 예에서 설계효과 ≈ 4.9배). 피험자당 행이 여러 개면
   **반드시 `-s`로 피험자 열을 지정**하세요. 도구는 피험자 열이 있을 때만 군집을 감지할 수
@@ -396,15 +567,53 @@ agreestat examples/sleep_stage_clustered.csv --categorical \
 - kappa의 정규근사 CI는 **n이 작거나(<30) 희소 범주가 있으면 부정확**합니다 —
   도구가 경고합니다.
 
+### 다중 평가자(`--raters`) 분석의 한계
+
+- **연속형은 완전자료(균형 자료)만** 씁니다. 한 평가자라도 값이 없는 대상은 통째로
+  제외하고(listwise deletion) 제외 건수를 리포트에 표시합니다. ICC의 분산분석 모형이
+  균형 표를 요구하기 때문이며, 혼합모형(REML) 기반 불균형 ICC는 지원하지 않습니다.
+- **범주형에서는 지표마다 사용하는 자료가 다릅니다.** Fleiss' kappa·Gwet AC1·관측
+  일치율은 완전자료만, Krippendorff's alpha는 2명 이상이 평가한 모든 대상을 씁니다
+  (알파의 설계 자체가 그렇습니다). 리포트에 각각의 n을 따로 표시합니다.
+- **CI의 출처가 지표마다 다릅니다.** ICC(1,1)·ICC(3,1)의 CI만 F 분포 기반 **정확 구간**
+  이고, **ICC(2,1)(절대일치)의 CI는 Satterthwaite 합성 자유도를 쓰는 근사**입니다
+  (McGraw & Wong 1996의 ICC(A,1)). 평균측정 ICC(·,k)의 구간은 단일측정 구간을
+  Spearman–Brown 변환한 것으로, 세 모형 모두에서 직접 공식과 대수적으로 동일합니다
+  (`pingouin`·R `psych::ICC`와 동일한 관례). 변환의 극(1+(k−1)r ≤ 0)에서는 구간이
+  뒤집히므로 그 경우 NaN으로 표시합니다.
+  Fleiss kappa·AC1·Krippendorff alpha의 CI는 **대상 단위 부트스트랩 백분위 구간**이며,
+  정규근사가 아닙니다 — 대상 수가 적으면(<20) 여전히 불안정합니다.
+- Fleiss' kappa의 `z` 검정은 **H0(kappa=0) 전용 표준오차**(Fleiss 1971)를 씁니다.
+  이 SE로 신뢰구간을 만들면 안 되며, 그래서 CI는 부트스트랩으로 따로 냅니다.
+- **Krippendorff's alpha의 신뢰구간은 점추정과 같은 대상(2명 이상 평가된 모든 대상)을
+  재표본**합니다. Fleiss·AC1의 CI는 완전자료를 재표본하므로 둘은 서로 다른 n을 씁니다
+  (리포트에 각각 표시).
+- **평가자 쌍별 Cohen's kappa는 그 쌍의 완전자료만** 씁니다(쌍마다 n이 다를 수 있어
+  표에 n을 함께 표시합니다). 그 평균(Light's kappa)도 마찬가지입니다.
+- `--long` 입력에서 **같은 (ID, 방법) 조합이 중복되면 오류**입니다. 평균/최종값을 몰래
+  쓰면 결과가 조용히 달라지기 때문입니다 — 반복 회차는 ID에 포함시키세요.
+- 부트스트랩 계산량이 과도해지면(대상 수 × 반복 수 × 범주 수) 반복 수를 자동으로
+  줄이고 **그 사실을 경고로 알려 줍니다**(조용히 자르지 않습니다). 이 상한은
+  `--bootstrap` 으로 올릴 수 없습니다(내릴 수만 있습니다).
+- **모든 평가자가 같은 범주만 매긴 자료는 거부**합니다 — 서로 다른 범주가 2종 이상
+  없으면 우연일치 보정 계수 자체가 정의되지 않습니다. 반대로 **재표본 안에서** 우연히
+  전원 일치가 나오면 그 재표본의 kappa는 연속적 극한인 1로 다룹니다(버리면 신뢰구간
+  위쪽이 잘려 나갑니다).
+- 평가자 수는 최대 100명, 범주는 최대 200종이며, 범주 라벨은 64자를 넘을 수 없습니다.
+  쌍별 kappa 표는 평가자·범주 조합이 지나치게 크면 생략하고 그 사실을 경고합니다
+  (자유서술 열을 범주로 잘못 지정한 경우를 막습니다).
+- 오류 메시지는 **원자료 값(환자 ID 등)을 그대로 출력하지 않습니다** — 중복 행은
+  값이 아니라 **행 번호**로, 열/범주 목록은 잘라서 개수와 함께 보여 줍니다.
+
 ## Tests
 
 ```bash
-python3 -m pytest -q    # 383개 테스트, 전부 오프라인 (네트워크 불필요)
+python3 -m pytest -q    # ~500개 테스트, 전부 오프라인 (네트워크 불필요)
 ```
 
-이 중 **344개는 순수 표준 라이브러리만으로 실행**되고, 나머지 39개는 교차검증
-테스트라 numpy/scipy/sklearn/statsmodels가 있을 때만 수집됩니다(없으면 자동 skip).
-따라서 의존성이 없는 환경에서는 `344 passed, 1 skipped`가 정상입니다.
+교차검증 테스트(numpy/scipy/sklearn/statsmodels/pingouin/krippendorff를 쓰는 모듈)는
+해당 패키지가 없으면 **모듈 단위로 skip**되므로, 의존성이 전혀 없는 환경에서도
+`… passed, 1 skipped` 로 전부 통과합니다.
 
 **연속형:** ICC는 Shrout & Fleiss(1979) 공개 예제와 1e-9, Bland–Altman·CCC는 손계산 값과
 일치하며, numpy/scipy가 있으면 Pearson·대응 t·F분위수·ICC CI·CCC·Deming(scipy.odr)을
@@ -412,6 +621,11 @@ python3 -m pytest -q    # 383개 테스트, 전부 오프라인 (네트워크 �
 McNemar·Stuart–Maxwell은 **statsmodels**와 1e-12~1e-8 수준으로 교차검증하고, 참조 구현이
 없는 Gwet's AC1의 선형화 분산은 **부트스트랩 SE**와 대조합니다. AC1·kappa 역설 값은
 Gwet(2008)의 공개 예제([[118,5],[2,0]] → po=0.944, κ=−0.02, AC1=0.94)와 일치합니다.
+**다중 평가자:** ICC 6종의 점추정과 신뢰구간을 **pingouin**과, Fleiss' kappa를
+**statsmodels**와 1e-12로, Krippendorff's alpha(nominal·ordinal)를 **krippendorff**
+패키지와 1e-12로 교차검증하고, Fleiss의 H0 표준오차는 R `irr::kappam.fleiss`의 공개
+공식으로 독립 재계산해 대조합니다. ICC 6종은 Shrout & Fleiss(1979) 원논문 표
+(.17/.29/.71 → .44/.62/.91)에도 고정되어 있습니다.
 교차검증 테스트는 해당 패키지가 없으면 자동으로 건너뛰므로 **순수 표준 라이브러리
 환경에서도 전체 통과**합니다.
 

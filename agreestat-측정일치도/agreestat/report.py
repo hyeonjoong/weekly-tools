@@ -96,6 +96,8 @@ def render_text(res: AnalysisResult) -> str:
     if res.accept_lower is not None:
         verdict = ("교환가능 (interchangeable) ✔" if res.interchangeable
                    else "교환 불가 (LoA가 허용한계 초과) ✗")
+        if res.interchangeable and res.loa_ci_exceeds_accept:
+            verdict = "교환가능 (점추정 기준) — 단, LoA 신뢰구간은 한계를 넘음 ⚠"
         L(f"    임상 허용한계 대비 판정: 허용 [{_num(res.accept_lower, 2)}{u}, "
           f"{_num(res.accept_upper, 2)}{u}]  →  {verdict}")
 
@@ -340,7 +342,14 @@ def _sentence(res: AnalysisResult) -> str:
     if res.interchangeable is not None:
         loa_label = ("반복측정 95% LoA" if (rm is not None and rm.available)
                      else "95% LoA")
-        if res.interchangeable:
+        if res.interchangeable and res.loa_ci_exceeds_accept:
+            parts.append(
+                f" {loa_label}의 점추정은 사전 설정한 임상 허용한계"
+                f"([{_num(res.accept_lower, 2)}{u}, {_num(res.accept_upper, 2)}{u}]) "
+                "안에 있었으나, LoA의 신뢰구간이 허용한계를 넘어 현재 표본으로는 "
+                "교환 가능성을 확정할 수 없었다."
+            )
+        elif res.interchangeable:
             parts.append(
                 f" {loa_label}가 사전 설정한 임상 허용한계"
                 f"([{_num(res.accept_lower, 2)}{u}, {_num(res.accept_upper, 2)}{u}]) "
@@ -422,6 +431,7 @@ def render_json(res: AnalysisResult) -> str:
             "lower": _f(res.accept_lower) if res.accept_lower is not None else None,
             "upper": _f(res.accept_upper) if res.accept_upper is not None else None,
             "interchangeable": res.interchangeable,
+            "loa_ci_exceeds_limit": res.loa_ci_exceeds_accept,
         },
         "precision": {
             "se_loa": _f(ba.se_loa),

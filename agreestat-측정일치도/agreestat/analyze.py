@@ -55,6 +55,8 @@ class AnalysisResult:
     accept_lower: Optional[float] = None
     accept_upper: Optional[float] = None
     interchangeable: Optional[bool] = None
+    # True when the verdict is "interchangeable" but the LoA's own CI is not
+    loa_ci_exceeds_accept: bool = False
     # repeated-measures LoA (when a subject column with replicates exists)
     rm_ba: Optional[RepeatedMeasuresBA] = None
     # method-comparison regression (CLSI EP09): test A regressed on reference B
@@ -202,6 +204,7 @@ def analyze(a: Sequence[float], b: Sequence[float],
 
     accept_lower = accept_upper = None
     interchangeable: Optional[bool] = None
+    loa_ci_exceeds = False
     if accept is not None:
         accept_lower, accept_upper = accept
         # Judge against the LoA we actually recommend: the repeated-measures LoA
@@ -219,6 +222,18 @@ def analyze(a: Sequence[float], b: Sequence[float],
                     f"{ba.unit}가 허용한계 [{_num(accept_lower,2)}, "
                     f"{_num(accept_upper,2)}]{ba.unit} 안에 있습니다 → "
                     "임상적으로 교환가능(interchangeable) 판정.")
+                # The verdict uses the LoA point estimates; if the LoA's own CI
+                # spills past the limit the sample is simply too small to
+                # conclude interchangeability. Say so instead of implying proof.
+                ci_lo, ci_hi = ba.loa_lower_ci[0], ba.loa_upper_ci[1]
+                if (math.isfinite(ci_lo) and math.isfinite(ci_hi)
+                        and (ci_lo < accept_lower or ci_hi > accept_upper)):
+                    loa_ci_exceeds = True
+                    warnings.append(
+                        f"다만 LoA 자체의 신뢰구간(하한 {_num(ci_lo,2)}"
+                        f"{ba.unit}, 상한 {_num(ci_hi,2)}{ba.unit})은 허용한계를 "
+                        "넘습니다 — 현재 표본으로는 교환가능성을 확정할 수 "
+                        "없습니다. --target-loa-hw 로 필요한 표본수를 확인하세요.")
             else:
                 warnings.append(
                     f"{src} [{_num(lo_j,2)}, {_num(hi_j,2)}]"
@@ -241,7 +256,8 @@ def analyze(a: Sequence[float], b: Sequence[float],
         ba=ba, icc21=icc21, icc31=icc31, ccc=ccc_res, repeat=repeat,
         pearson=pear, paired=paired, warnings=warnings,
         accept_lower=accept_lower, accept_upper=accept_upper,
-        interchangeable=interchangeable, rm_ba=rm_ba,
+        interchangeable=interchangeable,
+        loa_ci_exceeds_accept=loa_ci_exceeds, rm_ba=rm_ba,
         precision_target_hw=target_loa_hw,
         precision_required_n=req_n,
         precision_required_n_approx=req_n_approx,

@@ -96,9 +96,12 @@ def order_categories(labels: Sequence[str],
         exp = list(dict.fromkeys(explicit))  # de-duplicate, keep order
         missing = [c for c in observed if c not in exp]
         if missing:
+            # Raw cell values can be identifiers, so show only a truncated
+            # sample rather than dumping the whole column into stderr.
+            from .dataio import _short
             raise ValueError(
-                f"--categories 에 없는 값이 자료에 있습니다: {missing}. "
-                f"지정한 순서: {exp}")
+                f"--categories 에 없는 값이 자료에 {len(missing)}종 있습니다: "
+                f"{_short(missing)}. 지정한 순서: {_short(exp, limit=10)}")
         unused = [c for c in exp if c not in observed]
         if unused:
             notes.append(
