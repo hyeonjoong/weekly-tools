@@ -15,6 +15,7 @@ Write a CSV you can paste into a manuscript:
 from __future__ import annotations
 
 import argparse
+import math
 import sys
 from typing import List, Optional, Sequence
 
@@ -35,8 +36,11 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="table1",
         description="임상 CSV·엑셀(.xlsx) → 출판용 '표 1'(기저 특성표). 변수별로 "
                     "연속형/범주형을 자동 판별해 알맞은 요약과 검정을 고르고, "
-                    "표준화 평균차(SMD)·결측을 정리해 Markdown/CSV/TSV/JSON/HTML로 "
-                    "출력합니다. IPTW/성향점수 가중표(--weights)도 지원합니다.",
+                    "표준화 평균차(SMD)·결측을 정리해 "
+                    "Markdown/CSV/TSV/JSON/HTML/LaTeX로 출력합니다. "
+                    "IPTW/성향점수 가중표(--weights), 군 열 순서 고정"
+                    "(--group-order), 순서형 군의 경향성 p값(--trend)도 "
+                    "지원합니다.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument("csv", help="입력 CSV 또는 엑셀(.xlsx) 파일 경로 ('-' = 표준입력)")
@@ -103,6 +107,20 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="두 군 차이(95%% CI) 열 추가: 연속형은 평균차(모수)/"
                         "Hodges-Lehmann 중앙값차(비모수), 이진형은 위험차(%%p, "
                         "Newcombe). 2군 비교에만 적용")
+    p.add_argument("--group-order", metavar="군1,군2,...",
+                   help="군(열)의 표시 순서를 직접 지정(쉼표 구분, 예: "
+                        "'placebo,low,high'). 저널이 요구하는 순서로 열을 놓고, "
+                        "--trend 의 '낮음→높음' 축을 정의합니다. 목록에 없는 군은 "
+                        "원래 순서대로 뒤에 붙습니다(경고)")
+    p.add_argument("--trend", action="store_true",
+                   help="순서형 군(용량·사분위 등)에 대한 경향성 p값(p for trend) "
+                        "열 추가: 연속형은 선형대비(모수)/Jonckheere-Terpstra"
+                        "(비모수), 이진 범주형은 Cochran-Armitage. 열 순서를 "
+                        "'낮음→높음'으로 보므로 --group-order 와 함께 쓰세요")
+    p.add_argument("--trend-scores", metavar="0,10,40",
+                   help="--trend 의 군별 점수(쉼표 구분, 군 개수와 같아야 함). "
+                        "예: 용량 0/10/40 mg. 미지정 시 1,2,...,k 등간격. "
+                        "순위 기반인 Jonckheere-Terpstra 에는 영향이 없습니다")
     p.add_argument("--padjust", choices=["none", "bonferroni", "holm",
                                          "bh", "by"], default="none",
                    help="변수별 p값에 다중비교 보정 열 추가: none(기본)·bonferroni·"
@@ -115,10 +133,16 @@ def _build_parser() -> argparse.ArgumentParser:
                         "ahi='AHI (events/h)')")
     p.add_argument("--decimals", type=int, default=1,
                    help="연속형 통계 소수 자릿수 (기본 1, 음수 불가)")
-    p.add_argument("--format", "-f", choices=["md", "csv", "tsv", "json", "html"],
-                   default="md", help="출력 형식 (기본 md; html = Word/저널 붙여넣기용)")
+    p.add_argument("--format", "-f",
+                   choices=["md", "csv", "tsv", "json", "html", "latex"],
+                   default="md",
+                   help="출력 형식 (기본 md; html = Word/저널 붙여넣기용, "
+                        "latex = booktabs 표를 논문 원고에 \\input)")
     p.add_argument("--delimiter",
                    help="입력 CSV 구분자(미지정 시 자동 감지)")
+    p.add_argument("--encoding", metavar="이름",
+                   help="입력 CSV 인코딩(기본 utf-8-sig). 한국어 윈도우 엑셀의 "
+                        "기본 저장 형식이면 '--encoding cp949'. CSV 전용")
     p.add_argument("-o", "--out", help="출력 파일 경로(미지정 시 화면 출력)")
     p.add_argument("--version", action="version",
                    version=f"table1 {__version__}")
@@ -152,6 +176,32 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print("입력 오류: --alpha-norm 은 0과 1 사이여야 합니다 (예: 0.05).",
               file=sys.stderr)
         return 2
+    # Parse --trend-scores before touching the file: a typo here is a usage
+    # error, and reporting it after a slow load would be needlessly unfriendly.
+    trend_scores = None
+    if args.trend_scores is not None:
+        try:
+            trend_scores = [float(x) for x in _split(args.trend_scores)]
+        except ValueError:
+            print("입력 오류: --trend-scores 는 숫자를 쉼표로 구분해 주세요 "
+                  "(예: --trend-scores 0,10,40).", file=sys.stderr)
+            return 2
+        if not trend_scores:
+            print("입력 오류: --trend-scores 가 비어 있습니다.", file=sys.stderr)
+            return 2
+        if not all(math.isfinite(x) for x in trend_scores):
+            print("입력 오류: --trend-scores 에 유한한 숫자만 쓸 수 있습니다.",
+                  file=sys.stderr)
+            return 2
+        if len(set(trend_scores)) < 2:
+            print("입력 오류: --trend-scores 의 값이 모두 같습니다 "
+                  f"({args.trend_scores}). 경향(용량)축을 만들려면 서로 다른 "
+                  "점수가 필요합니다.", file=sys.stderr)
+            return 2
+        if not args.trend:
+            print("입력 오류: --trend-scores 는 --trend 와 함께 써야 합니다.",
+                  file=sys.stderr)
+            return 2
     try:
         labels = _parse_labels(args.labels)
         ref = _parse_labels(args.ref, "--ref")
@@ -166,7 +216,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         delimiter = {"\\t": "\t", "tab": "\t", "TAB": "\t",
                      "\\|": "|"}.get(delimiter, delimiter)
     try:
-        frame = load_frame(args.csv, delimiter=delimiter, sheet=args.sheet)
+        frame = load_frame(args.csv, delimiter=delimiter, sheet=args.sheet,
+                           encoding=args.encoding)
     except FileNotFoundError:
         print(f"입력 오류: 파일을 찾을 수 없습니다: {args.csv}", file=sys.stderr)
         return 2
@@ -213,6 +264,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         labels=labels,
         nonnormal=_split(args.nonnormal),
         weight_col=args.weights,
+        group_order=_split(args.group_order) or None,
+        trend=args.trend,
+        trend_scores=trend_scores,
     )
     try:
         table = build_table1(frame, opt)

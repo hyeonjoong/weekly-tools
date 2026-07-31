@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "table1"
-version = "0.2.0"
-description = "임상 CSV·엑셀(.xlsx) → 출판용 '표 1'(기저 특성표) 생성기 — 변수별 연속/범주 자동 판별, 알맞은 검정, 표준화 평균차(SMD), 결측 정리, 효과크기(95% CI)·다중비교 보정·IPTW 가중표, Markdown/CSV/TSV/JSON/HTML 출력 (표준 라이브러리만)"
+version = "0.3.0"
+description = "임상 CSV·엑셀(.xlsx) → 출판용 '표 1'(기저 특성표) 생성기 — 변수별 연속/범주 자동 판별, 알맞은 검정, 표준화 평균차(SMD), 결측 정리, 효과크기(95% CI)·다중비교 보정·IPTW 가중표·순서형 군 경향성 p값(p for trend), Markdown/CSV/TSV/JSON/HTML/LaTeX 출력 (표준 라이브러리만)"
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
@@ -14,7 +14,9 @@ keywords = ["table 1", "baseline characteristics", "clinical trial",
             "descriptive statistics", "standardized mean difference",
             "chi-square", "fisher exact", "shapiro-wilk", "SMD",
             "confidence interval", "risk difference", "hodges-lehmann",
-            "multiple comparisons", "benjamini-hochberg"]
+            "multiple comparisons", "benjamini-hochberg",
+            "trend test", "p for trend", "jonckheere-terpstra",
+            "cochran-armitage", "dose-response", "latex", "booktabs"]
 
 # No third-party dependencies — distribution CDFs, Shapiro-Wilk, group tests,
 # chi-square / Fisher exact and SMD are all implemented in the standard library.

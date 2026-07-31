@@ -25,6 +25,7 @@ _LANG = {
         "overall": "전체",
         "p": "p값",
         "p_adj": "p(보정)",
+        "p_trend": "p(경향)",
         "effect": "차이 (95% CI)",
         "smd": "SMD",
         "test": "검정",
@@ -62,6 +63,15 @@ _LANG = {
         "leg_padj": ("**p(보정)**: {method} 다중비교 보정(변수 {m}개 기준). "
                      "무작위배정 시험의 기저 p값 보정은 권장되지 않습니다"
                      "(비교/관찰 연구용)."),
+        "leg_trend": ("**p(경향)**: 순서형 군(용량·사분위 등)에 대한 경향성 검정 "
+                      "— 연속형은 '검정' 열에 보고된 검정 계열을 따라, 모수 검정"
+                      "(t/ANOVA) 행은 일원배치 ANOVA의 선형대비, 순위 검정"
+                      "(Mann-Whitney/Kruskal-Wallis) 행은 Jonckheere–Terpstra"
+                      "(연속성 보정 없음)를 쓰고, 이진 범주형은 Cochran–Armitage "
+                      "입니다(표기를 바꾸는 --display 는 경향성 검정 선택에 영향을 "
+                      "주지 않습니다). 군 순서는 표의 열 순서(왼→오른쪽)를 "
+                      "'낮음→높음'으로 봅니다{scores}. 3수준 이상 (순서 없는) "
+                      "범주형은 단일 경향이 정의되지 않아 공란입니다."),
         "leg_weighted": ("**가중 분석**: 가중치 열 '{col}' 로 가중한 유사모집단"
                          "(pseudo-population) 요약입니다. 연속형은 가중 평균(가중 SD) "
                          "또는 가중 중앙값[가중 IQR], 범주형은 **가중 n(가중 %)** 이며, "
@@ -76,6 +86,7 @@ _LANG = {
         "overall": "Overall",
         "p": "p",
         "p_adj": "p (adj)",
+        "p_trend": "p (trend)",
         "effect": "Difference (95% CI)",
         "smd": "SMD",
         "test": "Test",
@@ -120,6 +131,18 @@ _LANG = {
                      "(family of {m} variables). Adjusting baseline p-values in a "
                      "randomized trial is discouraged (for comparative/"
                      "observational tables)."),
+        "leg_trend": ("**p (trend)**: test for a monotone trend across the "
+                      "ordered groups (dose levels, quartiles). A continuous "
+                      "row follows the family of the test named in the Test "
+                      "column: the one-way ANOVA linear contrast for a "
+                      "parametric test (t/ANOVA), Jonckheere-Terpstra without "
+                      "a continuity correction for a rank test "
+                      "(Mann-Whitney/Kruskal-Wallis); binary categorical rows "
+                      "use Cochran-Armitage. (--display changes the summary "
+                      "shown, not which trend test is used.) Group order is the "
+                      "column order shown, read left-to-right as "
+                      "low-to-high{scores}. An unordered categorical with 3+ "
+                      "levels is left blank (no single direction of trend)."),
         "leg_weighted": ("**Weighted analysis**: summaries describe the "
                          "pseudo-population weighted by column '{col}'. "
                          "Continuous = weighted mean (weighted SD) or weighted "
@@ -363,6 +386,65 @@ def _col_flags(t: Table1, opt: Options):
     return two_group, show_p, show_effect, show_padj, single_group
 
 
+def _show_trend(t: Table1) -> bool:
+    """Whether the p-for-trend column is present (decided by the builder)."""
+    return bool(t.meta.get("trend"))
+
+
+def _ident(x: str) -> str:
+    return x
+
+
+def _leg_trend(L: dict, t: Table1, esc=_ident) -> str:
+    """Trend legend, naming the custom scores when --trend-scores was used.
+
+    Jonckheere-Terpstra is rank-based and ignores the scores, so the clause
+    says which rows actually used them (and disappears entirely when none did):
+    a legend that gets pasted into a manuscript must not assert a mg dose axis
+    that no reported p-value was computed on.
+    """
+    scores = t.meta.get("trend_scores")
+    if not scores:
+        return L["leg_trend"].format(scores="")
+    used = [r for r in t.rows
+            if getattr(r, "trend_test", None) in ("linear contrast",
+                                                  "Cochran-Armitage")]
+    ranked = [r for r in t.rows
+              if getattr(r, "trend_test", None) == "Jonckheere-Terpstra"]
+    if not used:
+        # Nothing consumed the scores — say so instead of listing them as if
+        # they had been applied.
+        return L["leg_trend"].format(
+            scores=(" (지정한 --trend-scores 는 순위 기반 Jonckheere–Terpstra "
+                    "행에만 해당해 적용되지 않았습니다)" if L is _LANG["ko"] else
+                    " (the --trend-scores given were not used: every trend row "
+                    "here is the rank-based Jonckheere-Terpstra)"))
+    pairs = ", ".join(f"{esc(g)}={_fmt_score(x)}"
+                      for g, x in zip(t.groups, scores))
+    if L is _LANG["ko"]:
+        tail = f" (점수: {pairs}"
+        tail += ("; 순위 기반 Jonckheere–Terpstra 행에는 적용되지 않음)"
+                 if ranked else ")")
+    else:
+        tail = f" (scores: {pairs}"
+        tail += ("; not applied to the rank-based Jonckheere-Terpstra rows)"
+                 if ranked else ")")
+    return L["leg_trend"].format(scores=tail)
+
+
+def _fmt_score(x: float) -> str:
+    """Score as it appears in the legend.
+
+    Exact for the realistic dose values (0, 10, 40); falls back to %g above
+    2**53, where ``str(int(x))`` would print a 100-digit expansion of a float
+    that never held that many significant digits.
+    """
+    x = float(x)
+    if x.is_integer() and abs(x) < 2 ** 53:
+        return str(int(x))
+    return f"{x:g}"
+
+
 # --------------------------------------------------------------------------- #
 # Markdown
 # --------------------------------------------------------------------------- #
@@ -388,6 +470,7 @@ def _render_markdown(t: Table1, opt: Options) -> str:
     show_groups = not single_group
     # No test is run under weighting, so the 검정/Test column is dropped too.
     show_test = not single_group and not bool(t.meta.get("weighted"))
+    show_trend = _show_trend(t)
     out: List[str] = []
     out.append("## " + L["title"])
     out.append("")
@@ -405,6 +488,8 @@ def _render_markdown(t: Table1, opt: Options) -> str:
                                           opt.pct_decimals))
         if show_p:
             tail.append(_fmt_p(row.pvalue))
+        if show_trend:
+            tail.append(_fmt_p(getattr(row, "trend_p", None)))
         if show_padj:
             tail.append(_fmt_p(row.p_adjusted))
         if two_group:
@@ -415,8 +500,8 @@ def _render_markdown(t: Table1, opt: Options) -> str:
 
     def blank_tail() -> List[str]:
         """Trailing cells for a level sub-row (no per-level statistics)."""
-        n = (int(show_effect) + int(show_p) + int(show_padj) + int(two_group)
-             + int(show_test))
+        n = (int(show_effect) + int(show_p) + int(show_trend) + int(show_padj)
+             + int(two_group) + int(show_test))
         return [""] * n
 
     headers = [L["char"]]
@@ -430,6 +515,8 @@ def _render_markdown(t: Table1, opt: Options) -> str:
         headers.append(L["effect"])
     if show_p:
         headers.append(L["p"])
+    if show_trend:
+        headers.append(L["p_trend"])
     if show_padj:
         headers.append(L["p_adj"])
     if two_group:
@@ -536,11 +623,14 @@ def _render_markdown(t: Table1, opt: Options) -> str:
         # State the weighting up front: every number above it is a weighted
         # (pseudo-population) quantity, which a reader must not mistake for a
         # raw count.
-        legend.append(L["leg_weighted"].format(col=t.meta.get("weight_col")))
+        legend.append(L["leg_weighted"].format(
+            col=_md_escape(str(t.meta.get("weight_col")))))
     if show_effect:
         legend.append(L["leg_effect"])
     if show_p:
         legend.append(_leg_p_for(L, opt))
+    if show_trend:
+        legend.append(_leg_trend(L, t, _md_escape))
     if show_padj:
         legend.append(_leg_padj(L, t, opt))
     if two_group:
@@ -585,6 +675,7 @@ def _render_delimited(t: Table1, opt: Options, delim: str) -> str:
     show_groups = not single_group
     # No test is run under weighting, so the 검정/Test column is dropped too.
     show_test = not single_group and not bool(t.meta.get("weighted"))
+    show_trend = _show_trend(t)
     buf = io.StringIO()
     writer = _csv.writer(buf, delimiter=delim, lineterminator="\n")
 
@@ -607,6 +698,8 @@ def _render_delimited(t: Table1, opt: Options, delim: str) -> str:
         header.append("effect_95ci")
     if show_padj:
         header.append("p_adjusted")
+    if show_trend:
+        header += ["p_trend", "trend_test"]
     writer.writerow([_csv_safe(h) for h in header])
 
     def value_tail(row, with_level: bool = True) -> List[str]:
@@ -617,10 +710,13 @@ def _render_delimited(t: Table1, opt: Options, delim: str) -> str:
                                           opt.pct_decimals))
         if show_padj:
             tail.append(_fmt_p(row.p_adjusted))
+        if show_trend:
+            tail.append(_fmt_p(getattr(row, "trend_p", None)))
+            tail.append(getattr(row, "trend_test", None) or "")
         return tail
 
     def blank_tail() -> List[str]:
-        return [""] * (int(show_effect) + int(show_padj))
+        return [""] * (int(show_effect) + int(show_padj) + 2 * int(show_trend))
 
     # Only DATA-derived cells (variable name, level label) are formula-guarded;
     # tool-generated numeric cells (means, counts, p-values, SMD) are written
@@ -671,13 +767,17 @@ def _render_delimited(t: Table1, opt: Options, delim: str) -> str:
                 line.append("")
             if show_groups:
                 line += [""] * len(t.groups)
+            # The variable-level p and SMD belong on this header row, exactly as
+            # md/html/latex/json report them. Blanking them here silently
+            # stripped every multi-level categorical of its statistics from the
+            # CSV export the README recommends for manuscripts.
             if show_p:
-                line.append("")
+                line.append(_fmt_p(row.pvalue))
             if show_test:
                 line.append(row.test_name)
             line.append(str(row.n_missing_total))
             if two_group:
-                line.append("")
+                line.append(_fmt_smd(row.smd))
             line += value_tail(row)
             writer.writerow([str(x) for x in line])
             for lvl in row.levels:
@@ -743,6 +843,7 @@ def _render_json(t: Table1, opt: Options) -> str:
                 "p_value": _finite(row.pvalue),
                 "p_adjusted": _finite(row.p_adjusted), "test": row.test_name,
                 "smd": _finite(row.smd), "effect": effect(row.effect),
+                "p_trend": _finite(row.trend_p), "trend_test": row.trend_test,
                 "n_missing": row.n_missing_total, "notes": row.notes,
             })
         else:
@@ -764,6 +865,7 @@ def _render_json(t: Table1, opt: Options) -> str:
                 "p_value": _finite(row.pvalue),
                 "p_adjusted": _finite(row.p_adjusted), "test": row.test_name,
                 "smd": _finite(row.smd), "effect": effect(row.effect),
+                "p_trend": _finite(row.trend_p), "trend_test": row.trend_test,
                 "n_missing": row.n_missing_total, "notes": row.notes,
             })
     obj = {
@@ -802,6 +904,7 @@ def _render_html(t: Table1, opt: Options) -> str:
     show_groups = not single_group
     # No test is run under weighting, so the 검정/Test column is dropped too.
     show_test = not single_group and not bool(t.meta.get("weighted"))
+    show_trend = _show_trend(t)
 
     def value_tail(row, with_level: bool = True) -> List[str]:
         tail: List[str] = []
@@ -811,6 +914,8 @@ def _render_html(t: Table1, opt: Options) -> str:
                                              opt.pct_decimals)))
         if show_p:
             tail.append(_h(_fmt_p(row.pvalue)))
+        if show_trend:
+            tail.append(_h(_fmt_p(getattr(row, "trend_p", None))))
         if show_padj:
             tail.append(_h(_fmt_p(row.p_adjusted)))
         if two_group:
@@ -820,8 +925,8 @@ def _render_html(t: Table1, opt: Options) -> str:
         return tail
 
     def blank_tail() -> List[str]:
-        n = (int(show_effect) + int(show_p) + int(show_padj) + int(two_group)
-             + int(show_test))
+        n = (int(show_effect) + int(show_p) + int(show_trend) + int(show_padj)
+             + int(two_group) + int(show_test))
         return [""] * n
 
     note_markers: List[str] = []
@@ -854,6 +959,8 @@ def _render_html(t: Table1, opt: Options) -> str:
         headers.append(L["effect"])
     if show_p:
         headers.append(L["p"])
+    if show_trend:
+        headers.append(L["p_trend"])
     if show_padj:
         headers.append(L["p_adj"])
     if two_group:
@@ -951,6 +1058,8 @@ def _render_html(t: Table1, opt: Options) -> str:
         legend.append(L["leg_effect"])
     if show_p:
         legend.append(_leg_p_for(L, opt))
+    if show_trend:
+        legend.append(_leg_trend(L, t))
     if show_padj:
         legend.append(_leg_padj(L, t, opt))
     if two_group:
@@ -970,6 +1079,248 @@ def _render_html(t: Table1, opt: Options) -> str:
     return "\n".join(out)
 
 
+# --------------------------------------------------------------------------- #
+# LaTeX  (booktabs table, ready to \input into a manuscript)
+# --------------------------------------------------------------------------- #
+_TEX_ESCAPES = {
+    "\\": r"\textbackslash{}",
+    "&": r"\&", "%": r"\%", "$": r"\$", "#": r"\#",
+    "_": r"\_", "{": r"\{", "}": r"\}",
+    "~": r"\textasciitilde{}", "^": r"\textasciicircum{}",
+    # Not TeX specials, but under the default OT1 encoding "<" and ">" typeset
+    # as inverted punctuation -- so a censored lab value ">100" would silently
+    # print as "?100" in the manuscript.
+    "<": r"\textless{}", ">": r"\textgreater{}", "|": r"\textbar{}",
+}
+
+
+# Typographic glyphs this tool emits (chi-square, en/em dashes, plus-minus...)
+# have no pdfLaTeX representation under the default OT1 font encoding, so they
+# are rewritten to math/ligature equivalents AFTER escaping (the replacements
+# contain backslashes and $ that must not be escaped again). Longest sequence
+# first so "chi squared" wins over the two single glyphs.
+_TEX_GLYPHS = [
+    ("χ²", r"$\chi^2$"),   # chi-square
+    ("χ", r"$\chi$"), ("²", r"$^2$"),
+    ("—", "---"), ("–", "--"),
+    ("±", r"$\pm$"), ("·", r"$\cdot$"),
+    ("≥", r"$\ge$"), ("≤", r"$\le$"), ("≠", r"$\ne$"),
+    ("→", r"$\rightarrow$"), ("∞", r"$\infty$"),
+    ("×", r"$\times$"), ("−", "-"),
+]
+
+
+def _tex(s: str) -> str:
+    r"""Escape a DATA string for LaTeX.
+
+    Every one of TeX's ten special characters is neutralized, so a variable
+    literally named ``dose_mg`` or a level ``>50%`` cannot break the build (or,
+    worse, silently typeset as a subscript). Newlines become spaces because a
+    table cell is a single paragraph. Non-ASCII typographic glyphs are then
+    mapped to math equivalents; any remaining non-ASCII text (Korean labels
+    under ``--lang ko``) needs a Unicode engine, which the README states.
+    """
+    out = []
+    for ch in str(s).replace("\r", " ").replace("\n", " "):
+        out.append(_TEX_ESCAPES.get(ch, ch))
+    text = "".join(out)
+    for glyph, repl in _TEX_GLYPHS:
+        if glyph in text:
+            text = text.replace(glyph, repl)
+    return text
+
+
+def _tex_inline(s: str) -> str:
+    """Escape a legend/note line and turn **bold** markdown into \\textbf."""
+    parts = _tex(s).split("**")
+    return "".join(f"\\textbf{{{seg}}}" if i % 2 else seg
+                   for i, seg in enumerate(parts))
+
+
+def _render_latex(t: Table1, opt: Options) -> str:
+    L = _lang(opt)
+    two_group, show_p, show_effect, show_padj, single_group = _col_flags(t, opt)
+    show_overall = True if single_group else opt.overall
+    show_groups = not single_group
+    show_test = not single_group and not bool(t.meta.get("weighted"))
+    show_trend = _show_trend(t)
+
+    def value_tail(row, with_level: bool = True) -> List[str]:
+        tail: List[str] = []
+        if show_effect:
+            pre = _effect_index_prefix(row.effect, _tex) if with_level else ""
+            tail.append(pre + _tex(_fmt_effect(row.effect, opt.decimals,
+                                               opt.pct_decimals)))
+        if show_p:
+            tail.append(_tex(_fmt_p(row.pvalue)))
+        if show_trend:
+            tail.append(_tex(_fmt_p(getattr(row, "trend_p", None))))
+        if show_padj:
+            tail.append(_tex(_fmt_p(row.p_adjusted)))
+        if two_group:
+            tail.append(_tex(_fmt_smd(row.smd)))
+        if show_test:
+            tail.append(_tex(row.test_name))
+        return tail
+
+    def blank_tail() -> List[str]:
+        n = (int(show_effect) + int(show_p) + int(show_trend) + int(show_padj)
+             + int(two_group) + int(show_test))
+        return [""] * n
+
+    note_markers: List[str] = []
+
+    def note_suffix(notes: List[str]) -> str:
+        if not notes:
+            return ""
+        note_markers.append("; ".join(notes))
+        return f"\\textsuperscript{{{len(note_markers)}}}"
+
+    def miss_suffix(n_missing: int, per_group=None) -> str:
+        if not n_missing:
+            return ""
+        base = f" $\\cdot$ {_tex(L['missing'])} {n_missing}"
+        if per_group is not None and len(t.groups) >= 2:
+            parts = [f"{_tex(g)} {m}"
+                     for g, m in zip(t.groups, per_group) if m]
+            if parts:
+                base += " (" + ", ".join(parts) + ")"
+        return base
+
+    headers = [_tex(L["char"])]
+    if show_overall:
+        headers.append(_tex(f"{L['overall']} (N={t.overall_size}"
+                            f"{_ess_suffix(t, None, opt)})"))
+    if show_groups:
+        for gi, (g, n) in enumerate(zip(t.groups, t.group_sizes)):
+            headers.append(_tex(f"{g} (n={n}{_ess_suffix(t, gi, opt)})"))
+    if show_effect:
+        headers.append(_tex(L["effect"]))
+    if show_p:
+        headers.append(_tex(L["p"]))
+    if show_trend:
+        headers.append(_tex(L["p_trend"]))
+    if show_padj:
+        headers.append(_tex(L["p_adj"]))
+    if two_group:
+        headers.append(_tex(L["smd"]))
+    if show_test:
+        headers.append(_tex(L["test"]))
+
+    # First column left-aligned (long variable labels), the rest right-aligned
+    # so decimal points line up the way a typeset table should.
+    colspec = "l" + "r" * (len(headers) - 1)
+
+    body: List[str] = []
+
+    def emit(cells: List[str]) -> None:
+        body.append("  " + " & ".join(cells) + r" \\")
+
+    for row in t.rows:
+        if isinstance(row, ContinuousRow):
+            per_group_missing = [st.n_missing for st in row.per_group]
+            label = (_tex(_disp_name(opt, row.name) + _cont_suffix(row, L))
+                     + miss_suffix(row.n_missing_total, per_group_missing)
+                     + note_suffix(row.notes))
+            cells = [label]
+            if show_overall:
+                cells.append(_tex(_cont_cell(row.overall, row.display,
+                                             opt.decimals, opt.show_range)))
+            if show_groups:
+                for st in row.per_group:
+                    cells.append(_tex(_cont_cell(st, row.display, opt.decimals,
+                                                 opt.show_range)))
+            cells.extend(value_tail(row))
+            emit(cells)
+        else:
+            single = _binary_collapse(row, opt)
+            if single is not None:
+                label = (_tex(_disp_name(opt, row.name) + " = " + single.label
+                              + f" — {L['n_pct']}")
+                         + miss_suffix(row.n_missing_total,
+                                       row.missing_per_group)
+                         + note_suffix(row.notes))
+                cells = [label]
+                if show_overall:
+                    cells.append(_tex(_cat_cell_for(row, single, None, opt)))
+                if show_groups:
+                    for gi, _c in enumerate(single.counts):
+                        cells.append(_tex(_cat_cell_for(row, single, gi, opt)))
+                cells.extend(value_tail(row, with_level=False))
+                emit(cells)
+                continue
+            header_label = (_tex(_disp_name(opt, row.name) + f" — {L['n_pct']}")
+                            + miss_suffix(row.n_missing_total,
+                                          row.missing_per_group)
+                            + note_suffix(row.notes))
+            cells = [header_label]
+            if show_overall:
+                cells.append("")
+            if show_groups:
+                cells.extend([""] * len(t.groups))
+            cells.extend(value_tail(row))
+            emit(cells)
+            for lvl in row.levels:
+                # \quad indents the level under its variable, the way the
+                # markdown output uses a leading space.
+                lcells = [r"\quad " + _tex(lvl.label)]
+                if show_overall:
+                    lcells.append(_tex(_cat_cell_for(row, lvl, None, opt)))
+                if show_groups:
+                    for gi, _c in enumerate(lvl.counts):
+                        lcells.append(_tex(_cat_cell_for(row, lvl, gi, opt)))
+                lcells.extend(blank_tail())
+                emit(lcells)
+
+    if opt.pct == "col":
+        incl_missing = (getattr(opt, "missing_as_level", False) and
+                        any(isinstance(r, CategoricalRow) and r.n_missing_total > 0
+                            for r in t.rows))
+        pct_desc = L["pct_col_incl_missing"] if incl_missing else L["pct_col"]
+    else:
+        pct_desc = L["pct_row"]
+    legend = [L["leg_notation"] + pct_desc + "."]
+    if t.meta.get("weighted"):
+        legend.append(L["leg_weighted"].format(col=t.meta.get("weight_col")))
+    if show_effect:
+        legend.append(L["leg_effect"])
+    if show_p:
+        legend.append(_leg_p_for(L, opt))
+    if show_trend:
+        legend.append(_leg_trend(L, t))
+    if show_padj:
+        legend.append(_leg_padj(L, t, opt))
+    if two_group:
+        legend.append(L["leg_smd"])
+
+    out: List[str] = []
+    out.append("% requires \\usepackage{booktabs}")
+    out.append(r"\begin{table}[htbp]")
+    out.append(r"  \centering")
+    out.append(f"  \\caption{{{_tex(L['title'])}}}")
+    out.append(f"  \\begin{{tabular}}{{{colspec}}}")
+    out.append(r"  \toprule")
+    out.append("  " + " & ".join(headers) + r" \\")
+    out.append(r"  \midrule")
+    out.extend(body)
+    out.append(r"  \bottomrule")
+    out.append(r"  \end{tabular}")
+    # Notes go in a fixed-width parbox so long legends wrap to the table width
+    # instead of running off the page.
+    foot: List[str] = [_tex_inline(line) for line in legend]
+    for i, n in enumerate(note_markers, 1):
+        foot.append(f"\\textsuperscript{{{i}}} {_tex(n)}")
+    for w in t.warnings:
+        foot.append(f"{_tex(L['warn_hdr'].strip('*'))}: {_tex(w)}")
+    if foot:
+        out.append(r"  \begin{minipage}{\linewidth}\footnotesize")
+        for line in foot:
+            out.append("  " + line + r" \par")
+        out.append(r"  \end{minipage}")
+    out.append(r"\end{table}")
+    return "\n".join(out)
+
+
 def render(t: Table1, opt: Options, fmt: str = "md") -> str:
     if fmt == "md":
         return _render_markdown(t, opt)
@@ -981,4 +1332,6 @@ def render(t: Table1, opt: Options, fmt: str = "md") -> str:
         return _render_json(t, opt)
     if fmt == "html":
         return _render_html(t, opt)
+    if fmt == "latex":
+        return _render_latex(t, opt)
     raise ValueError(f"알 수 없는 출력 형식: {fmt}")
