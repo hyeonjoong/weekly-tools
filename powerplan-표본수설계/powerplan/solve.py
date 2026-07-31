@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 
 from .designs import Design
 from .sequential import (
+    check_futility,
     SPENDING_KINDS,
     check_interim,
     check_timing,
@@ -49,6 +50,8 @@ class Adjustments:
     interim: int | None = None
     spending: str = "obf"
     timing: tuple[float, ...] | None = None
+    #: β 소비함수 이름 → 비구속적 무익성(futility) 경계를 함께 계획한다.
+    futility: str | None = None
     notes: tuple[str, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
@@ -90,8 +93,14 @@ class Adjustments:
                 )
             # 여기서 미리 검증해 두면 설계 계산 전에 잘못된 --timing을 거를 수 있다
             object.__setattr__(self, "timing", check_timing(interim, self.timing))
-        elif self.timing is not None:
-            raise PowerPlanError("--timing은 --interim(중간분석 횟수)과 함께 써야 합니다")
+            object.__setattr__(self, "futility", check_futility(self.futility))
+        else:
+            if self.timing is not None:
+                raise PowerPlanError("--timing은 --interim(중간분석 횟수)과 함께 써야 합니다")
+            if self.futility is not None:
+                raise PowerPlanError(
+                    "--futility(무익성 경계)는 --interim(중간분석 횟수)과 함께 써야 합니다 "
+                    "— 중간분석이 없으면 중간에 멈출 자리도 없습니다")
 
     @property
     def design_effect(self) -> float:
@@ -243,7 +252,7 @@ def _sensitivity_solve(design: Design, adj: Adjustments) -> dict:
         if adj.interim is not None:
             inflation = sequential_plan(
                 adj.interim, design.alpha, getattr(design, "sides", 1), power,
-                adj.spending, adj.timing)["inflation"]
+                adj.spending, adj.timing, adj.futility)["inflation"]
         for factor in _SENSITIVITY_FACTORS:
             try:
                 scaled = design.scaled(factor)
@@ -317,6 +326,7 @@ def _sequential_detail(seq: dict, plan: dict, design: Design) -> dict:
     total = alloc.get("total")
     info = design.information(alloc)
     info_total = info.get("total")
+    fut = seq.get("futility_bounds")
     looks = []
     for i, t in enumerate(seq["timing"]):
         looks.append({
@@ -327,6 +337,22 @@ def _sequential_detail(seq: dict, plan: dict, design: Design) -> dict:
             "nominal_p": seq["nominal_p"][i],
             "cumulative_alpha": seq["cumulative_alpha"][i],
             "stop_prob_h1": seq["stop_prob_h1"][i],
+            "futility_z": fut[i] if fut is not None else None,
+            "futility_nominal_p": (seq["futility_nominal_p"][i]
+                                   if fut is not None else None),
+            "futility_at_harm_bound": (seq["futility_at_harm_bound"][i]
+                                       if fut is not None else None),
+            "futility_stop_h0": (seq["futility_stop_h0"][i]
+                                 if fut is not None else None),
+            "futility_stop_h1": (seq["futility_stop_h1"][i]
+                                 if fut is not None else None),
+            # 조건부 검정력은 중간분석 시점에만 있다 (최종에는 정의되지 않는다)
+            "cp_at_futility_alt": (seq["cp_at_futility_alt"][i]
+                                   if fut is not None and i < len(seq["timing"]) - 1
+                                   else None),
+            "cp_at_futility_trend": (seq["cp_at_futility_trend"][i]
+                                     if fut is not None and i < len(seq["timing"]) - 1
+                                     else None),
             # 정보량이 인원이 아닌 설계(생존분석)에서는 '그 시점의 등록 인원'을
             # 계산할 방법이 없다(달력 시간이 필요하다). 오해를 부르므로 아예 비운다.
             "n_total": (math.ceil(total * t - 1e-9)
@@ -400,10 +426,16 @@ def make_plan(design: Design, *, target_power: float | None = None,
                 f"--interim(중간분석)은 {design.key} 설계에 적용할 수 없습니다."
                 + (f" {reason}" if reason else "")
             )
+        if adj.futility is not None and target_power is None:
+            raise PowerPlanError(
+                "--futility(무익성 경계)를 --n과 함께 쓸 때는 --power로 계획 대립가설의 "
+                "목표 검정력을 함께 지정하세요. 무익성 경계는 β 소비함수로 정하므로 "
+                "목표 검정력이 없으면 경계 자체가 정해지지 않습니다 "
+                "(효능 경계와 달리 검정력에 의존합니다)")
         seq = sequential_plan(
             adj.interim, design.alpha, getattr(design, "sides", 1),
             float(target_power) if target_power is not None else 0.80,
-            adj.spending, adj.timing)
+            adj.spending, adj.timing, adj.futility)
 
     if unit is None:
         if seq is not None:
@@ -558,7 +590,7 @@ def make_plan(design: Design, *, target_power: float | None = None,
         if caveat:
             plan["notes"].append(caveat)
         plan["notes"].extend(sequential_notes(seq))
-        plan["references"].extend(sequential_references())
+        plan["references"].extend(sequential_references(seq))
 
     plan["design_lines"] = list(design.plan_lines(plan["analysis"]["allocation"]))
 

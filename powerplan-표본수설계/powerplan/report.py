@@ -294,6 +294,28 @@ def protocol_sentences(plan: dict) -> dict:
                + ", ".join(f"{row['bound_z']:.3f}" for row in seq["looks_detail"])
                + f"); the maximum sample size is {seq['inflation']:.3f} times that of the "
                f"corresponding fixed design.")
+        if seq.get("futility_bounds") is not None:
+            fut_marks = ", ".join(f"{row['futility_z']:.3f}"
+                                  for row in seq["looks_detail"][:-1])
+            kr += (f" 같은 시점에 {seq['futility_kr']} β 소비함수로 정한 비구속적"
+                   f"(non-binding) 무익성 중단 경계(Z = {fut_marks})를 함께 적용한다. "
+                   f"비구속적이므로 경계를 넘어도 계속 진행할 수 있으며 그 경우에도 "
+                   f"전체 1종오류율은 "
+                   + _josa(f"{seq['alpha']:.4g}", "을", "를")
+                   + " 넘지 않는다. 효과가 없을 때 중간에 무익성으로 멈출 확률은 "
+                   f"{seq['cumulative_futility_h0'][-2]:.0%}이며, 무익성 경계로 인한 "
+                   f"검정력 손실({seq['target_power']:.1%} → {seq['power_same_n']:.1%}, "
+                   f"{seq['power_loss'] * 100:.1f}%p)은 위 표본수에 이미 반영했다.")
+            en += (f" Non-binding futility boundaries (Z = {fut_marks}) derived from "
+                   f"{seq['futility_en']} are applied at the same analyses; because they "
+                   f"are non-binding, the overall type I error rate remains at most "
+                   f"{seq['alpha']:.4g} even if the trial continues past a futility "
+                   f"boundary. The probability of stopping early for futility under the "
+                   f"null hypothesis is {seq['cumulative_futility_h0'][-2]:.0%}, and the "
+                   f"loss of power under the alternative "
+                   f"({seq['target_power']:.1%} to {seq['power_same_n']:.1%}, "
+                   f"{seq['power_loss'] * 100:.1f} percentage points) is already "
+                   f"accounted for in the sample size above.")
     return {"kr": kr, "en": en}
 
 
@@ -458,20 +480,25 @@ def _pad(text: str, width: int, align: str = "<") -> str:
 def _sequential_text(plan: dict) -> list[str]:
     """중간분석 경계표 — 각 시점의 임계값·명목 유의수준·누적 α·조기중단 확률."""
     seq = plan["sequential"]
-    lines = ["", f"■ 중간분석 경계 ({seq['spending_kr']} α 소비함수, "
-                 f"총 {seq['looks']}회 분석)"]
+    has_fut = seq.get("futility_bounds") is not None
+    title = f"■ 중간분석 경계 ({seq['spending_kr']} α 소비함수, 총 {seq['looks']}회 분석"
+    title += f", 무익성 {seq['futility_kr']})" if has_fut else ")"
+    lines = ["", title]
     info_label = seq.get("information_label", "누적 N")
     show_n = info_label != "누적 N"
     header = ("  " + _pad("시점", 8) + _pad("정보비율", 11, ">")
               + _pad(info_label, 14, ">") + _pad("Z 경계", 9, ">")
               + _pad("명목 p", 11, ">") + _pad("누적 α", 9, ">")
               + _pad("중단확률", 9, ">"))
+    if has_fut:
+        header += _pad("무익성 Z", 10, ">") + _pad("무익중단", 9, ">")
     lines.append(header)
-    lines.append("  " + "-" * 68)
+    # 가로줄은 헤더의 **표시 폭**(한글은 2칸)에 맞춘다
+    lines.append("  " + "-" * sum(2 if ord(ch) > 0x2E80 else 1 for ch in header[2:]))
     for row in seq["looks_detail"]:
         name = "최종" if row["is_final"] else f"중간 {row['look']}"
         amount = row.get("information_amount") if show_n else row.get("n_total")
-        lines.append(
+        line = (
             "  " + _pad(name, 8)
             + _pad(f"{row['information']:.3f}", 11, ">")
             + _pad(f"{amount:,}" if amount else "-", 14, ">")
@@ -479,7 +506,48 @@ def _sequential_text(plan: dict) -> list[str]:
             + _pad(f"{row['nominal_p']:.5f}", 11, ">")
             + _pad(f"{row['cumulative_alpha']:.4f}", 9, ">")
             + _pad(f"{row['stop_prob_h1']:.1%}", 9, ">"))
-    lines.append("  (중단확률 = 대립가설이 참일 때 그 시점에서 유의성에 도달할 확률)")
+        if has_fut:
+            line += (_pad(f"{row['futility_z']:.4f}", 10, ">")
+                     + _pad(f"{row['futility_stop_h0']:.1%}", 9, ">"))
+        lines.append(line)
+    lines.append(
+        "  (중단확률 = 대립가설이 참일 때 그 시점에서 **어떤 이유로든** 멈출 확률 "
+        "= 효능 + 무익성)" if has_fut else
+        "  (중단확률 = 대립가설이 참일 때 그 시점에서 유의성에 도달할 확률)")
+    if has_fut:
+        lines.append("  (무익중단 = 효과가 **없을** 때 그 시점에서 무익성으로 멈출 확률. "
+                     "최종 시점의 무익성 경계는 효능 경계와 같습니다)")
+        clamped = [row["look"] for row in seq["looks_detail"]
+                   if row.get("futility_at_harm_bound")]
+        if clamped:
+            marks = ", ".join(f"중간 {k}" for k in clamped)
+            lines.append(
+                f"  ※ {marks} 시점의 무익성 경계는 **해(harm) 방향 효능 경계와 일치**합니다 "
+                "— 그 시점에는 추가 무익성 중단 규칙이 사실상 없고, 경계를 넘으면 "
+                "'무익'이 아니라 통계적으로 유의한 해입니다.")
+        lines.append(
+            f"  무익성으로 멈출 누적확률: 효과 없으면 "
+            f"{seq['cumulative_futility_h0'][-2]:.1%}, 효과 있는데 잘못 멈추면 "
+            f"{seq['cumulative_futility_h1'][-2]:.1%} (= 소비한 2종오류 β*)")
+        lines.append(
+            f"  실제 검정력 손실: {seq['target_power']:.1%} → {seq['power_same_n']:.1%} "
+            f"({seq['power_loss'] * 100:.1f}%p) — 같은 표본수에 무익성 규칙만 얹었을 때. "
+            "이만큼을 되찾도록 표본수를 늘렸습니다")
+        cps = ", ".join(
+            f"중간 {row['look']}: {row['cp_at_futility_alt']:.0%} "
+            f"(추세대로면 {row['cp_at_futility_trend']:.0%})"
+            for row in seq["looks_detail"] if row.get("cp_at_futility_alt") is not None)
+        lines.append(f"  무익성 경계에서의 조건부 검정력 — {cps}. "
+                     "= 그 시점에 경계값을 봤을 때 최종분석에서 유의해질 확률"
+                     "(가정한 효과가 맞다면 / 관측 추세가 이어진다면)")
+        lines.append(
+            f"  비구속적(non-binding): 무익성 경계를 무시하고 계속해도 전체 α는 "
+            f"{seq['achieved_alpha']:.4f} 이하로 유지됩니다. "
+            f"경계를 지키면 **효능 방향** α가 {seq['alpha_upper_nominal']:.4f} → "
+            + _josa(f"{seq['alpha_if_honored']:.4f}", "으로", "로")
+            + " 내려갑니다 (양측 α "
+            + _josa(f"{seq['alpha']:.4g}", "이", "가")
+            + " 아니라 그 절반과 비교한 값입니다).")
     if show_n:
         lines.append(f"  ※ 중간분석 시점은 달력 날짜나 등록 인원이 아니라 "
                      f"**{info_label}**로 프로토콜에 적으세요 — 그 시점에는 이미 "
@@ -853,17 +921,45 @@ def render_markdown(plan: dict) -> str:
     if plan.get("sequential"):
         seq = plan["sequential"]
         info_label = seq.get("information_label", "누적 N")
-        lines += ["", f"**중간분석 경계 ({seq['spending_kr']}, 총 {seq['looks']}회)**", "",
-                  f"| 시점 | 정보비율 | {info_label} | Z 경계 | 명목 p | "
-                  "누적 α | 중단확률(H1) |",
-                  "|---|---|---|---|---|---|---|"]
+        has_fut = seq.get("futility_bounds") is not None
+        head = f"**중간분석 경계 ({seq['spending_kr']}, 총 {seq['looks']}회"
+        head += f", 무익성 {seq['futility_kr']})**" if has_fut else ")**"
+        lines += ["", head, "",
+                  f"| 시점 | 정보비율 | {info_label} | Z 경계 | 명목 p | 누적 α | "
+                  + ("중단확률(H1, 효능+무익) |" if has_fut else "중단확률(H1) |")
+                  + (" 무익성 Z | 무익성 명목 p(단측) | 무익중단(H0) |" if has_fut else ""),
+                  "|---|---|---|---|---|---|---|" + ("---|---|---|" if has_fut else "")]
         for row in seq["looks_detail"]:
             name = "최종" if row["is_final"] else f"중간 {row['look']}"
             amount = row.get("information_amount") or row.get("n_total") or 0
-            lines.append(
+            cells = (
                 f"| {name} | {row['information']:.3f} | {amount:,} | "
                 f"{row['bound_z']:.4f} | {row['nominal_p']:.5f} | "
                 f"{row['cumulative_alpha']:.4f} | {row['stop_prob_h1']:.1%} |")
+            if has_fut:
+                cells += (f" {row['futility_z']:.4f} | "
+                          f"{row['futility_nominal_p']:.5f} | "
+                          f"{row['futility_stop_h0']:.1%} |")
+            lines.append(cells)
+        if has_fut:
+            cps = ", ".join(
+                f"중간 {row['look']}: {row['cp_at_futility_alt']:.0%} "
+                f"(추세대로면 {row['cp_at_futility_trend']:.0%})"
+                for row in seq["looks_detail"]
+                if row.get("cp_at_futility_alt") is not None)
+            lines += ["", f"무익성 경계에서의 조건부 검정력 — {cps} "
+                          "(가정한 효과가 맞다면 / 관측 추세가 이어진다면).",
+                      "", f"실제 검정력 손실: {seq['target_power']:.1%} → "
+                          f"{seq['power_same_n']:.1%} "
+                          f"({seq['power_loss'] * 100:.1f}%p).",
+                      "", f"무익성 경계는 **비구속적**입니다 — 무시하고 계속해도 전체 α는 "
+                          f"{seq['achieved_alpha']:.4f} 이하이며, 지키면 효능 방향 α가 "
+                          f"{seq['alpha_upper_nominal']:.4f} → "
+                          + _josa(f"{seq['alpha_if_honored']:.4f}", "으로", "로")
+                          + " 내려갑니다. 효과가 없을 때 "
+                          f"중간에 멈출 확률 {seq['cumulative_futility_h0'][-2]:.1%}, "
+                          f"효과가 있는데 잘못 멈출 확률 "
+                          f"{seq['cumulative_futility_h1'][-2]:.1%}(= 소비한 β*)."]
         if seq.get("information_label", "누적 N") != "누적 N":
             total_info = seq.get("information_total") or 0
             unit = seq.get("information_unit", "")

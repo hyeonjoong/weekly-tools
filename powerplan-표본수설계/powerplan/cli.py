@@ -43,7 +43,7 @@ from .pilot import (effect_from_paired, effect_from_two_group, read_paired,
                     read_two_group, strip_unsafe)
 from .precision import diagnostic_plan, icc_plan, kappa_plan, loa_plan
 from .report import render_json, render_markdown, render_text
-from .sequential import SPENDING_KINDS
+from .sequential import FUTILITY_KINDS, SPENDING_KINDS
 from .solve import Adjustments, make_plan, smallest_unit
 from .validate import PowerPlanError, alpha_value, as_float, as_int, probability
 
@@ -113,6 +113,9 @@ def _add_common(parser: argparse.ArgumentParser, sides: bool = True,
                             help="α 소비함수 (기본 obf = O'Brien-Fleming형)")
         parser.add_argument("--timing", default=None,
                             help="중간분석 정보비율 (예: 0.5 또는 0.4,0.7). 기본은 균등 배치")
+        parser.add_argument("--futility", default=None, choices=FUTILITY_KINDS,
+                            help="무익성(futility) 중단 경계를 β 소비함수로 함께 계획 "
+                                 "(비구속적 — 전체 α는 유지). DSMB 헌장에 넣을 값")
     if cluster:
         parser.add_argument("--cluster-size", type=int, default=None,
                             help="군집 무작위배정: 군집당 인원 m")
@@ -511,6 +514,7 @@ def _adjustments(args) -> Adjustments:
         interim=getattr(args, "interim", None),
         spending=getattr(args, "spending", "obf"),
         timing=_parse_timing(getattr(args, "timing", None)),
+        futility=getattr(args, "futility", None),
     )
 
 

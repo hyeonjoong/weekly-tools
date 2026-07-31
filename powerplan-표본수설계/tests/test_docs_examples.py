@@ -147,6 +147,12 @@ PROMISED_NUMBERS = [
     ("noninf --margin 0.10 --p1 0.70 --p2 0.70 --power 0.8", ["군당 330명"]),
     ("ttest2 --d 0.5 --power 0.9 --interim 1 --spending pocock",
      ["군당 95명", "2.1570", "2.2010", "0.03101", "60.2%", "1.1110", "172명"]),
+    # 무익성(futility) 경계 — README·사용법.md가 인용한 숫자를 전부 못 박는다
+    ("ttest2 --d 0.5 --power 0.9 --interim 1 --spending pocock --futility obf",
+     ["군당 97명", "0.3849", "65.0%", "63.1%", "1.1317", "0.0246",
+      "39% (추세대로면 1%)", "90.0% → 89.5%", "0.5%p", "133명", "129명"]),
+    ("ttest2 --d 0.5 --power 0.9 --interim 1 --spending pocock --futility pocock",
+     ["군당 107명"]),
     ("pilot examples/wowfit_pilot.csv --pre 훈련전_단어인지도 --post 훈련후_단어인지도 "
      "--filter 군=중재 --power 0.8",
      ["쌍 n=11", "변화량 평균=10.3", "Cohen's dz = 1.5743", "Hedges g = 1.4527",
