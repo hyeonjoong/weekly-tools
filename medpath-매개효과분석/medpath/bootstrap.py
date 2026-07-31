@@ -21,7 +21,8 @@ from .linalg import GramCache
 from .special import norm_cdf, norm_ppf
 
 __all__ = ["EffectPlan", "BootResult", "run_bootstrap", "quantile",
-           "percentile_ci", "bc_ci", "bca_ci", "ci_from_boots", "jackknife_acceleration"]
+           "percentile_ci", "bc_ci", "bca_ci", "ci_from_boots",
+           "jackknife_acceleration", "jackknife_values", "acceleration_from"]
 
 # Replicates per work unit. Fixed (independent of --jobs) so that results are
 # byte-identical no matter how many worker processes are used.
@@ -190,28 +191,54 @@ def run_bootstrap(cache: GramCache, plan: EffectPlan, n_boot: int, seed: int,
     return BootResult(columns, n_boot, failed)
 
 
-def jackknife_acceleration(cache: GramCache, plan: EffectPlan,
-                           stat_index: int) -> Optional[float]:
-    """BCa acceleration from leave-one-out estimates.
+def jackknife_values(cache: GramCache, plan: EffectPlan) -> List[List[float]]:
+    """Leave-one-out effect vectors, one per usable row.
 
     Cheap because the full accumulator is linear in rows: leaving out row i is
-    a single vector subtraction, not a refit over N-1 rows.
+    a single vector subtraction, not a refit over N-1 rows. Computed **once**
+    per model — every BCa acceleration (each indirect effect and each pairwise
+    contrast) is then a reduction over this matrix rather than its own O(N)
+    sweep of Cholesky solves.
     """
     full = cache.full_acc()
-    vals = []
+    out: List[List[float]] = []
     for i in range(cache.n):
         vec = plan.compute(cache, cache.acc_minus_row(full, i))
-        if vec is None:
-            continue
-        vals.append(vec[stat_index])
-    if len(vals) < 3:
+        if vec is not None:
+            out.append(vec)
+    return out
+
+
+def acceleration_from(values: Sequence[float]) -> Optional[float]:
+    """BCa acceleration constant from a set of leave-one-out estimates."""
+    if len(values) < 3:
         return None
-    mbar = math.fsum(vals) / len(vals)
-    num = math.fsum((mbar - v) ** 3 for v in vals)
-    den = math.fsum((mbar - v) ** 2 for v in vals)
+    mbar = math.fsum(values) / len(values)
+    num = math.fsum((mbar - v) ** 3 for v in values)
+    den = math.fsum((mbar - v) ** 2 for v in values)
     if den <= 0:
         return None
     return num / (6.0 * den ** 1.5)
+
+
+def jackknife_acceleration(cache: GramCache, plan: EffectPlan,
+                           stat_index: int,
+                           minus_index: Optional[int] = None,
+                           jack: Optional[Sequence[Sequence[float]]] = None
+                           ) -> Optional[float]:
+    """BCa acceleration for one statistic, or for a difference of two.
+
+    ``minus_index`` makes the statistic ``vec[stat_index] - vec[minus_index]``,
+    which is what a contrast between two specific indirect effects is — so
+    contrasts get a genuine BCa interval instead of silently degrading to BC.
+    Pass ``jack`` (from :func:`jackknife_values`) to reuse one sweep.
+    """
+    rows = jack if jack is not None else jackknife_values(cache, plan)
+    if minus_index is None:
+        vals = [v[stat_index] for v in rows]
+    else:
+        vals = [v[stat_index] - v[minus_index] for v in rows]
+    return acceleration_from(vals)
 
 
 def quantile(sorted_vals: Sequence[float], q: float) -> float:

@@ -124,7 +124,7 @@ class _Out:
 
 
 def _reg_block(out: _Out, reg: Regression, caption: str, digits: int,
-               highlight: Sequence[str] = ()) -> None:
+               highlight: Sequence[str] = (), conf: float = 0.95) -> None:
     fstat = ("F(%d, %d) = %s, p %s" % (reg.f_df[0], reg.f_df[1], fmt(reg.f, 2), fmt_p(reg.f_p))
              if math.isfinite(reg.f) else "F —")
     out.sub("%s   R² = %s, adj. R² = %s, %s, N = %d"
@@ -134,7 +134,9 @@ def _reg_block(out: _Out, reg: Regression, caption: str, digits: int,
         mark = " ←" if c.name in highlight else ""
         rows.append([c.name + mark, fmt(c.estimate, digits), fmt(c.se, digits),
                      fmt(c.t, 2), fmt_p(c.p), _ci(c.ci_lo, c.ci_hi, digits)])
-    out.table(["항목", "계수", "SE", "t", "p", "95% CI"],
+    # The interval is built with the requested --conf, so it must be labelled
+    # with that level; hard-coding "95%" silently mislabels every other run.
+    out.table(["항목", "계수", "SE", "t", "p", "%g%% CI" % (conf * 100)],
               rows, ["l", "r", "r", "r", "r", "r"], indent="    ")
 
 
@@ -143,7 +145,9 @@ def _effect_rows(effects: Sequence[Effect], digits: int) -> List[List[str]]:
     for e in effects:
         flag = ""
         if e.kind in ("indirect", "indirect_total"):
-            flag = "0 미포함" if e.significant else ("0 포함" if math.isfinite(e.ci_lo) else "—")
+            # "검정 안 함" (not tested) must never collapse into "0 포함"
+            # (tested, covers zero) — they mean opposite things to a reader.
+            flag = ("0 미포함" if e.significant else "0 포함") if e.tested else "검정 안 함"
         else:
             flag = "p %s" % fmt_p(e.p)
         rows.append([e.label, fmt(e.estimate, digits), fmt(e.se, digits),
@@ -167,13 +171,32 @@ def _apa_sentences(res: MediationResult, digits: int) -> Tuple[str, str]:
     model_en = ("serial multiple mediation" if res.serial else
                 ("simple mediation" if len(inds) == 1 else "parallel multiple mediation"))
 
-    ko = ["%s 모형으로 %s → %s 경로를 검정했다(N = %d, 부트스트랩 %s회, %s%% %s 신뢰구간)."
-          % (model_ko, x, y, d.n_used, "{:,}".format(res.boot_ok), conf_pct, method)]
-    en = ["A %s model was estimated for %s → %s (N = %d, %s bootstrap resamples, "
-          "%s%% %s confidence intervals)."
-          % (model_en, x, y, d.n_used, "{:,}".format(res.boot_ok), conf_pct, method_en)]
+    # With no resamples there is no interval and no test — the sentence must
+    # say that outright instead of reading as a tested null result.
+    untested = [e for e in inds if not e.tested]
+    if untested and len(untested) == len(inds):
+        ko = ["%s 모형으로 %s → %s 경로를 추정했다(N = %d). 부트스트랩을 실행하지 않아 "
+              "간접효과의 신뢰구간과 유의성 검정은 수행하지 않았다."
+              % (model_ko, x, y, d.n_used)]
+        en = ["A %s model was estimated for %s → %s (N = %d). No bootstrap resamples "
+              "were drawn, so the indirect effects were not tested and no confidence "
+              "intervals are available."
+              % (model_en, x, y, d.n_used)]
+    else:
+        ko = ["%s 모형으로 %s → %s 경로를 검정했다(N = %d, 부트스트랩 %s회, %s%% %s 신뢰구간)."
+              % (model_ko, x, y, d.n_used, "{:,}".format(res.boot_ok), conf_pct, method)]
+        en = ["A %s model was estimated for %s → %s (N = %d, %s bootstrap resamples, "
+              "%s%% %s confidence intervals)."
+              % (model_en, x, y, d.n_used, "{:,}".format(res.boot_ok), conf_pct, method_en)]
     for e in inds:
         chain = e.label.replace("간접효과 ", "")
+        if not e.tested:
+            ko.append("%s 경로의 간접효과 점추정치는 %s였다(검정하지 않음 — 신뢰구간 없음)."
+                      % (chain, fmt(e.estimate, digits)))
+            en.append("The point estimate of the indirect effect through %s was ab = %s "
+                      "(not tested; no confidence interval)."
+                      % (chain.replace(" → ", " -> "), fmt(e.estimate, digits)))
+            continue
         sig_ko = "유의하였다" if e.significant else "유의하지 않았다"
         sig_en = "significant" if e.significant else "not significant"
         ko.append("%s 경로의 간접효과는 %s(ab = %s, SE = %s, %s%% CI %s)."
@@ -265,9 +288,14 @@ def render(res: MediationResult, source: str, mode: str = "text",
             parts = " × ".join("%s = %s" % (n, fmt(v, digits)) for n, v, _ in e.components)
             out.sub(e.label)
             out.line("    %s = %s" % (parts, fmt(e.estimate, digits)))
-            out.line("    %s %g%% CI %s → %s"
-                     % (e.ci_method, res.conf * 100, _ci(e.ci_lo, e.ci_hi, digits),
-                        "0을 포함하지 않음(효과 있음)" if e.significant else "0을 포함(효과 근거 부족)"))
+            if e.tested:
+                out.line("    %s %g%% CI %s → %s"
+                         % (e.ci_method, res.conf * 100, _ci(e.ci_lo, e.ci_hi, digits),
+                            "0을 포함하지 않음(효과 있음)" if e.significant
+                            else "0을 포함(효과 근거 부족)"))
+            else:
+                out.line("    신뢰구간 없음 — 부트스트랩을 실행하지 않아 이 경로는 "
+                         "검정되지 않았습니다(‘유의하지 않다’와 다릅니다).")
             if math.isfinite(e.delta_z):
                 out.line("    Sobel/델타법 z = %s, p %s (참고용 — 곱의 분포는 정규가 아님)"
                          % (fmt(e.delta_z, 2), fmt_p(e.delta_p)))
@@ -279,10 +307,14 @@ def render(res: MediationResult, source: str, mode: str = "text",
             c for c in res.contrasts if c.significant]
         out.section("간접효과 간 대비 (어느 경로가 더 큰가)")
         if shown:
-            out.table(["대비", "차이", "%g%% CI" % (res.conf * 100), "판정"],
+            method = shown[0].ci_method or "부트스트랩"
+            out.table(["대비", "차이", "%g%% CI (%s)" % (res.conf * 100, method), "판정"],
                       [[c.label, fmt(c.estimate, digits), _ci(c.ci_lo, c.ci_hi, digits),
                         "0 미포함" if c.significant else "0 포함"] for c in shown],
                       ["l", "r", "r", "l"])
+            for c in shown:
+                for wmsg in c.warnings:
+                    out.line("    ! %s: %s" % (c.label, wmsg))
         if len(res.contrasts) > 10:
             out.line()
             out.bullet("대비 %d개 중 0을 포함하지 않는 것만 표시했습니다(전체는 --json 참고)."
@@ -293,14 +325,15 @@ def render(res: MediationResult, source: str, mode: str = "text",
         out.section("경로 계수 (회귀 결과)")
         for j, reg in enumerate(res.m_regressions):
             _reg_block(out, reg, "[M%d 모형] %s" % (j + 1, reg.outcome), digits,
-                       highlight=[d.x_name])
+                       highlight=[d.x_name], conf=res.conf)
         if res.y_regression:
             _reg_block(out, res.y_regression, "[Y 모형] %s (매개변수 포함)" % res.y_regression.outcome,
-                       digits, highlight=[d.x_name] + [nm for nm, _ in d.mediators])
+                       digits, highlight=[d.x_name] + [nm for nm, _ in d.mediators],
+                       conf=res.conf)
         if res.total_regression:
             _reg_block(out, res.total_regression,
                        "[총효과 모형] %s (매개변수 제외)" % res.total_regression.outcome,
-                       digits, highlight=[d.x_name])
+                       digits, highlight=[d.x_name], conf=res.conf)
 
     # --- diagnostics -----------------------------------------------------
     if not brief:
