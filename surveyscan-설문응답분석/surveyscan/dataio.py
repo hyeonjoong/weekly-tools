@@ -31,6 +31,9 @@ class SurveyData:
         unknown_id_columns: Optional[List[str]] = None,
         id_columns: Optional[List[str]] = None,
         id_values: Optional[List[Dict[str, str]]] = None,
+        source_lines: Optional[List[int]] = None,
+        skipped_blank_lines: Optional[List[int]] = None,
+        unreadable: Optional[Dict[str, Dict[str, object]]] = None,
     ):
         self.columns = columns
         self.rows = rows
@@ -40,6 +43,14 @@ class SurveyData:
         self.id_columns = id_columns or []
         # 응답자 순서와 1:1 대응하는 ID 값(원문 문자열). rows 와 길이 동일.
         self.id_values = id_values or []
+        # 각 응답자가 원본 CSV의 몇 번째 줄에서 왔는지(헤더가 1번 줄). rows 와 길이 동일.
+        # 빈 줄을 건너뛰면 '몇 번째 응답자'와 '파일의 몇 번째 줄'이 어긋나므로,
+        # 점수 CSV를 원자료에 다시 붙일 때 반드시 이 값을 써야 응답자가 밀리지 않는다.
+        self.source_lines = source_lines or list(range(2, len(rows) + 2))
+        # 건너뛴 완전 빈 줄들의 원본 줄 번호(엑셀이 중간에 남기는 빈 행 탐지용).
+        self.skipped_blank_lines = skipped_blank_lines or []
+        # 값은 있는데 숫자로 읽지 못한 셀: {컬럼: {"count": n, "examples": [원문...]}}
+        self.unreadable = unreadable or {}
 
     @property
     def n_respondents(self) -> int:
@@ -71,20 +82,39 @@ class SurveyData:
 
 
 def _parse_cell(raw: str, na_values: set, na_numbers: Sequence[float]) -> Optional[float]:
+    """셀 하나를 숫자로. 결측이면 None (읽지 못한 값과 구분하려면 _classify_cell 사용)."""
+    return _classify_cell(raw, na_values, na_numbers)[0]
+
+
+def _classify_cell(
+    raw: str, na_values: set, na_numbers: Sequence[float]
+) -> "tuple[Optional[float], str]":
+    """셀을 (값, 종류) 로 분류한다.
+
+    종류: "ok"(숫자), "blank"(빈칸), "na"(NA/999 등 선언된 결측 표기),
+          "unreadable"(값이 있는데 숫자로 못 읽음 — 텍스트 라벨, '3,5', '3점',
+          제로폭공백, 엑셀 아포스트로피 등).
+
+    'blank' 와 'unreadable' 을 구분하는 것이 핵심이다. 둘 다 결측으로 처리되지만
+    전자는 '응답 안 함', 후자는 **값이 있는데 도구가 못 읽은 것**이라 원인이
+    전혀 다르고, 후자를 조용히 결측으로 묻으면 N·결측률·α가 모두 틀어진다.
+    """
     s = raw.strip()
+    if s == "":
+        return None, "blank"
     if s.lower() in na_values:
-        return None
+        return None, "na"
     try:
         val = float(s)
     except (ValueError, OverflowError):
-        return None
+        return None, "unreadable"
     # inf/-inf/nan(예: 'inf', '1e400', '+nan') 는 통계를 오염시키고 JSON을 깨뜨리므로
     # 결측으로 처리한다('nan'/'NaN' 문자열은 이미 DEFAULT_NA에서 걸러짐).
     if not math.isfinite(val):
-        return None
+        return None, "na"
     if val in na_numbers:
-        return None
-    return val
+        return None, "na"
+    return val, "ok"
 
 
 def load_csv(
@@ -117,8 +147,16 @@ def load_csv(
         id_cols_present = [h for h in header if h in id_set]
         rows: List[Dict[str, Optional[float]]] = []
         id_values: List[Dict[str, str]] = []
-        for lineno, record in enumerate(reader, start=2):
+        source_lines: List[int] = []
+        skipped_blank: List[int] = []
+        unreadable: Dict[str, Dict[str, object]] = {}
+        for record in reader:
+            # reader.line_num 은 따옴표 안 줄바꿈까지 반영한 '파일의 실제 줄 번호'다.
+            # enumerate 로 세면 셀 안에 개행이 있을 때 줄 번호가 밀려 오류 메시지가 엉뚱한
+            # 줄을 가리킨다.
+            lineno = reader.line_num
             if not record or all(c.strip() == "" for c in record):
+                skipped_blank.append(lineno)
                 continue  # 완전 빈 줄은 건너뜀
             if len(record) != len(header):
                 raise DataError(
@@ -130,9 +168,17 @@ def load_csv(
                 if name in id_set:
                     ids[name] = cell.strip()
                     continue
-                row[name] = _parse_cell(cell, DEFAULT_NA, na_nums)
+                val, kind = _classify_cell(cell, DEFAULT_NA, na_nums)
+                row[name] = val
+                if kind == "unreadable":
+                    rec = unreadable.setdefault(name, {"count": 0, "examples": []})
+                    rec["count"] += 1
+                    ex = cell.strip()
+                    if len(rec["examples"]) < 5 and ex not in rec["examples"]:
+                        rec["examples"].append(ex)
             rows.append(row)
             id_values.append(ids)
+            source_lines.append(lineno)
 
     if not rows:
         raise DataError("데이터 행이 없습니다(헤더만 존재).")
@@ -143,4 +189,7 @@ def load_csv(
         unknown_id_columns=unknown_ids,
         id_columns=id_cols_present,
         id_values=id_values,
+        source_lines=source_lines,
+        skipped_blank_lines=skipped_blank,
+        unreadable=unreadable,
     )

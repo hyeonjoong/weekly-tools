@@ -69,6 +69,20 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="문항별 응답 선택지 빈도표를 추가 출력(척도 범위가 정수일 때)",
     )
+    p.add_argument(
+        "--quality",
+        action="store_true",
+        help="응답 품질(부주의응답) 선별 지표 추가: longstring·IRV·결측률. "
+        "자동 제외 기준이 아니라 원자료를 눈으로 확인할 대상을 좁히는 선별 도구",
+    )
+    p.add_argument(
+        "--longstring-min",
+        type=int,
+        default=None,
+        metavar="N",
+        help="--quality 의 longstring 플래그 기준(이 값 이상이면 플래그). "
+        "기본: max(3, 문항수/2) 휴리스틱",
+    )
     p.add_argument("--json", action="store_true", help="--format json 과 동일(하위호환)")
     p.add_argument(
         "--scores-out",
@@ -88,17 +102,20 @@ def _write_scores_csv(path: str, data: SurveyData, result: Dict[str, object]) ->
     """
     id_cols = data.id_columns
     subs = result["subscales"]
-    header = [_csv_safe(c) for c in id_cols] if id_cols else ["행"]
+    # 원본 CSV 줄 번호를 항상 첫 열로 낸다. 빈 줄을 건너뛰면 '몇 번째 응답자'와
+    # '파일의 몇 번째 줄'이 어긋나서, 이 열 없이 엑셀에 붙이면 응답자가 통째로
+    # 밀린다(사람마다 남의 점수가 붙는 조용한 사고).
+    header = ["원본CSV행"] + [_csv_safe(c) for c in id_cols]
     header += [_csv_safe(str(s["name"])) for s in subs]
     n = data.n_respondents
     with open(path, "w", encoding="utf-8-sig", newline="") as fh:
         w = csv.writer(fh)
         w.writerow(header)
         for r in range(n):
+            line_no = data.source_lines[r] if r < len(data.source_lines) else r + 2
+            row = [line_no]
             if id_cols:
-                row = [_csv_safe(data.id_values[r].get(c, "")) for c in id_cols]
-            else:
-                row = [r + 1]
+                row += [_csv_safe(data.id_values[r].get(c, "")) for c in id_cols]
             for s in subs:
                 val = s["scores"][r]
                 row.append("" if val is None else f"{val:.6g}")
@@ -198,8 +215,24 @@ def run(argv: Optional[List[str]] = None) -> int:
     if args.score_method is not None:
         cfg.score_method = args.score_method
 
+    if args.longstring_min is not None and args.longstring_min < 2:
+        print("오류: --longstring-min 은 2 이상이어야 합니다.", file=sys.stderr)
+        return 2
+    if args.longstring_min is not None and not args.quality:
+        print(
+            "경고: --longstring-min 은 --quality 와 함께 써야 적용됩니다(무시됨).",
+            file=sys.stderr,
+        )
+
     try:
-        result = analyze(data, cfg, conf=args.ci_level, item_freq=args.item_freq)
+        result = analyze(
+            data,
+            cfg,
+            conf=args.ci_level,
+            item_freq=args.item_freq,
+            quality_check=args.quality,
+            longstring_min=args.longstring_min,
+        )
     except ValueError as e:
         print(f"분석 오류: {e}", file=sys.stderr)
         return 2

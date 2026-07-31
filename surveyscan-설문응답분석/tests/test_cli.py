@@ -69,11 +69,14 @@ def test_cli_scores_out(tmp_path, capsys):
     assert rc == 0
     text = (tmp_path / "scores.csv").read_text(encoding="utf-8-sig")
     lines = text.strip().splitlines()
-    assert lines[0].startswith("ID,")
+    # 첫 열은 원본 CSV 줄 번호(엑셀에서 원자료에 정확히 붙일 수 있도록)
+    assert lines[0].startswith("원본CSV행,ID,")
     assert "불면증상(ISI)" in lines[0]
     # 응답자 40명 + 헤더
     assert len(lines) == 41
-    assert lines[1].startswith("S001,")
+    # 첫 응답자는 헤더 다음 줄(=2행)의 S001
+    assert lines[1].startswith("2,S001,")
+    assert lines[40].startswith("41,S040,")
 
 
 def test_cli_ci_level_validation(capsys):
@@ -119,7 +122,7 @@ def test_cli_scores_out_id_name_injection(tmp_path):
     rc = run([str(p), "--id-col", "=cmd", "--scores-out", out_csv])
     assert rc == 0
     header = (tmp_path / "s.csv").read_text(encoding="utf-8-sig").splitlines()[0]
-    assert header.startswith("'=cmd")
+    assert header.startswith("원본CSV행,'=cmd")
 
 
 def test_cli_scores_out_formula_injection(tmp_path):
@@ -135,11 +138,11 @@ def test_cli_scores_out_formula_injection(tmp_path):
     text = (tmp_path / "s.csv").read_text(encoding="utf-8-sig")
     lines = text.strip().splitlines()
     # 헤더의 위험한 하위척도 이름이 이스케이프됨
-    assert lines[0] == "ID,'=EVIL()"
-    # 위험한 ID 값이 모두 작은따옴표 접두
-    assert lines[1].startswith("'=cmd()")
-    assert lines[2].startswith("'+5")
-    assert lines[3].startswith("'@x")
+    assert lines[0] == "원본CSV행,ID,'=EVIL()"
+    # 위험한 ID 값이 모두 작은따옴표 접두(줄번호 열 다음)
+    assert lines[1].startswith("2,'=cmd()")
+    assert lines[2].startswith("3,'+5")
+    assert lines[3].startswith("4,'@x")
 
 
 def test_cli_markdown_pipe_escaping(tmp_path, capsys):
