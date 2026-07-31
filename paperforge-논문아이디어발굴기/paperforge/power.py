@@ -16,6 +16,15 @@ References
   f2=0.15: N=55/68/77/85/92 for k=1..5 predictors. A naive z-approximation that
   ignores the numerator degrees of freedom badly *under*-states N once k>1 (it
   would give ~57 for k=3), so we do not use it.
+- Two independent proportions (binary endpoint, e.g. response rate): the standard
+  pooled/unpooled normal approximation
+  ``N = (z_a sqrt(p̄q̄/(w1 w2)) + z_b sqrt(p1q1/w1 + p2q2/w2))^2 / (p1-p2)^2``.
+  For 30% vs 50% at alpha=.05/power=.80 this gives 186 total = 93 per group,
+  matching the classic Fleiss table without continuity correction.
+- Time-to-event (log-rank / Cox): Schoenfeld's formula
+  ``events = (z_a + z_b)^2 / (w1 w2 (ln HR)^2)``, converted to subjects by the
+  expected event probability. HR=0.70 at alpha=.05/power=.80 needs 247 events —
+  the number every oncology protocol quotes.
 
 Note: the correlation and two-group forms are normal approximations that can
 land ~1 subject/group below exact non-central-t tools (e.g. G*Power gives
@@ -162,7 +171,11 @@ def _checked_n(n: float) -> int:
             f"필요 표본수가 {_MAX_N:,}명을 넘습니다 — 가정 효과크기가 "
             "비현실적으로 작지 않은지 확인하세요."
         )
-    return math.ceil(n)
+    # Snap before ceiling, for the same reason rows_to_subjects does: an exact
+    # integer result (e.g. events/event_rate = 40.00000000000001) otherwise
+    # ceilings to 41, which then breaks the MDES -> required-N round-trip these
+    # functions promise. Only values within ~1 ulp of an integer are affected.
+    return math.ceil(_snap(n))
 
 
 def _z_alpha(alpha: float, sided: int = 2) -> float:
@@ -324,12 +337,241 @@ def n_for_regression_change(
     )
 
 
+# --- Binary endpoints: two independent proportions ---------------------------
+#
+# The single most common clinical endpoint after "mean difference": response
+# rate, remission rate, AE incidence, seroconversion. Sizing it as a Cohen's d
+# (what a tool without this family forces you to do) is wrong in both directions
+# depending on where the rates sit, so it gets its own closed form.
+
+
+def _check_proportion(p: float, name: str) -> float:
+    p = float(p)
+    if p != p or not 0.0 < p < 1.0:
+        raise ValueError(f"{name} must be strictly between 0 and 1 (got {p!r})")
+    return p
+
+
+def _prop_terms(p1: float, p2: float, allocation: float):
+    """``(pooled_sd_term, unpooled_sd_term)`` for the two-proportion forms.
+
+    Both are the per-``sqrt(N)`` standard errors of the risk difference: the
+    pooled one holds under H0 (which is what the test statistic uses), the
+    unpooled one under H1 (which is what the alternative distribution has).
+    Using both — rather than the pooled term twice — is what makes this agree
+    with published tables instead of running ~5% light.
+    """
+    w1, w2 = allocation, 1.0 - allocation
+    pbar = w1 * p1 + w2 * p2
+    pooled = math.sqrt(pbar * (1.0 - pbar) / (w1 * w2))
+    unpooled = math.sqrt(p1 * (1.0 - p1) / w1 + p2 * (1.0 - p2) / w2)
+    return pooled, unpooled
+
+
+def n_for_two_proportions(
+    p1: float, p2: float, alpha: float = 0.05, power: float = 0.80,
+    allocation: float = 0.5, sided: int = 2,
+) -> int:
+    """Total N to detect a difference between response rates ``p1`` and ``p2``.
+
+    ``allocation`` is the fraction of the sample in group 1. No continuity
+    correction is applied (it would add ~4 subjects/group at these rates and is
+    considered over-conservative for the score test actually used in practice);
+    the report says the numbers are planning approximations.
+    """
+    p1 = _check_proportion(p1, "p1")
+    p2 = _check_proportion(p2, "p2")
+    if p1 == p2:
+        raise ValueError(_TOO_SMALL.format(kind="p1-p2", value=0.0))
+    if not 0.0 < allocation < 1.0:
+        raise ValueError("allocation must satisfy 0 < allocation < 1")
+    za, zb = _z_pair(alpha, power, sided)
+    pooled, unpooled = _prop_terms(p1, p2, allocation)
+    delta2 = _sq(p1 - p2, "p1-p2")
+    return _checked_n((za * pooled + zb * unpooled) ** 2 / delta2)
+
+
+def power_for_two_proportions(
+    p1: float, p2: float, n_total: int, alpha: float = 0.05,
+    allocation: float = 0.5, sided: int = 2,
+) -> float:
+    """Power of the two-proportion test at ``n_total`` (inverse of the above)."""
+    p1 = _check_proportion(p1, "p1")
+    p2 = _check_proportion(p2, "p2")
+    if p1 == p2:
+        raise ValueError("p1 and p2 must differ")
+    if not 0.0 < allocation < 1.0:
+        raise ValueError("allocation must satisfy 0 < allocation < 1")
+    n_total = int(n_total)
+    if n_total < 4:
+        raise ValueError("n_total must be >= 4 (>= 2 per group)")
+    za = _z_alpha(alpha, sided)
+    pooled, unpooled = _prop_terms(p1, p2, allocation)
+    delta = abs(p1 - p2) * math.sqrt(n_total)
+    pw = norm_cdf((delta - za * pooled) / unpooled)
+    if sided == 2:
+        pw += norm_cdf((-delta - za * pooled) / unpooled)
+    return pw
+
+
+def mdes_two_proportions(
+    n_total: int, p1: float, alpha: float = 0.05, power: float = 0.80,
+    allocation: float = 0.5, sided: int = 2, direction: int = 1,
+) -> float:
+    """Smallest detectable ``p2`` given the control rate ``p1`` and ``n_total``.
+
+    A risk difference has no single scale-free magnitude — its detectability
+    depends on where the baseline rate sits (0.05 vs 0.10 is far harder than
+    0.45 vs 0.50 at the same N). So the MDES is expressed as the treatment rate
+    you could distinguish from the *observed* control rate, found by bisecting
+    the exact power curve. ``direction`` +1 searches upward from ``p1``, -1
+    downward. Raises when even ``p2 -> 0/1`` cannot reach the target power.
+    """
+    p1 = _check_proportion(p1, "p1")
+    n_total = int(n_total)
+    if n_total < 4:
+        raise ValueError("n_total must be >= 4 (>= 2 per group)")
+    if direction not in (1, -1):
+        raise ValueError("direction must be +1 or -1")
+    _z_pair(alpha, power, sided)
+    edge = 1.0 - 1e-9 if direction > 0 else 1e-9
+    if power_for_two_proportions(p1, edge, n_total, alpha, allocation, sided) < power:
+        raise ValueError("no detectable p2 at this N")
+    lo, hi = p1, edge  # lo: not detectable, hi: detectable
+    for _ in range(200):
+        mid = 0.5 * (lo + hi)
+        if power_for_two_proportions(
+            p1, mid, n_total, alpha, allocation, sided
+        ) < power:
+            lo = mid
+        else:
+            hi = mid
+        if abs(hi - lo) <= 1e-9:
+            break
+    return hi
+
+
+# --- Time-to-event endpoints: log-rank / Cox ---------------------------------
+#
+# Survival is the primary endpoint of most oncology and cardiovascular trials,
+# and it is the one family where "how many subjects?" is the *second* question —
+# the design is driven by the number of EVENTS, with enrolment following from the
+# expected event probability. Both numbers are reported.
+
+
+def events_for_survival(
+    hr: float, alpha: float = 0.05, power: float = 0.80,
+    allocation: float = 0.5, sided: int = 2,
+) -> int:
+    """Number of *events* needed to detect a hazard ratio ``hr`` (Schoenfeld).
+
+    ``events = (z_a + z_b)^2 / (w1 w2 (ln HR)^2)`` — independent of the sample
+    size, the accrual pattern and the baseline hazard, which is exactly why the
+    log-rank literature quotes events rather than subjects.
+    """
+    hr = float(hr)
+    if hr != hr or hr <= 0.0 or not math.isfinite(hr):
+        raise ValueError("hr must be a finite number > 0")
+    if hr == 1.0:
+        raise ValueError(_TOO_SMALL.format(kind="hr", value=hr))
+    if not 0.0 < allocation < 1.0:
+        raise ValueError("allocation must satisfy 0 < allocation < 1")
+    za, zb = _z_pair(alpha, power, sided)
+    loghr2 = _sq(math.log(hr), "ln(hr)")
+    return _checked_n((za + zb) ** 2 / (allocation * (1.0 - allocation) * loghr2))
+
+
+def n_for_survival(
+    hr: float, event_rate: float, alpha: float = 0.05, power: float = 0.80,
+    allocation: float = 0.5, sided: int = 2,
+) -> int:
+    """Subjects to enrol so that the required number of events accrues.
+
+    ``event_rate`` is the probability that a randomised subject is *observed* to
+    have the event during follow-up (i.e. after censoring), pooled over arms.
+    ``N = ceil(events / event_rate)``.
+    """
+    event_rate = _check_proportion_inclusive(event_rate, "event_rate")
+    events = events_for_survival(hr, alpha, power, allocation, sided)
+    return _checked_n(events / event_rate)
+
+
+def _check_proportion_inclusive(p: float, name: str) -> float:
+    """0 < p <= 1 — an event rate of exactly 1 (no censoring) is legitimate."""
+    p = float(p)
+    if p != p or not 0.0 < p <= 1.0:
+        raise ValueError(f"{name} must satisfy 0 < {name} <= 1 (got {p!r})")
+    return p
+
+
+def expected_events(n_total, event_rate: float):
+    """Events expected from ``n_total`` subjects, floored (``None`` if n unknown).
+
+    Floored deliberately: over-counting events is the direction that overstates
+    power, and a fractional event is not a thing a trial can observe.
+    """
+    if n_total is None:
+        return None
+    event_rate = _check_proportion_inclusive(event_rate, "event_rate")
+    return math.floor(_snap(int(n_total) * event_rate))
+
+
+def power_for_survival(
+    hr: float, n_total: int, event_rate: float, alpha: float = 0.05,
+    allocation: float = 0.5, sided: int = 2,
+) -> float:
+    """Log-rank power from the events ``n_total`` subjects are expected to yield."""
+    hr = float(hr)
+    if hr != hr or hr <= 0.0 or not math.isfinite(hr):
+        raise ValueError("hr must be a finite number > 0")
+    if hr == 1.0:
+        raise ValueError("hr must differ from 1")
+    if not 0.0 < allocation < 1.0:
+        raise ValueError("allocation must satisfy 0 < allocation < 1")
+    events = expected_events(n_total, event_rate)
+    if events is None or events < 1:
+        raise ValueError("n_total x event_rate must yield at least one event")
+    za = _z_alpha(alpha, sided)
+    delta = abs(math.log(hr)) * math.sqrt(
+        events * allocation * (1.0 - allocation)
+    )
+    pw = norm_cdf(delta - za)
+    if sided == 2:
+        pw += norm_cdf(-delta - za)
+    return pw
+
+
+def mdes_survival(
+    n_total: int, event_rate: float, alpha: float = 0.05, power: float = 0.80,
+    allocation: float = 0.5, sided: int = 2,
+) -> float:
+    """Smallest detectable hazard ratio, returned on the ``HR > 1`` side.
+
+    Inverts Schoenfeld: ``|ln HR| = (z_a + z_b) / sqrt(E w1 w2)``. A hazard ratio
+    is symmetric on the log scale, so the value ``h`` returned means "HR >= h, or
+    equivalently HR <= 1/h, is detectable"; the report prints both.
+    """
+    events = expected_events(n_total, event_rate)
+    if events is None or events < 1:
+        raise ValueError("n_total x event_rate must yield at least one event")
+    if not 0.0 < allocation < 1.0:
+        raise ValueError("allocation must satisfy 0 < allocation < 1")
+    za, zb = _z_pair(alpha, power, sided)
+    return math.exp((za + zb) / math.sqrt(events * allocation * (1.0 - allocation)))
+
+
 def scale_effect(effect: dict, factor: float) -> dict:
     """Return a copy of ``effect`` with its magnitude scaled by ``factor``.
 
     Used for effect-size sensitivity: ``factor<1`` assumes a *smaller* true
     effect (→ larger required N), ``factor>1`` a larger one. Correlation r is
     capped below 1. Exploratory effects are returned unchanged.
+
+    The two clinical families scale on their natural metric, not on the raw
+    number: a *risk difference* is scaled around the control rate (and clipped
+    inside (0,1), so halving a 0.30→0.90 contrast gives 0.30→0.60 rather than an
+    impossible rate), and a *hazard ratio* is scaled on the log scale, so
+    factor=0.5 turns HR=0.50 into HR=0.71 — half the effect, not "HR=0.25".
     """
     factor = float(factor)
     if factor <= 0:
@@ -342,6 +584,22 @@ def scale_effect(effect: dict, factor: float) -> dict:
         e["d"] = abs(e["d"]) * factor
     elif etype in ("regression", "regression_change"):
         e["f2"] = e["f2"] * factor
+    elif etype == "two_proportion":
+        p1 = float(e["p1"])
+        p2 = p1 + (float(e["p2"]) - p1) * factor
+        e["p2"] = min(max(p2, 1e-9), 1.0 - 1e-9)
+    elif etype == "survival":
+        hr = float(e["hr"])
+        if hr > 0.0 and math.isfinite(hr):
+            # Clamp the EXPONENT, not just the input: math.exp raises
+            # OverflowError past ~709 (an uncaught traceback, since the CLI
+            # catches ValueError), and underflows to exactly 0.0 below ~-745,
+            # which later surfaced as the misleading "hr must be > 0" — about an
+            # hr the user never typed. Reachable with a large --effect-scale on
+            # any HR>1 template, and even at the default scale via the 1.5
+            # sensitivity factor when a pack declares an absurd hr. Both ends are
+            # already far past "no study could distinguish this".
+            e["hr"] = math.exp(max(-700.0, min(700.0, math.log(hr) * factor)))
     return e
 
 
@@ -354,6 +612,11 @@ def effect_magnitude(effect: dict):
         return effect["d"]
     if etype in ("regression", "regression_change"):
         return effect["f2"]
+    if etype == "two_proportion":
+        # The risk difference — the quantity the sizing formula actually squares.
+        return abs(float(effect["p2"]) - float(effect["p1"]))
+    if etype == "survival":
+        return effect["hr"]
     return None
 
 
@@ -369,6 +632,10 @@ def required_total_n(effect: dict, alpha: float = 0.05, power: float = 0.80,
         {"type": "regression", "f2": 0.15, "k": 3}           # overall-R^2 test
         {"type": "regression_change", "f2": 0.15,            # incremental-R^2
          "k_tested": 2, "k_control": 1}
+        {"type": "two_proportion", "p1": 0.30, "p2": 0.50,   # binary endpoint
+         "allocation": 0.5}
+        {"type": "survival", "hr": 0.70, "event_rate": 0.6,  # time-to-event
+         "allocation": 0.5}
         {"type": "exploratory"}                # no closed-form target -> None
 
     ``sided`` (1 or 2) applies to the z-based tests only. The regression forms
@@ -393,9 +660,34 @@ def required_total_n(effect: dict, alpha: float = 0.05, power: float = 0.80,
         return n_for_regression_change(
             effect["f2"], effect["k_tested"], effect["k_control"], alpha, power
         )
+    if etype == "two_proportion":
+        return n_for_two_proportions(
+            effect["p1"], effect["p2"], alpha, power,
+            effect.get("allocation", 0.5), sided,
+        )
+    if etype == "survival":
+        return n_for_survival(
+            effect["hr"], effect["event_rate"], alpha, power,
+            effect.get("allocation", 0.5), sided,
+        )
     if etype == "exploratory":
         return None
     raise ValueError(f"Unknown effect type: {etype!r}")
+
+
+def required_events(effect: dict, alpha: float = 0.05, power: float = 0.80,
+                    sided: int = 2):
+    """Events required for a time-to-event spec, or ``None`` for other families.
+
+    Reported alongside the subject count because a survival trial is powered on
+    events: enrolling the N below but following it for half as long leaves the
+    study underpowered even though the enrolment target was met.
+    """
+    if effect.get("type") != "survival":
+        return None
+    return events_for_survival(
+        effect["hr"], alpha, power, effect.get("allocation", 0.5), sided
+    )
 
 
 def _f_power(f2: float, n: int, k_num: int, k_full: int, alpha: float) -> float:
@@ -867,9 +1159,28 @@ def detectable_effect(effect: dict, n, alpha: float = 0.05, power: float = 0.80,
             if f2 > 9.0:
                 return None
             return {"metric": "f2", "value": f2}
+        if etype == "two_proportion":
+            p1 = float(effect["p1"])
+            direction = 1 if float(effect["p2"]) >= p1 else -1
+            p2 = mdes_two_proportions(
+                n, p1, alpha, power, effect.get("allocation", 0.5), sided,
+                direction,
+            )
+            # Report the risk difference (the comparable magnitude) but keep the
+            # two rates, since "0.30 vs 0.47" is what goes in the protocol.
+            return {"metric": "delta_p", "value": abs(p2 - p1),
+                    "p1": round(p1, 4), "p2": round(p2, 4)}
+        if etype == "survival":
+            hr = mdes_survival(
+                n, effect["event_rate"], alpha, power,
+                effect.get("allocation", 0.5), sided,
+            )
+            return {"metric": "hr", "value": hr,
+                    "hr_protective": round(1.0 / hr, 4),
+                    "events": expected_events(n, effect["event_rate"])}
         if etype == "exploratory":
             return None
-    except ValueError:
+    except (ValueError, OverflowError, ZeroDivisionError):
         return None
     raise ValueError(f"Unknown effect type: {etype!r}")
 
@@ -1009,8 +1320,18 @@ def attained_power(effect: dict, n, alpha: float = 0.05, sided: int = 2):
             return power_for_regression_change(
                 effect["f2"], n, effect["k_tested"], effect["k_control"], alpha
             )
+        if etype == "two_proportion":
+            return power_for_two_proportions(
+                effect["p1"], effect["p2"], n, alpha,
+                effect.get("allocation", 0.5), sided,
+            )
+        if etype == "survival":
+            return power_for_survival(
+                effect["hr"], n, effect["event_rate"], alpha,
+                effect.get("allocation", 0.5), sided,
+            )
         if etype == "exploratory":
             return None
-    except ValueError:
+    except (ValueError, OverflowError, ZeroDivisionError):
         return None
     raise ValueError(f"Unknown effect type: {etype!r}")

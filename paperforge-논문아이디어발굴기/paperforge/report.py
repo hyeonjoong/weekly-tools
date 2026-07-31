@@ -18,6 +18,14 @@ def _mods(result: IdeaResult) -> str:
     return " × ".join(modality_label(m) for m in result.modalities)
 
 
+def _collapse_warnings(warnings) -> list:
+    """De-duplicate warnings, keeping order and noting repeat counts."""
+    counts: dict = {}
+    for w in warnings:
+        counts[w] = counts.get(w, 0) + 1
+    return [w if c == 1 else f"{w} (동일 경고 {c}건)" for w, c in counts.items()]
+
+
 def _req_n(result: IdeaResult) -> str:
     """Recommended-N cell: a number, or '비적용' for exploratory designs."""
     return "비적용" if result.required_n is None else str(result.required_n)
@@ -69,7 +77,12 @@ def render_markdown(
         lines.append(
             f"- 중도탈락 가정: {dropout:.0%} → 권장 모집 N = ⌈권장 N / (1−{dropout:.2f})⌉"
         )
-    lines.append(f"- 생성된 아이디어: {len(results)}개 (점수순)")
+    max_n = settings.get("max_n")
+    if max_n:
+        lines.append(f"- 모집 상한 가정: 최대 {max_n}명 (초과 아이디어는 상세에 표시)")
+    filtered = " · '충분 가능'만 표시(--feasible-only)" if settings.get(
+        "feasible_only") else ""
+    lines.append(f"- 생성된 아이디어: {len(results)}개 (점수순){filtered}")
     if manifest.warnings:
         lines.append("")
         lines.append("> ⚠️ 매니페스트 경고:")
@@ -109,13 +122,28 @@ def render_markdown(
             f"{r.journal} |"
         )
     lines.append("")
-    lines.append(
+    legend = (
         "> '현재 검정력' = 보유 N과 템플릿의 가정 효과크기에서 실제로 얻는 검정력"
         "(예: 0.62 = 참 효과가 있어도 38% 확률로 놓침). 상관·평균차는 정규근사라 "
         "N이 작을수록(N≲30) 정확한 t 기반 값보다 최대 ~3%p 높게 나올 수 있습니다. "
         "'탐지가능 효과' = 보유 N으로 alpha/power 기준 검출 가능한 최소 효과크기"
         "(민감도 분석). 예: `r≥0.29`는 상관 0.29 이상이면 검출 가능."
     )
+    # The clinical clauses used to be printed on every report with invented
+    # numbers that matched no row on the page (and contradicted the README).
+    # Explain each notation only when a row actually uses it.
+    metrics = {r.detectable["metric"] for r in results if r.detectable}
+    if "delta_p" in metrics:
+        legend += (
+            " 이분 종점의 `Δp≥…`는 대조군 비율을 고정하고 구한 위험차이며, "
+            "괄호의 `30%→48%`는 그때의 대조군→시험군 비율입니다."
+        )
+    if "hr" in metrics:
+        legend += (
+            " 시간-사건 종점의 `HR≥…`는 위험비가 로그척도에서 대칭이므로 "
+            "괄호에 반대 방향(보호 효과) 값을 함께 적습니다."
+        )
+    lines.append(legend)
     lines.append("")
 
     # Detail blocks.
@@ -148,14 +176,35 @@ def render_markdown(
                 f"{r.available_n if r.available_n is not None else '미상'}명 ≈ "
                 f"분석 행 {r.analysis_n if r.analysis_n is not None else '미상'}개)"
             )
+        if r.required_events is not None:
+            got = (
+                f" · 보유 N 기준 예상 사건 {r.expected_events}건"
+                if r.expected_events is not None else ""
+            )
+            lines.append(
+                f"- **필요 사건 수(시간-사건 설계)**: {r.required_events}건{got} "
+                "— 검정력은 등록 인원이 아니라 사건 수로 결정됩니다."
+            )
         if r.detectable is not None:
             lines.append(
                 f"- **탐지가능 최소효과(보유 N 기준)**: {r.detectable_label} "
                 "— 이보다 작은 실제 효과는 검출되지 않을 수 있음."
             )
+        if r.within_max_n is False:
+            lines.append(
+                "- **모집 상한 초과**: 설정한 --max-n 로는 권장 N에 도달할 수 "
+                "없습니다(위 참고 항목 확인)."
+            )
+        if r.justification:
+            lines.append(
+                f"- **표본수 산출 근거(프로토콜·IRB 문장)**: {r.justification}"
+            )
         if r.n_sensitivity:
+            # Name the metric: "효과 0.79" beside the 보수적 label reads as a
+            # LARGER effect when the metric is a hazard ratio.
             strip = " / ".join(
-                f"{s['label']} N={s['required_n']}(효과 {s['effect_value']})"
+                f"{s['label']} N={s['required_n']}"
+                f"({s.get('metric', '효과')} {s['effect_value']})"
                 for s in r.n_sensitivity
             )
             lines.append(f"- **표본수 민감도(효과크기 가정별 권장 N)**: {strip}")
@@ -174,9 +223,9 @@ def render_markdown(
     lines.append("")
     lines.append("---")
     lines.append(
-        "_권장 N은 Fisher-z(상관)·정규근사(평균차)·비중심 F(회귀/ΔR²)에 기반한 계획용 "
-        "추정치이며, 효과크기는 각 템플릿에 내장된 가정입니다. "
-        "최종 검정력은 G*Power 등으로 확정하세요._"
+        "_권장 N은 Fisher-z(상관)·정규근사(평균차·두 비율)·비중심 F(회귀/ΔR²)·"
+        "Schoenfeld(로그순위)에 기반한 계획용 추정치이며, 효과크기는 각 템플릿에 "
+        "내장된 가정입니다. 최종 검정력은 G*Power 등으로 확정하세요._"
     )
     return "\n".join(lines)
 
@@ -189,15 +238,18 @@ def render_csv(results: list) -> str:
             "rank", "idea_id", "title", "modalities", "design", "hypothesis",
             "predictors", "outcomes", "analysis", "required_n", "required_rows",
             "recruit_n", "available_n", "analysis_n", "attained_power",
+            "required_events", "expected_events", "within_max_n",
             "detectable_metric", "detectable_value",
             "n_sensitivity", "feasibility", "journal", "novelty", "score",
+            "sample_size_justification",
         ]
     )
     for i, r in enumerate(results, 1):
         det_metric = r.detectable["metric"] if r.detectable else ""
         det_value = round(r.detectable["value"], 4) if r.detectable else ""
         sens = "|".join(
-            f"{s['label']}:{s['required_n']}@{s['effect_value']}"
+            f"{s['label']}:{s['required_n']}@{s.get('metric', '')}"
+            f"{s['effect_value']}"
             for s in r.n_sensitivity
         )
         writer.writerow(
@@ -210,8 +262,12 @@ def render_csv(results: list) -> str:
                 r.available_n if r.available_n is not None else "",
                 r.analysis_n if r.analysis_n is not None else "",
                 round(r.attained_power, 4) if r.attained_power is not None else "",
+                r.required_events if r.required_events is not None else "",
+                r.expected_events if r.expected_events is not None else "",
+                "" if r.within_max_n is None else int(r.within_max_n),
                 det_metric, det_value, sens,
                 r.feasibility_label, r.journal, r.novelty, r.score,
+                r.justification,
             ]
         )
     return buf.getvalue()
@@ -243,7 +299,10 @@ def render_json(
                 manifest.linked_n.items(), key=lambda kv: sorted(kv[0])
             )
         },
-        "warnings": list(manifest.warnings),
+        # Same collapse the Markdown applies: a 50k-row inventory with one bad
+        # modality produced a 5 MB JSON of 50,000 identical warning strings
+        # while the .md from the same run correctly showed one line.
+        "warnings": _collapse_warnings(manifest.warnings),
         "ideas": [
             {
                 "rank": i,
@@ -264,6 +323,10 @@ def render_json(
                     round(r.attained_power, 6)
                     if r.attained_power is not None else None
                 ),
+                "required_events": r.required_events,
+                "expected_events": r.expected_events,
+                "within_max_n": r.within_max_n,
+                "sample_size_justification": r.justification,
                 "planned_effect": r.planned_effect,
                 "linked_declared": r.linked_declared,
                 "detectable_effect": r.detectable,

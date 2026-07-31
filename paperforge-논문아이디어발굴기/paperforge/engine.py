@@ -11,7 +11,9 @@ from .power import (
     design_effect,
     detectable_effect,
     effect_magnitude,
+    expected_events,
     observation_level,
+    required_events,
     required_total_n,
     rows_to_subjects,
     scale_effect,
@@ -19,12 +21,24 @@ from .power import (
 )
 
 # How each effect metric renders in the "detectable effect" cell.
-_METRIC_LABEL = {"r": "r", "d": "d", "d_z": "d_z", "f2": "f²"}
+_METRIC_LABEL = {"r": "r", "d": "d", "d_z": "d_z", "f2": "f²",
+                 "delta_p": "Δp", "hr": "HR"}
 
 # Effect-size sensitivity strip: required N is recomputed at these multiples of
 # the template's planned effect so the reader sees how the target moves if the
 # true effect is smaller (conservative) or larger (optimistic) than assumed.
 SENSITIVITY_FACTORS = [("보수적", 2.0 / 3.0), ("계획", 1.0), ("낙관적", 1.5)]
+
+# Effect families whose N is counted in subjects no matter what a template says
+# (see :func:`_is_observation_level`).
+_SUBJECT_ONLY = frozenset({"survival", "two_proportion"})
+
+# How the sensitivity strip labels its magnitude column, per family. "효과 0.79"
+# beside the 보수적 label reads as a *bigger* effect for a hazard ratio, so the
+# metric is named.
+_SENSITIVITY_METRIC = {"correlation": "r", "two_group": "d", "paired": "d_z",
+                       "regression": "f²", "regression_change": "f²",
+                       "two_proportion": "Δp", "survival": "HR"}
 
 
 @dataclass
@@ -54,6 +68,10 @@ class IdeaResult:
     analysis_n: object = None  # effective analysis rows the held N supplies
     planned_effect: object = None  # effect spec actually used for sizing
     linked_declared: bool = False  # available_n came from a declared overlap
+    required_events: object = None  # time-to-event designs only
+    expected_events: object = None  # events the held N should yield, or None
+    justification: str = ""  # protocol-ready sample-size sentence
+    within_max_n: object = None  # required_n fits under --max-n (None if unset)
 
     @property
     def feasibility_label(self) -> str:
@@ -71,6 +89,15 @@ class IdeaResult:
         if not self.detectable:
             return "—"
         metric = _METRIC_LABEL.get(self.detectable["metric"], self.detectable["metric"])
+        if metric == "HR":
+            # A hazard ratio is symmetric on the log scale, so quoting only the
+            # >1 side would read as "harm only" to a clinician looking at a
+            # superiority trial. Print both directions.
+            return (f"HR≥{self.detectable['value']:.2f} "
+                    f"(또는 ≤{self.detectable['hr_protective']:.2f})")
+        if metric == "Δp":
+            return (f"Δp≥{self.detectable['value']:.2f} "
+                    f"({self.detectable['p1']:.0%}→{self.detectable['p2']:.0%})")
         return f"{metric}≥{self.detectable['value']:.2f}"
 
     @property
@@ -85,6 +112,222 @@ class IdeaResult:
         return f"{self.attained_power:.2f}"
 
 
+def _fmt_alpha(value: float) -> str:
+    """Alpha as a protocol would print it (0.05, 0.0071, ...)."""
+    return f"{value:.4g}"
+
+
+def _pct(value: float) -> str:
+    """A proportion as a percentage without lying through rounding.
+
+    ``f"{0.055:.0%}"`` prints "6%", from which a reviewer recomputing
+    247/0.06 gets 4117 instead of the 4491 the report shows. Keep up to two
+    decimals, drop trailing zeros.
+    """
+    text = f"{value * 100:.2f}".rstrip("0").rstrip(".")
+    return f"{text}%"
+
+
+# Sino-Korean readings of the final digit decide the object particle: a reading
+# ending in a consonant takes 을/으로, one ending in a vowel takes 를/로. The
+# particles used to be hardcoded, so every generated sentence carried at least
+# one wrong one ("HR=0.70를", "N=84을").
+_DIGIT_HAS_BATCHIM = {"0": True, "1": True, "2": False, "3": True, "4": False,
+                      "5": False, "6": True, "7": True, "8": True, "9": False}
+
+
+def _josa(number_text: str, with_batchim: str, without: str) -> str:
+    """Pick the particle that follows a written number (e.g. '0.70' -> '을')."""
+    digits = number_text.rstrip()
+    # A percentage is read "…퍼센트", which ends in a vowel regardless of the
+    # digits, so "20%" takes 를/로 even though "20" alone would take 을/으로.
+    if digits.endswith("%"):
+        return without
+    if "." in digits:
+        digits = digits.rstrip("0").rstrip(".")
+    tail = next((c for c in reversed(digits) if c.isdigit()), None)
+    if tail is None:
+        return with_batchim
+    return with_batchim if _DIGIT_HAS_BATCHIM[tail] else without
+
+
+def _obj(number_text: str) -> str:
+    """``'을'``/``'를'`` for a number written as ``number_text``."""
+    return _josa(number_text, "을", "를")
+
+
+def _to(number_text: str) -> str:
+    """``'으로'``/``'로'`` for a number written as ``number_text``."""
+    return _josa(number_text, "으로", "로")
+
+
+def _split_arms(total: int, allocation: float):
+    """Per-arm sizes for a two-arm design, rounded up so neither arm is short.
+
+    ``total // 2`` understated an arm whenever the ceiled total was odd — which
+    happens about half the time for the two-proportion family — and the pair it
+    produced (434+434=868 for a target of 869) actually falls below the target
+    power. Ceiling each arm can add one subject; that is the safe direction.
+    """
+    n1 = math.ceil(total * allocation)
+    return n1, total - n1
+
+
+def _arm_clause(total, allocation: float) -> str:
+    """``'(시험군 93명 / 대조군 93명)'`` — always stated, balanced or not."""
+    if total is None or total < 2:
+        return ""
+    n1, n2 = _split_arms(total, allocation)
+    if n1 == n2:
+        return f"(군당 {n1}명)"
+    return f"(1군 {n1}명 / 2군 {n2}명)"
+
+
+def sample_size_justification(
+    effect: dict, *, alpha: float, alpha_eff: float, power: float, sided: int,
+    required_n, required_rows, events, recruit_n, dropout: float, n_tests: int,
+    repeats: int, icc: float, cluster_applies: bool,
+) -> str:
+    """A protocol-ready Korean sample-size sentence for one idea.
+
+    The numbers in the matrix are only half of what a researcher needs: an IRB
+    submission, a grant, or a paper's Methods section wants the *justification* —
+    which test, which assumed effect, which alpha, and how the target was
+    derived. Writing that by hand from a table is where transcription errors
+    (and unstated multiplicity corrections) creep in, so it is generated from
+    exactly the numbers that produced the verdict.
+    """
+    etype = effect.get("type")
+    tail = "단측" if sided == 1 else "양측"
+    level = f"{tail} 유의수준 α={_fmt_alpha(alpha_eff)}, 목표 검정력 {power:.0%}"
+    ftest = f"유의수준 α={_fmt_alpha(alpha_eff)}, 목표 검정력 {power:.0%}"
+
+    if etype == "exploratory":
+        return (
+            "본 연구는 탐색적(비확증적) 설계이므로 사전 표본수 산출 공식을 "
+            "적용하지 않는다. 파일럿 규모로 수행하고 군집 안정성·실루엣 등 "
+            "탐색 지표로 평가하며, 확증 연구의 효과크기 추정에 활용한다."
+        )
+    if required_n is None:
+        return ""
+
+    # When repeated measures are in play the closed form sizes analysis
+    # observations; the subject count is the converted number, so the core
+    # sentence must quote the observation target and let the conversion clause
+    # deliver the headcount. Quoting the converted N as if the formula produced
+    # it made the two clauses contradict each other ("총 46명" then "85개를 46명
+    # 으로 환산").
+    converted = cluster_applies and required_rows is not None
+    unit_n = required_rows if converted else required_n
+    unit_word = "분석 관측" if converted else "명"
+    got = (f"필요 분석 관측 수는 {unit_n}개이다" if converted
+           else f"필요 표본은 총 {required_n}명이다")
+
+    if etype == "correlation":
+        r_txt = f"{effect['r']:.2f}"
+        core = (
+            f"{level} 조건에서 Pearson 상관 r={r_txt}{_obj(r_txt)} 검출하기 위해 "
+            f"Fisher z 변환 근사로 산출한 {got}."
+        )
+    elif etype == "two_group":
+        alloc = float(effect.get("allocation", 0.5))
+        split = (
+            "1:1 배분" if abs(alloc - 0.5) < 1e-12
+            else f"{_pct(alloc)}:{_pct(1 - alloc)} 배분"
+        )
+        d_txt = f"{effect['d']:.2f}"
+        per = "" if converted else _arm_clause(required_n, alloc)
+        core = (
+            f"{level}, {split}의 독립 2군 평균 비교에서 표준화 평균차 "
+            f"d={d_txt}{_obj(d_txt)} 검출하려면 {got}{per}(정규근사)."
+        )
+    elif etype == "paired":
+        d_txt = f"{effect['d']:.2f}"
+        core = (
+            f"{level} 조건의 대응(피험자 내) 비교에서 d_z={d_txt}{_obj(d_txt)} "
+            f"검출하려면 {got}(정규근사)."
+        )
+    elif etype == "regression":
+        k = int(effect.get("k", 1))
+        f2_txt = f"{effect['f2']:.3g}"
+        core = (
+            f"예측변수 {k}개 다중회귀의 R²≠0 검정에서 Cohen's f²="
+            f"{f2_txt}{_obj(f2_txt)} 검출하려면 {ftest} 기준 {got}"
+            "(비중심 F 분포로 정확 계산)."
+        )
+    elif etype == "regression_change":
+        f2_txt = f"{effect['f2']:.3g}"
+        core = (
+            f"공변량 {int(effect['k_control'])}개를 보정한 뒤 추가 예측변수 "
+            f"{int(effect['k_tested'])}개의 증분설명력(ΔR²) 검정에서 f²="
+            f"{f2_txt}{_obj(f2_txt)} 검출하려면 {ftest} 기준 {got}"
+            "(비중심 F 분포로 정확 계산)."
+        )
+    elif etype == "two_proportion":
+        p1, p2 = float(effect["p1"]), float(effect["p2"])
+        alloc = float(effect.get("allocation", 0.5))
+        diff_txt = _pct(abs(p2 - p1))
+        split = ("1:1 배분" if abs(alloc - 0.5) < 1e-12
+                 else f"{_pct(alloc)}:{_pct(1 - alloc)} 배분")
+        core = (
+            f"{level}, {split} 조건에서 대조군 {_pct(p1)} 대비 시험군 "
+            f"{_pct(p2)}(위험차 {diff_txt}){_obj(diff_txt)} 검출하려면 "
+            f"두 비율 비교(정규근사, 연속성 보정 없음) 기준 총 {required_n}명"
+            f"{_arm_clause(required_n, alloc)}이 필요하다."
+        )
+    elif etype == "survival":
+        er = float(effect["event_rate"])
+        hr_txt = f"{effect['hr']:.2f}"
+        alloc = float(effect.get("allocation", 0.5))
+        split = ("1:1 배분" if abs(alloc - 0.5) < 1e-12
+                 else f"{_pct(alloc)}:{_pct(1 - alloc)} 배분")
+        er_txt = _pct(er)
+        core = (
+            f"{level}, {split} 조건의 로그순위검정에서 위험비 HR={hr_txt}"
+            f"{_obj(hr_txt)} 검출하려면 Schoenfeld 공식에 따라 총 {events}건의 "
+            f"사건이 필요하며, 관찰기간 내 사건 발생률 {er_txt}{_obj(er_txt)} "
+            f"가정하면 {required_n}명{_arm_clause(required_n, alloc)}을 "
+            "등록해야 한다. 사건 수가 검정력을 결정하므로 추적기간이 짧아지면 "
+            "등록 수를 늘려도 검정력은 회복되지 않는다. Schoenfeld 공식은 "
+            "비례위험을 가정하며, 비례위험 가정은 Schoenfeld 잔차로 점검한다."
+        )
+    else:  # pragma: no cover - validated upstream
+        core = f"가정 효과크기 기준 {got}."
+
+    extra = []
+    if n_tests > 1:
+        extra.append(
+            f"아이디어당 주요 비교 {n_tests}회에 대한 Bonferroni 보정"
+            f"(α={_fmt_alpha(alpha)}/{n_tests}={_fmt_alpha(alpha_eff)})을 "
+            "반영했다."
+        )
+    if converted:
+        de_txt = f"{design_effect(repeats, icc):.2f}"
+        extra.append(
+            f"피험자당 {repeats}회 반복 관측과 급내상관 ICC={icc:g}"
+            f"(설계효과 {de_txt}){_obj(de_txt)} 반영해 이를 피험자 "
+            f"{required_n}명으로 환산했다."
+        )
+    if recruit_n is not None and dropout > 0.0:
+        drop_txt = _pct(dropout)
+        extra.append(
+            f"중도탈락 {drop_txt}{_obj(drop_txt)} 고려한 모집 목표는 "
+            f"{recruit_n}명이다."
+        )
+    # The assumed effect size is the tool's prior, not the user's evidence. The
+    # sentence is designed to be pasted into a protocol, so it must carry a
+    # visible hole where the provenance belongs rather than reading as if the
+    # magnitude had already been justified.
+    extra.append(
+        "가정 효과크기의 근거는 [출처 기재 — 선행연구/자체 파일럿]이다."
+    )
+    extra.append(
+        "본 수치는 계획용 근사치이므로 최종 검정력은 전용 검정력 분석 "
+        "소프트웨어(예: G*Power)로 확인한다."
+    )
+    return " ".join([core] + extra)
+
+
 def _is_observation_level(template, effect) -> bool:
     """Whether this template's N counts observations rather than subjects.
 
@@ -95,10 +338,17 @@ def _is_observation_level(template, effect) -> bool:
     repeated measurements.
     """
     unit = template.get("analysis_unit")
-    if unit == "observation":
-        return True
     if unit == "subject":
         return False
+    if unit == "observation":
+        # ...but the override cannot make a subject-level family observation-
+        # level. A log-rank test counts events in distinct subjects and a
+        # two-proportion test counts subjects classified responder/non-responder;
+        # measuring each subject four times yields no extra events and no extra
+        # responders. Honouring the override here divided the survival target by
+        # the design effect (412 -> 134 subjects) and flipped the verdict to
+        # "충분 가능" while the same record still printed 247 required events.
+        return effect.get("type") not in _SUBJECT_ONLY
     return observation_level(effect)
 
 
@@ -198,6 +448,7 @@ def evaluate(
     n_tests: int = 1,
     repeats: int = 1,
     icc: float = 0.0,
+    max_n: object = None,
 ) -> list:
     """Return ranked :class:`IdeaResult` list for ideas whose modalities are met.
 
@@ -218,6 +469,11 @@ def evaluate(
     and attained-power figure is computed at ``alpha / n_tests``, which is what
     you want when an idea's analysis plan carries several primary comparisons.
 
+    ``max_n`` (optional, >=1) is the largest sample the group could realistically
+    recruit. It never changes a verdict — it annotates ideas whose target (after
+    attrition) sits beyond that ceiling, which is the question a planning meeting
+    actually asks once the required-N column is full of numbers.
+
     ``repeats``/``icc`` describe repeated observations per subject (e.g. 3 nights
     with an intraclass correlation of 0.3). For designs sized in *observations*
     (correlation, regression) the subject requirement becomes
@@ -234,6 +490,10 @@ def evaluate(
     n_tests = int(n_tests)
     if n_tests < 1:
         raise ValueError("n_tests must be >= 1")
+    if max_n is not None:
+        max_n = int(max_n)
+        if max_n < 1:
+            raise ValueError("max_n must be >= 1")
     try:
         alpha_eff = float(alpha) / n_tests
     except OverflowError:  # n_tests too large to convert to float
@@ -247,18 +507,24 @@ def evaluate(
     clustered = int(repeats) > 1
     index, conflicts = _modality_index(manifest)
     for mod, ns in conflicts.items():
+        # An inventory with thousands of distinct n per modality produced a
+        # single 30 KB warning line; show a few and count the rest.
+        shown = ns if len(ns) <= 6 else ns[:6] + [f"…외 {len(ns) - 6}개"]
+        low = f"{min(ns)}"
         msg = (
-            f"모달리티 '{modality_label(mod)}'에 서로 다른 n {ns}가 있어 "
-            f"연결 가능한 최소값({min(ns)})을 보수적으로 사용합니다."
+            f"모달리티 '{modality_label(mod)}'에 서로 다른 n {shown}가 있어 "
+            f"연결 가능한 최소값({low}){_obj(low)} 보수적으로 사용합니다."
         )
         if msg not in manifest.warnings:
             manifest.warnings.append(msg)
     available = set(index)
     results: list = []
+    unmatched: list = []
 
     for t in templates:
         required = t["required"]
         if not all(m in available for m in required):
+            unmatched.append(t)
             continue
 
         used = list(required) + [m for m in t.get("optional", []) if m in available]
@@ -294,6 +560,11 @@ def evaluate(
         )
         req_n = _subjects(req_rows)
         exploratory = req_n is None
+        # Time-to-event designs are powered on EVENTS; the subject count is a
+        # consequence of the assumed event rate, so both are carried through.
+        req_events = required_events(
+            planned_effect, alpha=alpha_eff, power=power, sided=sided
+        )
 
         # Effective rows of analysis the held subjects supply.
         analysis_n = None
@@ -321,6 +592,11 @@ def evaluate(
         power_now = attained_power(
             planned_effect, analysis_n, alpha=alpha_eff, sided=sided
         )
+        exp_events = None
+        if planned_effect.get("type") == "survival" and available_n is not None:
+            exp_events = expected_events(
+                available_n, planned_effect["event_rate"]
+            )
 
         # Required-N-vs-effect strip: how the target moves if the true effect is
         # smaller/larger than the planned prior. Skipped for exploratory designs.
@@ -334,6 +610,9 @@ def evaluate(
                 n_sensitivity.append({
                     "label": label,
                     "factor": factor,
+                    "metric": _SENSITIVITY_METRIC.get(
+                        planned_effect.get("type"), "효과"
+                    ),
                     "effect_value": round(effect_magnitude(eff), 4),
                     "required_n": _subjects(rows),
                 })
@@ -358,7 +637,7 @@ def evaluate(
             notes.append(
                 f"선택 모달리티 '{modality_label(mod)}'의 표본은 {cap}명뿐입니다"
                 f"(이 아이디어의 보유 N={available_n}). 가설이 그 변수를 쓰면 "
-                f"실제 분석 N은 {cap}으로 줄어듭니다 — 보유 N은 필수 모달리티만으로 "
+                f"실제 분석 N은 {cap}{_to(str(cap))} 줄어듭니다 — 보유 N은 필수 모달리티만으로 "
                 "계산합니다."
             )
         if linked_contradictory:
@@ -370,7 +649,7 @@ def evaluate(
             if linked_declared:
                 notes.append(
                     f"연결 표본수(linked N)가 매니페스트에 선언돼 있어 "
-                    f"보유 N={available_n}을 사용했습니다."
+                    f"보유 N={available_n}{_obj(str(available_n))} 사용했습니다."
                 )
             else:
                 notes.append(
@@ -396,7 +675,12 @@ def evaluate(
             )
         if sided == 1:
             etype = planned_effect.get("type")
-            if etype in ("correlation", "two_group", "paired"):
+            # The two clinical families ARE affected by --one-sided (186->147,
+            # 412->325) and are exactly where a one-sided log-rank or
+            # risk-difference test draws reviewer fire, so they need the caveat
+            # most.
+            if etype in ("correlation", "two_group", "paired",
+                         "two_proportion", "survival"):
                 notes.append("단측검정(one-sided) 기준 — 방향 가설일 때만 사용하세요.")
             elif etype in ("regression", "regression_change"):
                 notes.append(
@@ -410,6 +694,30 @@ def evaluate(
             if power_now is not None:
                 msg += f" (현재 표본의 검정력 ≈ {power_now:.2f})"
             notes.append(msg)
+        # Recruitment ceiling: an idea can be "표본 부족" and still be worth
+        # running (recruit more), or be permanently out of reach. Say which.
+        within_max = None
+        if max_n is not None and req_n is not None:
+            target = recruit_n if recruit_n is not None else req_n
+            within_max = target <= max_n
+            if not within_max:
+                notes.append(
+                    f"모집 상한(--max-n {max_n})으로는 도달 불가: 필요 "
+                    f"{'모집 ' if recruit_n is not None else ''}N={target}. "
+                    "효과크기 가정·설계(반복측정/1:1 배분)를 재검토하거나 "
+                    "다기관·기존 코호트 활용을 고려하세요."
+                )
+        if req_events is not None:
+            msg = f"시간-사건 설계: 필요 사건 수 {req_events}건이 검정력을 결정합니다"
+            if exp_events is not None:
+                msg += (
+                    f" (보유 N={available_n} × 가정 사건발생률 "
+                    f"{planned_effect['event_rate']:.0%} ≈ {exp_events}건)"
+                )
+            notes.append(
+                msg + ". 추적기간이 짧아 사건이 덜 발생하면 등록 수를 채워도 "
+                "검정력은 부족합니다."
+            )
         if exploratory:
             notes.append(
                 "탐색적 설계(군집 등)라 단순 표본수 공식이 적용되지 않음 — "
@@ -447,8 +755,36 @@ def evaluate(
                 analysis_n=analysis_n,
                 planned_effect=dict(planned_effect),
                 linked_declared=linked_declared,
+                required_events=req_events,
+                expected_events=exp_events,
+                within_max_n=within_max,
+                justification=sample_size_justification(
+                    planned_effect, alpha=alpha, alpha_eff=alpha_eff,
+                    power=power, sided=sided, required_n=req_n,
+                    required_rows=req_rows, events=req_events,
+                    recruit_n=recruit_n, dropout=dropout, n_tests=n_tests,
+                    repeats=repeats, icc=icc, cluster_applies=cluster_applies,
+                ),
             )
         )
+
+    # A template pack that matches nothing used to be indistinguishable from a
+    # pack that was never loaded: the run just produced fewer ideas, with no
+    # warning. Name what was dropped and why, capped so a 500-template pack does
+    # not flood the report.
+    if unmatched:
+        shown = ", ".join(
+            f"{t['id']}({'+'.join(modality_label(m) for m in t['required'])})"
+            for t in unmatched[:5]
+        )
+        more = f" 외 {len(unmatched) - 5}개" if len(unmatched) > 5 else ""
+        msg = (
+            f"아이디어 템플릿 {len(unmatched)}개가 매니페스트에 없는 모달리티를 "
+            f"요구해 제외됐습니다: {shown}{more}. 해당 데이터셋을 매니페스트에 "
+            "추가하거나 모달리티 표기를 확인하세요."
+        )
+        if msg not in manifest.warnings:
+            manifest.warnings.append(msg)
 
     # Feasibility is the PRIMARY sort key so the triage never puts an
     # underpowered idea above a feasible one: feasible (2) > unknown-N (1) >

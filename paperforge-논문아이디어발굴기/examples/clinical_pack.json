@@ -54,6 +54,45 @@
         "권장 N은 인접 두 조건의 대응비교(d_z=0.45) 기준입니다 — 전체 추세검정은 보통 더 적게 필요합니다.",
         "이월효과(carry-over)가 있으면 within-subject 가정이 깨집니다. 세척기간을 확인하세요."
       ]
+    },
+    {
+      "id": "biomarker_response_rate",
+      "title": "바이오마커 양성군의 반응률 차이(이분 종점)",
+      "required": ["clinical", "lab"],
+      "optional": ["imaging"],
+      "hypothesis": "기저 바이오마커 양성군은 음성군보다 임상 반응률(반응/무반응)이 높다.",
+      "predictors": ["바이오마커 양성 여부", "기저 임상변수"],
+      "outcomes": ["객관적 반응 여부(이분)"],
+      "analysis": "두 비율 비교(카이제곱/Fisher) → 층화 로지스틱 회귀로 기저 공변량 보정; 위험차·위험비·오즈비를 신뢰구간과 함께 보고.",
+      "design": "two-group comparison (binary endpoint)",
+      "analysis_unit": "subject",
+      "effect": {"type": "two_proportion", "p1": 0.30, "p2": 0.50, "allocation": 0.5},
+      "journal": "Clinical Cancer Research / BMC Cancer (바이오마커 예측)",
+      "novelty": "반응 예측 바이오마커는 층화 설계의 근거가 되어 후속 시험 설계에 직접 쓰임.",
+      "caveats": [
+        "가정 반응률(30% 대 50%)은 예시입니다 — 본인 적응증의 과거 반응률로 바꾸세요. 기저 반응률이 낮을수록(예: 10% 대 20%) 같은 위험차라도 더 많은 표본이 필요합니다.",
+        "연속성 보정을 하지 않은 정규근사입니다. 기대빈도가 5 미만인 칸이 있으면 Fisher 정확검정 기준으로 다시 확인하세요."
+      ]
+    },
+    {
+      "id": "biomarker_survival",
+      "title": "바이오마커·영상 지표와 무진행 생존(시간-사건 종점)",
+      "required": ["clinical", "lab"],
+      "optional": ["imaging"],
+      "hypothesis": "기저 바이오마커 고발현군은 저발현군보다 무진행 생존이 짧다(HR≠1).",
+      "predictors": ["바이오마커 발현 수준(고/저)", "영상 기반 종양 부담"],
+      "outcomes": ["무진행 생존기간(PFS)", "전체 생존기간(OS)"],
+      "analysis": "Kaplan–Meier + 로그순위검정 → Cox 비례위험모형(공변량 보정); 비례위험 가정은 Schoenfeld 잔차로 점검.",
+      "design": "time-to-event (survival)",
+      "analysis_unit": "subject",
+      "effect": {"type": "survival", "hr": 0.70, "event_rate": 0.60, "allocation": 0.5},
+      "journal": "Annals of Oncology / Journal of Clinical Oncology (예후 바이오마커)",
+      "novelty": "예후 바이오마커는 층화·중간분석 설계의 근거가 되며 기존 코호트 재분석으로도 가능.",
+      "caveats": [
+        "검정력을 결정하는 것은 등록 인원이 아니라 사건 수입니다(HR=0.70 → 247건). 추적기간이 짧으면 등록을 늘려도 부족할 수 있습니다.",
+        "사건 발생률 60%는 관찰기간 종료 시점 기준 가정입니다 — 본인 코호트의 실제 성숙도로 바꾸세요.",
+        "Schoenfeld 근사는 비례위험을 가정합니다. 위험이 교차하면 RMST 등 대안 지표를 고려하세요."
+      ]
     }
   ]
 }

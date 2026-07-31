@@ -54,6 +54,8 @@ _EFFECT_SCHEMA = {
     "paired": (("d",), ()),
     "regression": (("f2",), ("k",)),
     "regression_change": (("f2", "k_tested", "k_control"), ()),
+    "two_proportion": (("p1", "p2"), ("allocation",)),
+    "survival": (("hr", "event_rate"), ("allocation",)),
     "exploratory": ((), ()),
 }
 
@@ -113,6 +115,36 @@ def validate_effect(effect, where: str) -> dict:
         )
         if out["k_control"] < 0:
             raise TemplateError(f"{where}: effect.k_control must be >= 0.")
+    elif etype == "two_proportion":
+        out["p1"] = _require_number(effect.get("p1"), "p1", where, upper=1.0)
+        out["p2"] = _require_number(effect.get("p2"), "p2", where, upper=1.0)
+        if out["p1"] == out["p2"]:
+            # A zero risk difference needs an infinite sample; catching it here
+            # beats surfacing "필요 표본수가 1,000,000명을 넘습니다" at run time.
+            raise TemplateError(
+                f"{where}: effect.p1 and effect.p2 must differ "
+                "(a zero risk difference cannot be sized)."
+            )
+        if "allocation" in effect:
+            out["allocation"] = _require_number(
+                effect["allocation"], "allocation", where, upper=1.0
+            )
+    elif etype == "survival":
+        out["hr"] = _require_number(effect.get("hr"), "hr", where)
+        if out["hr"] == 1.0:
+            raise TemplateError(
+                f"{where}: effect.hr must differ from 1 (no effect to detect)."
+            )
+        # An event *probability*; 1.0 (everyone has the event) is legitimate, so
+        # the bound is inclusive unlike the other proportions here.
+        rate = _require_number(effect.get("event_rate"), "event_rate", where)
+        if rate > 1.0:
+            raise TemplateError(f"{where}: effect.event_rate must be <= 1.")
+        out["event_rate"] = rate
+        if "allocation" in effect:
+            out["allocation"] = _require_number(
+                effect["allocation"], "allocation", where, upper=1.0
+            )
     return out
 
 
@@ -173,6 +205,15 @@ def validate_template(raw, where: str) -> dict:
         t["analysis_unit"] = unit
 
     t["effect"] = validate_effect(raw.get("effect"), where)
+    # A binary or time-to-event target counts subjects by construction, so
+    # declaring it observation-level would ask --repeats/--icc to shrink the
+    # sample. Reject at load rather than silently ignoring the field.
+    if (t.get("analysis_unit") == "observation"
+            and t["effect"]["type"] in ("survival", "two_proportion")):
+        raise TemplateError(
+            f"{where}: effect type {t['effect']['type']!r} is always measured "
+            "per subject; 'analysis_unit' cannot be 'observation'."
+        )
     return t
 
 
