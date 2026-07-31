@@ -12,14 +12,18 @@ config가 없으면 데이터의 숫자형 컬럼 전체를 하나의 척도로 
     "주간기능": ["DAY1", "DAY2"]
   },
   "reverse_items": ["DAY2"],
-  "min_valid_ratio": 0.5
+  "min_valid_ratio": 0.5,
+  "score_method": "sum",
+  "severity_bands": {
+    "불면증상": [[0, 7, "없음"], [8, 14, "역치하"], [15, 21, "중등도"], [22, 28, "중증"]]
+  }
 }
 """
 from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, Tuple
 
 
 class ConfigError(ValueError):
@@ -33,7 +37,7 @@ SCORE_METHODS = ("mean", "sum")
 # '_' 로 시작하는 키는 주석용으로 허용한다(예: "_메모": "2026-07 ISI 설정").
 KNOWN_KEYS = frozenset(
     {"subscales", "reverse_items", "scale_min", "scale_max",
-     "min_valid_ratio", "score_method"}
+     "min_valid_ratio", "score_method", "severity_bands"}
 )
 
 
@@ -41,6 +45,9 @@ KNOWN_KEYS = frozenset(
 class SurveyConfig:
     subscales: Dict[str, List[str]]
     reverse_items: List[str] = field(default_factory=list)
+    # 하위척도별 임상 심각도 구간: {하위척도명: [(하한, 상한, 라벨), ...]} (양끝 포함).
+    # 예: ISI 총점 0-7 없음 / 8-14 역치하 / 15-21 중등도 / 22-28 중증.
+    severity_bands: Dict[str, List[Tuple[float, float, str]]] = field(default_factory=dict)
     scale_min: Optional[float] = None
     scale_max: Optional[float] = None
     # 응답자별 하위척도 점수를 계산할 때, 최소 이 비율 이상 응답해야 점수를 부여.
@@ -146,14 +153,114 @@ def _from_dict(raw: dict) -> SurveyConfig:
             "reverse_items에 어떤 하위척도에도 없는 문항이 있습니다: " + ", ".join(unknown_rev)
         )
 
+    bands = _parse_bands(raw.get("severity_bands"), parsed)
+
     return SurveyConfig(
         subscales=parsed,
         reverse_items=list(reverse_items),
+        severity_bands=bands,
         scale_min=float(scale_min) if scale_min is not None else None,
         scale_max=float(scale_max) if scale_max is not None else None,
         min_valid_ratio=float(min_valid_ratio),
         score_method=score_method,
     )
+
+
+def _parse_bands(
+    raw_bands: object, subscales: Dict[str, List[str]]
+) -> Dict[str, List[Tuple[float, float, str]]]:
+    """severity_bands 파싱·검증.
+
+    형식: {"하위척도명": [[하한, 상한, "라벨"], ...]} — 하한·상한 모두 **포함**.
+    검증 항목(모두 조용한 오분류로 이어지므로 오류로 막는다):
+      - 하위척도 이름이 subscales 에 실제로 있어야 한다(오타 → 구간이 통째로 무시됨)
+      - 각 구간은 [숫자, 숫자, 문자열] 3원소이고 하한 ≤ 상한
+      - 구간끼리 겹치면 안 된다(겹치면 같은 점수가 두 심각도로 분류됨)
+    """
+    if raw_bands is None:
+        return {}
+    if not isinstance(raw_bands, dict) or not raw_bands:
+        raise ConfigError("'severity_bands'는 비어있지 않은 객체여야 합니다.")
+    out: Dict[str, List[Tuple[float, float, str]]] = {}
+    for name, spec in raw_bands.items():
+        if name not in subscales:
+            raise ConfigError(
+                f"severity_bands 의 '{name}' 은 subscales 에 없는 하위척도입니다"
+                f" (사용 가능: {', '.join(subscales)})"
+            )
+        if not isinstance(spec, list) or not spec:
+            raise ConfigError(f"severity_bands['{name}'] 는 비어있지 않은 리스트여야 합니다.")
+        parsed: List[Tuple[float, float, str]] = []
+        for band in spec:
+            if not isinstance(band, (list, tuple)) or len(band) != 3:
+                raise ConfigError(
+                    f"severity_bands['{name}'] 의 각 구간은 [하한, 상한, \"라벨\"] "
+                    f"3원소여야 합니다: {band!r}"
+                )
+            lo, hi, label = band
+            for v in (lo, hi):
+                if isinstance(v, bool) or not isinstance(v, (int, float)):
+                    raise ConfigError(
+                        f"severity_bands['{name}'] 의 구간 경계는 숫자여야 합니다: {band!r}"
+                    )
+            if not isinstance(label, str) or not label.strip():
+                raise ConfigError(
+                    f"severity_bands['{name}'] 의 라벨은 비어있지 않은 문자열이어야 합니다: {band!r}"
+                )
+            if float(lo) > float(hi):
+                raise ConfigError(
+                    f"severity_bands['{name}'] 구간의 하한이 상한보다 큽니다: {band!r}"
+                )
+            parsed.append((float(lo), float(hi), label.strip()))
+        parsed.sort(key=lambda b: (b[0], b[1]))
+        for prev, cur in zip(parsed, parsed[1:]):
+            # 판정(band_index)이 ±BAND_TOL 을 허용하므로 겹침 검증도 같은 폭으로 본다.
+            # (엄격하게만 보면 틈이 2·tol 보다 좁은 구간이 통과해 두 구간에 동시에 걸린다.)
+            if cur[0] <= prev[1] + 2 * BAND_TOL:
+                raise ConfigError(
+                    f"severity_bands['{name}'] 의 구간이 겹칩니다: "
+                    f"[{prev[0]:g}, {prev[1]:g}] 와 [{cur[0]:g}, {cur[1]:g}] "
+                    "(겹치면 같은 점수가 두 심각도로 분류됩니다)"
+                )
+        out[str(name)] = parsed
+    return out
+
+
+BAND_TOL = 1e-9  # 경계 판정 허용오차(부동소수 잡음 흡수). 겹침 검증도 같은 값을 쓴다.
+
+
+def band_index(
+    score, bands: Sequence[Tuple[float, float, str]]
+):
+    """점수(또는 점수 리스트)를 구간 **인덱스** 로. 어디에도 안 들어가면 None.
+
+    라벨이 아니라 인덱스를 돌려주는 이유: 서로 다른 두 구간이 같은 라벨을 쓸 수 있어
+    (예: 0~2 '낮음', 6~8 '낮음') 라벨로 집계하면 분포표가 중복 집계된다.
+    """
+    if isinstance(score, (list, tuple)):
+        return [band_index(s, bands) for s in score]
+    if score is None:
+        return None
+    for i, (lo, hi, _label) in enumerate(bands):
+        if (lo - BAND_TOL) <= score <= (hi + BAND_TOL):
+            return i
+    return None
+
+
+def band_label(
+    score: Optional[float], bands: Sequence[Tuple[float, float, str]]
+) -> Optional[str]:
+    """점수를 심각도 라벨로. 어떤 구간에도 속하지 않으면 None(미분류).
+
+    경계는 양끝 포함이고 구간은 겹치지 않도록 검증되어 있으므로 결과는 유일하다.
+    부동소수 오차(예: 평균 7.999999999999999)로 경계가 어긋나는 것을 막기 위해
+    아주 작은 허용오차(BAND_TOL)를 두며, 겹침 검증도 같은 허용오차를 쓴다
+    (검증은 엄격, 판정은 느슨하면 틈이 2·tol 보다 좁은 구간에서 오분류가 난다).
+    """
+    if score is None:
+        return None
+    i = band_index(score, bands)
+    return None if i is None else bands[i][2]
 
 
 def auto_config(numeric_columns: Sequence[str]) -> SurveyConfig:

@@ -9,6 +9,8 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
+import os
 import sys
 from typing import Dict, List, Optional
 
@@ -22,11 +24,14 @@ from .report import render, render_markdown
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="surveyscan",
-        description="설문 응답 CSV 분석: 문항 기술통계 · Cronbach α · 하위척도 점수 · 역문항 처리 · 결측 요약",
+        description="설문 응답 CSV 분석: 문항 기술통계 · Cronbach α/ω · 하위척도 점수 · 역문항 처리 · "
+        "결측 요약 · 임상 심각도 구간 · 집단 비교(Welch t/ANOVA)",
     )
     p.add_argument("csv", help="설문 응답 CSV 경로 (행=응답자, 열=문항)")
     p.add_argument(
-        "-c", "--config", help="하위척도/역문항 설정 JSON 경로 (없으면 숫자 컬럼 전체를 한 척도로 분석)"
+        "-c", "--config",
+        help="하위척도/역문항/심각도구간(severity_bands) 설정 JSON 경로 "
+        "(없으면 숫자 컬럼 전체를 한 척도로 분석)",
     )
     p.add_argument(
         "--id-col",
@@ -34,6 +39,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         metavar="이름",
         help="분석에서 제외할 ID 컬럼(여러 번 지정 가능)",
+    )
+    p.add_argument(
+        "--group-col",
+        metavar="이름",
+        help="집단 비교 기준 컬럼(치료군·성별·기관 등). 이 컬럼으로 하위척도 점수를 나눠 "
+        "Welch t/ANOVA·효과크기(Hedges g)·Holm 보정 p 를 냄. 문항 분석에서는 제외됨",
     )
     p.add_argument(
         "--na-number",
@@ -67,7 +78,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--item-freq",
         action="store_true",
-        help="문항별 응답 선택지 빈도표를 추가 출력(척도 범위가 정수일 때)",
+        help="문항별 응답 선택지 빈도표를 추가 출력. config에 정수 scale_min/scale_max 가 "
+        "있어야 나옴(없으면 표 생략)",
     )
     p.add_argument(
         "--quality",
@@ -102,11 +114,29 @@ def _write_scores_csv(path: str, data: SurveyData, result: Dict[str, object]) ->
     """
     id_cols = data.id_columns
     subs = result["subscales"]
+    group_col = getattr(data, "group_column", None)
+    used_names: Dict[str, int] = {}
+
+    def _uniq(name: str) -> str:
+        """헤더 이름 중복 방지(같은 이름 두 열이면 엑셀·pandas에서 조용히 섞인다)."""
+        n = used_names.get(name, 0)
+        used_names[name] = n + 1
+        return name if n == 0 else f"{name}_{n + 1}"
+
     # 원본 CSV 줄 번호를 항상 첫 열로 낸다. 빈 줄을 건너뛰면 '몇 번째 응답자'와
     # '파일의 몇 번째 줄'이 어긋나서, 이 열 없이 엑셀에 붙이면 응답자가 통째로
     # 밀린다(사람마다 남의 점수가 붙는 조용한 사고).
-    header = ["원본CSV행"] + [_csv_safe(c) for c in id_cols]
-    header += [_csv_safe(str(s["name"])) for s in subs]
+    header = [_uniq("원본CSV행")] + [_csv_safe(_uniq(c)) for c in id_cols]
+    # 집단 컬럼은 ID 로도 지정했을 수 있으므로 중복 출력하지 않는다.
+    write_group = bool(group_col) and group_col not in id_cols
+    if write_group:
+        header.append(_csv_safe(_uniq(str(group_col))))
+    for s in subs:
+        header.append(_csv_safe(_uniq(str(s["name"]))))
+        # 심각도 구간이 정의된 하위척도는 응답자별 구간 라벨도 함께 낸다
+        # (임상 표에 바로 쓰는 값 — 사람이 다시 구간을 매기다 실수하는 것을 막는다).
+        if s.get("bands"):
+            header.append(_csv_safe(_uniq(str(s["name"]) + "_심각도")))
     n = data.n_respondents
     with open(path, "w", encoding="utf-8-sig", newline="") as fh:
         w = csv.writer(fh)
@@ -116,9 +146,20 @@ def _write_scores_csv(path: str, data: SurveyData, result: Dict[str, object]) ->
             row = [line_no]
             if id_cols:
                 row += [_csv_safe(data.id_values[r].get(c, "")) for c in id_cols]
+            if write_group:
+                gv = data.group_values[r] if r < len(data.group_values) else ""
+                row.append(_csv_safe(gv))
             for s in subs:
                 val = s["scores"][r]
-                row.append("" if val is None else f"{val:.6g}")
+                # 비유한값(inf/nan)은 셀에 쓰지 않는다 — 엑셀·통계패키지가 텍스트로
+                # 읽어 열 전체를 문자열로 만들거나 조용히 잘못된 값을 만든다.
+                row.append(
+                    "" if val is None or not math.isfinite(val) else f"{val:.6g}"
+                )
+                if s.get("bands"):
+                    bs = s.get("band_scores") or []
+                    lab = bs[r] if r < len(bs) else None
+                    row.append(_csv_safe(lab) if lab else "")
             w.writerow(row)
 
 
@@ -129,9 +170,34 @@ def _csv_safe(s: str) -> str:
     return s
 
 
+def _same_file(a: str, b: str) -> bool:
+    """두 경로가 같은 파일을 가리키는지(심볼릭 링크·상대경로 포함)."""
+    try:
+        if os.path.exists(a) and os.path.exists(b):
+            return os.path.samefile(a, b)
+    except OSError:
+        pass
+    return os.path.realpath(a) == os.path.realpath(b)
+
+
 def run(argv: Optional[List[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    # 출력 경로가 입력 CSV와 같으면 원자료가 덮어써져 복구가 불가능하다
+    # (탭 완성 한 번의 실수로 임상 원자료가 사라진다). 쓰기 전에 막는다.
+    for opt, path in (("--scores-out", args.scores_out), ("-o/--output", args.output)):
+        if path and _same_file(path, args.csv):
+            print(
+                f"오류: {opt} 경로가 입력 CSV와 같습니다 — 원자료를 덮어쓸 수 없습니다: {path}",
+                file=sys.stderr,
+            )
+            return 2
+    if args.scores_out and args.output and _same_file(args.scores_out, args.output):
+        print(
+            "오류: --scores-out 과 -o 경로가 같습니다(서로 덮어씁니다).", file=sys.stderr
+        )
+        return 2
 
     if not (0.0 < args.ci_level < 1.0):
         print("오류: --ci-level 은 0과 1 사이여야 합니다.", file=sys.stderr)
@@ -148,6 +214,7 @@ def run(argv: Optional[List[str]] = None) -> int:
             id_columns=args.id_col,
             na_numbers=args.na_number,
             delimiter=delimiter,
+            group_column=args.group_col,
         )
     except FileNotFoundError:
         print(f"오류: 파일을 찾을 수 없습니다: {args.csv}", file=sys.stderr)
@@ -167,6 +234,14 @@ def run(argv: Optional[List[str]] = None) -> int:
         return 2
     except DataError as e:
         print(f"데이터 오류: {e}", file=sys.stderr)
+        return 2
+    except csv.Error as e:
+        # 예: 한 셀이 131,072자를 넘는 경우. ValueError 가 아니라서 위에서 안 잡힌다.
+        print(
+            f"데이터 오류: CSV를 읽을 수 없습니다 ({e}). 셀 하나가 지나치게 길거나 "
+            "따옴표가 짝이 맞지 않는지 확인하세요.",
+            file=sys.stderr,
+        )
         return 2
 
     # ID 컬럼 오타 경고(P4): 지정했지만 헤더에 없던 이름
@@ -238,8 +313,9 @@ def run(argv: Optional[List[str]] = None) -> int:
         return 2
     except OverflowError:
         print(
-            "분석 오류: 값이 너무 커서 계산할 수 없습니다(입력에 비정상적으로 큰 수가 있는지 "
-            "확인하세요; 척도 범위를 설정하면 범위 이탈로 표시됩니다).",
+            "분석 오류: 값이 너무 커서 계산할 수 없습니다. 입력에 1e150 이상의 비정상적으로 "
+            "큰 수(엑셀 오입력·센서 오류 등)가 있는지 확인해 지우거나 결측으로 바꾼 뒤 다시 "
+            "실행하세요. (척도 범위를 설정해도 이 계산은 그 전에 실패합니다.)",
             file=sys.stderr,
         )
         return 2
@@ -251,7 +327,8 @@ def run(argv: Optional[List[str]] = None) -> int:
         except OSError as e:
             print(f"오류: 점수 CSV를 저장할 수 없습니다: {e}", file=sys.stderr)
             return 2
-        print(f"점수 저장됨: {args.scores_out}")
+        # 알림은 stderr 로 — stdout 에 섞이면 `--format json | jq` 파이프가 깨진다.
+        print(f"점수 저장됨: {args.scores_out}", file=sys.stderr)
 
     fmt = args.format
     if fmt is None:
@@ -260,10 +337,12 @@ def run(argv: Optional[List[str]] = None) -> int:
         fmt = "md"
 
     if fmt == "json":
-        # scores 리스트는 길어서 JSON 출력에선 생략(요약 통계만 남김).
+        # 응답자별 리스트(점수·심각도 라벨)는 길어서 JSON 출력에선 생략(요약만 남김).
+        # 응답자 단위 값이 필요하면 --scores-out 으로 CSV를 받으세요.
         slim = {k: v for k, v in result.items()}
         slim["subscales"] = [
-            {k: v for k, v in s.items() if k != "scores"} for s in result["subscales"]
+            {k: v for k, v in s.items() if k not in ("scores", "band_scores")}
+            for s in result["subscales"]
         ]
         # allow_nan=False: 비유한값이 있으면 조용히 깨진 JSON을 내보내지 않고 막는다.
         try:
@@ -286,7 +365,7 @@ def run(argv: Optional[List[str]] = None) -> int:
         except OSError as e:
             print(f"오류: 결과를 저장할 수 없습니다: {e}", file=sys.stderr)
             return 2
-        print(f"저장됨: {args.output}")
+        print(f"저장됨: {args.output}", file=sys.stderr)
     else:
         print(text)
     return 0

@@ -1,4 +1,5 @@
-"""surveyscan — 설문 응답 CSV 분석 (문항 기술통계 · Cronbach α · 하위척도 · 역문항 · 결측).
+"""surveyscan — 설문 응답 CSV 분석 (문항 기술통계 · Cronbach α · 하위척도 · 역문항 · 결측
+· 임상 심각도 구간 · 집단 비교).
 
 표준 라이브러리만으로 동작하는 설문 신뢰도/기술통계 분석 도구.
 """
@@ -7,7 +8,7 @@ from .config import SurveyConfig, auto_config, load_config
 from .dataio import SurveyData, load_csv
 from .report import render, render_markdown
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 __all__ = [
     "analyze",

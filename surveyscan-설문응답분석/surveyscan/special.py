@@ -142,3 +142,62 @@ def f_ppf(p: float, dfn: float, dfd: float) -> float:
     if xb >= 1.0:
         return float("inf")
     return (xb * dfd) / (dfn * (1.0 - xb))
+
+
+def t_sf_two_sided(t: float, df: float) -> float:
+    """양측 t 검정의 p = P(|T| ≥ |t|). df>0.
+
+    `2*(1 - t_cdf(|t|, df))` 로 계산하면 꼬리확률이 ~1e-16 아래로 내려가는 순간
+    1.0 과의 뺄셈에서 유효숫자가 통째로 사라져(catastrophic cancellation) p 가 **정확히
+    0.0** 이 된다(|t|≳9). p=0 은 존재할 수 없는 값이고 JSON 산출물로도 나가므로,
+    꼬리를 정규화 불완전 베타로 **직접** 계산한다:
+
+        P(|T| ≥ |t|) = I_{df/(df+t²)}(df/2, 1/2)
+
+    (t_cdf 도 같은 항등식을 쓰지만 거기서는 1에서 빼기 때문에 손실이 생긴다.)
+    """
+    if df <= 0:
+        raise ValueError("t_sf_two_sided: df는 양수여야 합니다.")
+    x = df / (df + t * t)
+    return betainc(df / 2.0, 0.5, x)
+
+
+def f_sf(f: float, dfn: float, dfd: float) -> float:
+    """F 분포의 상측 꼬리확률 P(F ≥ f). dfn,dfd>0.
+
+    `1 - f_cdf` 의 자리수 손실을 피하려고 상측 꼬리를 직접 계산한다:
+        P(F ≥ f) = I_{dfd/(dfn·f+dfd)}(dfd/2, dfn/2)
+    """
+    if dfn <= 0 or dfd <= 0:
+        raise ValueError("f_sf: 자유도는 양수여야 합니다.")
+    if f <= 0.0:
+        return 1.0
+    x = dfd / (dfn * f + dfd)
+    return betainc(dfd / 2.0, dfn / 2.0, x)
+
+
+def norm_cdf(x: float) -> float:
+    """표준정규 CDF Φ(x). math.erf 기반이라 정확도는 배정밀도 수준."""
+    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+
+
+def norm_ppf(p: float) -> float:
+    """표준정규 분위수 Φ⁻¹(p). 0<p<1.
+
+    효과크기(Hedges' g)의 대표본 신뢰구간에 쓴다. 별도 유리함수 근사를 두지 않고
+    Φ(x)=p 를 이분법으로 푼다 — Φ 자체가 erf 로 정확하므로 결과도 정확하고,
+    호출 횟수가 적어(하위척도당 2회) 속도는 문제되지 않는다.
+    """
+    p = min(max(p, 1e-15), 1.0 - 1e-15)
+    if p == 0.5:
+        return 0.0
+    lo, hi = -40.0, 40.0
+    for _ in range(200):
+        mid = 0.5 * (lo + hi)
+        if norm_cdf(mid) < p:
+            lo = mid
+        else:
+            hi = mid
+        if hi - lo <= 1e-14 * max(1.0, abs(hi)):
+            break
+    return 0.5 * (lo + hi)
