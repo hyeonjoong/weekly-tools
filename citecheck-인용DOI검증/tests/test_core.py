@@ -1,4 +1,13 @@
-from citecheck.core import CrossrefClient, ERROR, OK, WARNING, check_reference
+import pytest
+
+from citecheck.core import (
+    CrossrefClient,
+    ERROR,
+    OK,
+    WARNING,
+    _is_retracted,
+    check_reference,
+)
 from citecheck.parsers import Reference
 
 
@@ -527,3 +536,255 @@ def test_pnas_with_country_suffix_matches_via_short_container_title():
     from citecheck.core import _journal_matches
     cands = ["Proceedings of the National Academy of Sciences", "Proc Natl Acad Sci U S A"]
     assert _journal_matches("Proc Natl Acad Sci U S A", cands, 0.82) is True
+
+
+# --- Crossref network transport (monkeypatched, no sockets) ------------------
+#
+# These pin the *response parsing*, which was until now the only layer of this
+# project with no test at all — and it is precisely the layer that produced the
+# headline bug. `update-by` vs `updated-by` was a single wrong key read out of a
+# JSON envelope; every fixture in the suite was built around the same wrong key,
+# so ~180 tests were green against a field the API never sends. The defence
+# against a repeat is a test that asserts on a *verbatim live-shaped envelope*
+# rather than on the code's own idea of one.
+#
+# PubMed's identical path was already covered (tests/test_pubmed.py); Crossref's
+# was not, even though Crossref is the tool's primary source.
+
+
+class _FakeResp:
+    """Minimal stand-in for the urlopen context manager."""
+
+    def __init__(self, body: bytes, status: int = 200):
+        self._body = body
+        self.status = status
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def read(self):
+        return self._body
+
+
+def _fake_urlopen(monkeypatch, body, status=200):
+    """Point urllib at a canned response and record the requests made."""
+    import urllib.request
+
+    seen = []
+
+    def fake(req, timeout=None):
+        seen.append(req)
+        return _FakeResp(body.encode("utf-8") if isinstance(body, str) else body, status)
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake)
+    return seen
+
+
+def test_fetch_network_reads_the_message_envelope(monkeypatch):
+    """`fetch` must return `data["message"]`, not the whole envelope.
+
+    Nothing previously asserted this. Returning `data` instead would hand every
+    downstream check a dict whose keys are `status`/`message-type`/`message` —
+    so `updated-by`, `title` and `DOI` would all be missing, retraction
+    detection would silently go dark, and the tool would report a clean pass.
+    That is the `update-by` failure exactly.
+    """
+    body = (
+        '{"status": "ok", "message-type": "work", "message": '
+        '{"DOI": "10.1/x", "title": ["A study"], '
+        '"updated-by": [{"type": "retraction", "DOI": "10.1/notice"}]}}'
+    )
+    _fake_urlopen(monkeypatch, body)
+
+    msg = CrossrefClient().fetch("10.1/x")
+
+    assert msg == {
+        "DOI": "10.1/x",
+        "title": ["A study"],
+        "updated-by": [{"type": "retraction", "DOI": "10.1/notice"}],
+    }
+    # And the retraction signal survives the round trip end-to-end.
+    assert _is_retracted(msg) is True
+
+
+def test_fetch_network_404_is_not_in_crossref_not_an_error(monkeypatch):
+    """A 404 means "not in the works index" and must return None, not raise."""
+    import urllib.error
+    import urllib.request
+
+    def fake(req, timeout=None):
+        raise urllib.error.HTTPError(req.full_url, 404, "Not Found", {}, None)
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake)
+    assert CrossrefClient().fetch("10.1/missing") is None
+
+
+def test_fetch_network_quotes_the_doi_into_the_path(monkeypatch):
+    """A DOI's '/' must be percent-encoded, or the URL path is wrong."""
+    seen = _fake_urlopen(monkeypatch, '{"message": {"DOI": "10.1/x"}}')
+    CrossrefClient().fetch("10.1000/abc/def")
+    assert seen[0].full_url.endswith("10.1000%2Fabc%2Fdef")
+
+
+def test_search_network_reads_message_items_and_drops_non_dicts(monkeypatch):
+    """`search` must read `data["message"]["items"]` and skip junk entries."""
+    body = (
+        '{"status": "ok", "message": {"items": '
+        '[{"DOI": "10.1/a"}, "junk", null, {"DOI": "10.1/b"}]}}'
+    )
+    _fake_urlopen(monkeypatch, body)
+
+    items = CrossrefClient()._search_network("some query")
+
+    assert items == [{"DOI": "10.1/a"}, {"DOI": "10.1/b"}]
+
+
+def test_search_network_404_returns_empty_list(monkeypatch):
+    import urllib.error
+    import urllib.request
+
+    def fake(req, timeout=None):
+        raise urllib.error.HTTPError(req.full_url, 404, "NF", {}, None)
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake)
+    assert CrossrefClient()._search_network("q") == []
+
+
+def test_search_network_requests_the_fields_retraction_detection_needs(monkeypatch):
+    """`select` must keep `updated-by`/`relation`/`type`.
+
+    Trimming the payload is an optimisation; dropping these three turns a
+    suggested candidate's retraction invisible, and `--suggest-doi` would
+    recommend citing a retracted paper (it once did).
+    """
+    seen = _fake_urlopen(monkeypatch, '{"message": {"items": []}}')
+    CrossrefClient()._search_network("q")
+    url = seen[0].full_url
+    for required in ("updated-by", "relation", "type"):
+        assert required in url
+
+
+def test_resolve_network_reraises_non_404_http_errors(monkeypatch):
+    """A doi.org 5xx/429 is transient and MUST NOT read as "does not resolve".
+
+    If this `raise` ever became `return False`, a momentary doi.org outage would
+    turn every not-in-Crossref DOI into a hard `doi-not-resolving` ERROR — the
+    tool telling the author their correct DOI is a typo. The invariant was
+    documented in a comment and protected by nothing.
+    """
+    import urllib.error
+    import urllib.request
+
+    def fake(req, timeout=None):
+        raise urllib.error.HTTPError(req.full_url, 503, "Service Unavailable", {}, None)
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake)
+    with pytest.raises(urllib.error.HTTPError):
+        CrossrefClient().resolve("10.1/x")
+
+
+def test_resolve_network_404_means_not_registered(monkeypatch):
+    import urllib.error
+    import urllib.request
+
+    def fake(req, timeout=None):
+        raise urllib.error.HTTPError(req.full_url, 404, "NF", {}, None)
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake)
+    assert CrossrefClient().resolve("10.1/x") is False
+
+
+def test_resolve_network_uses_head_and_accepts_2xx(monkeypatch):
+    seen = _fake_urlopen(monkeypatch, b"", status=200)
+    assert CrossrefClient().resolve("10.1/x") is True
+    assert seen[0].get_method() == "HEAD"
+
+
+def test_transient_doi_org_failure_becomes_lookup_failed_not_a_hard_error():
+    """End-to-end consequence of the invariant above: exit 3, never exit 1."""
+
+    def boom(doi):
+        raise TimeoutError("doi.org timed out")
+
+    client = CrossrefClient(_fetch=lambda d: None, _resolve=boom)
+    res = check_reference(Reference(raw="", doi="10.1/x"), client)
+
+    codes = [f.code for f in res.findings]
+    assert codes == ["lookup-failed"]
+    assert "doi-not-resolving" not in codes
+
+
+# --- long-title similarity must not collapse (difflib autojunk) -------------
+#
+# difflib's autojunk heuristic kicks in at 200 elements and treats common
+# characters as junk, which is right for diffing source code and wrong for
+# comparing prose. Clinical trial titles routinely pass 200 characters.
+
+LONG_TRIAL_TITLE = (
+    "Effect of a multifaceted quality improvement intervention on the incidence of "
+    "ventilator-associated pneumonia in critically ill adults admitted to intensive "
+    "care units: a stepped-wedge cluster-randomised controlled trial"
+)
+
+
+def test_long_title_similarity_is_not_deflated_by_autojunk():
+    """The same title with the hyphens dropped must still read as the same title."""
+    assert len(LONG_TRIAL_TITLE) > 200
+    cited = LONG_TRIAL_TITLE.replace("-", " ")
+    from citecheck.core import _similar
+
+    assert _similar(cited, LONG_TRIAL_TITLE) > 0.95
+
+
+def test_long_title_similarity_is_continuous_across_the_200_char_boundary():
+    """The score must not jump when the Crossref title crosses 200 characters.
+
+    Regression: truncating one pair at 199 vs 200 characters scored 0.930 vs
+    0.856 — a cliff produced purely by difflib's internal threshold, not by any
+    difference in the text.
+    """
+    from citecheck.core import _similar
+
+    cited = (
+        "Effect of a multifaceted quality intervention on the incidence of "
+        "ventilator-associated pneumonia in critically ill adults admitted to "
+        "intensive care units: a cluster-randomised controlled trial"
+    )
+    at_199 = _similar(cited[: int(199 * 0.87)], LONG_TRIAL_TITLE[:199])
+    at_200 = _similar(cited[: int(200 * 0.87)], LONG_TRIAL_TITLE[:200])
+    assert abs(at_199 - at_200) < 0.02
+
+
+def test_long_title_does_not_produce_a_false_title_mismatch():
+    """End-to-end: the visible symptom was a bogus warning on a correct citation."""
+    record = {
+        "DOI": "10.1/trial",
+        "title": [LONG_TRIAL_TITLE],
+        "author": [{"family": "Kim"}],
+        "issued": {"date-parts": [[2021]]},
+    }
+    ref = Reference(
+        raw="", doi="10.1/trial", title=LONG_TRIAL_TITLE.replace("-", " "),
+        author="Kim", year=2021,
+    )
+    res = check_reference(ref, make_client({"10.1/trial": record}))
+    assert [f.code for f in res.findings] == ["verified"]
+
+
+def test_a_genuinely_different_long_title_still_mismatches():
+    """The fix must not blunt the check it repairs."""
+    record = {
+        "DOI": "10.1/trial",
+        "title": [LONG_TRIAL_TITLE],
+        "author": [{"family": "Kim"}],
+        "issued": {"date-parts": [[2021]]},
+    }
+    ref = Reference(
+        raw="", doi="10.1/trial", author="Kim", year=2021,
+        title="A completely unrelated paper about cardiology outcomes in outpatients",
+    )
+    res = check_reference(ref, make_client({"10.1/trial": record}))
+    assert "title-mismatch" in [f.code for f in res.findings]
