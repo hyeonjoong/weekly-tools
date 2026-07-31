@@ -31,11 +31,22 @@ from typing import Dict, List, Optional, Sequence
 
 __all__ = ["normal_cdf", "wilcoxon_signed_rank", "paired_summary",
            "signed_rank_null_counts", "walsh_averages", "hodges_lehmann",
-           "wilcoxon_ci", "holm_adjust", "benjamini_hochberg"]
+           "wilcoxon_ci", "holm_adjust", "benjamini_hochberg",
+           "mannwhitney_null_counts", "mann_whitney_u", "pairwise_differences",
+           "hodges_lehmann_2sample", "mann_whitney_ci", "unpaired_summary",
+           "inversion_counts", "mann_kendall"]
 
 # 정확 검정을 쓰는 최대 표본 수. n=25 → 2^25 경우의 수를 DP로 세지만 상태
 # 공간은 n(n+1)/2+1 = 326 개뿐이라 즉시 계산됩니다.
 EXACT_MAX_N = 25
+
+# 두 표본(Mann–Whitney) 정확 분포를 쓰는 최대 **군당** 표본 수. 상태 공간은
+# m·n+1 개이고 DP는 O(m²n²) 이라 m=n=30 이면 810k 연산 — 즉시 끝납니다.
+EXACT_MAX_N_2SAMPLE = 30
+
+# Mann–Kendall(추세) 정확 분포를 쓰는 최대 표본 수. 상태 공간은 역위 수
+# 0..n(n-1)/2 이고 DP는 O(n³) — n=25 면 ~16k 연산.
+EXACT_MAX_N_TREND = 25
 
 
 def normal_cdf(z: float) -> float:
@@ -419,4 +430,432 @@ def paired_summary(baseline: Sequence[float],
     out["wilcoxon_method"] = w["method"]
     out["w_plus"] = w["w_plus"]
     out["n_pairs"] = w["n_pairs"]
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# 독립 2군(unpaired) — Mann–Whitney U / Hodges–Lehmann 이동량 + 분포무관 CI
+#
+# 왜 필요한가: 짝지은(pre–post) 설계 외에 **평행군(parallel-arm) 시험**
+# — 약물 대 위약, 디바이스 대 sham — 은 각 피험자가 한 군에만 속하므로
+# Wilcoxon 부호순위가 아니라 Mann–Whitney(=Wilcoxon 순위합)를 써야 합니다.
+# 짝지은 검정을 독립 자료에 쓰면 짝짓기가 임의가 되어 p값이 무의미해집니다.
+# --------------------------------------------------------------------------- #
+def mannwhitney_null_counts(m: int, n: int) -> List[int]:
+    """H0 하에서 U = u 가 되는 배열의 수를 u=0..m·n 로 반환 (동점 없음 가정).
+
+    U 는 "군2의 값이 군1의 값보다 큰 쌍의 수". 결합 표본의 순서배열
+    C(m+n, m) 가지가 등확률이므로, counts[u] = (U=u 인 배열 수),
+    Σcounts = C(m+n, m).
+
+    점화식(고전적):
+        C(m, n, u) = C(m-1, n, u-n) + C(m, n-1, u)
+    직관: 결합 정렬열의 **마지막 원소**가 군1이면 그 원소는 군2의 모든 값보다
+    크므로 남은 문제에서 u 가 n 만큼 줄고, 군2면 u 는 그대로입니다.
+    """
+    if m < 0 or n < 0:
+        raise ValueError("표본 수는 음수일 수 없습니다.")
+    # dp[i][j] = 크기 (i, j) 에 대한 counts 배열 (길이 i*j+1).
+    dp: List[List[Optional[List[int]]]] = [[None] * (n + 1)
+                                           for _ in range(m + 1)]
+    for j in range(n + 1):
+        dp[0][j] = [1]                      # 군1이 비면 U=0 만 가능
+    for i in range(1, m + 1):
+        dp[i][0] = [1]                      # 군2가 비면 U=0 만 가능
+        for j in range(1, n + 1):
+            size = i * j
+            a = dp[i - 1][j]                # 길이 (i-1)*j+1
+            b = dp[i][j - 1]                # 길이 i*(j-1)+1
+            arr = [0] * (size + 1)
+            for u in range(size + 1):
+                v = 0
+                if 0 <= u - j < len(a):
+                    v += a[u - j]
+                if u < len(b):
+                    v += b[u]
+                arr[u] = v
+            dp[i][j] = arr
+    return dp[m][n]
+
+
+def _exact_mw_two_sided_p(u: float, m: int, n: int) -> float:
+    """정확 Mann–Whitney 양측 p값 = 2·min(P(U≤u), P(U≥u)), 1로 절단."""
+    counts = mannwhitney_null_counts(m, n)
+    total = float(sum(counts))
+    k = int(round(u))
+    k = max(0, min(k, m * n))
+    lower = sum(counts[: k + 1]) / total
+    upper = sum(counts[k:]) / total
+    return min(1.0, 2.0 * min(lower, upper))
+
+
+def mann_whitney_u(a: Sequence[float], b: Sequence[float],
+                   method: str = "auto") -> Dict[str, float]:
+    """Mann–Whitney U 검정 (= Wilcoxon 순위합). 양측.
+
+    a = 군1(기준/대조), b = 군2(개입). 반환하는 U 는 **군2 기준**:
+        U = #{(i,j) : b_j > a_i} + 0.5·#{b_j == a_i}
+    따라서 U > m·n/2 이면 군2가 큰 쪽입니다.
+
+    method:
+      "auto"   — 결합 표본에 동점이 없고 두 군 모두 EXACT_MAX_N_2SAMPLE(30) 이하면
+                 정확 분포, 아니면 동점 보정 정규 근사. (기본)
+      "exact"  — 항상 정확 분포. 동점이 있으면 ValueError.
+      "approx" — 항상 정규 근사(연속성 보정 + 동점 보정 분산).
+
+    반환 키: n_a, n_b, u_stat, z, p_value, method, rank_biserial, cles
+      rank_biserial = 2U/(mn) - 1  (−1..+1, Kerby 2014; 부호는 군2 방향)
+      cles          = U/(mn)       (common-language effect size: P(b > a))
+    """
+    if method not in ("auto", "exact", "approx"):
+        raise ValueError(f"알 수 없는 method: {method!r} (auto/exact/approx)")
+    av = [float(x) for x in a]
+    bv = [float(x) for x in b]
+    m, n = len(av), len(bv)
+    out: Dict[str, float] = {
+        "n_a": m, "n_b": n, "u_stat": float("nan"), "z": float("nan"),
+        "p_value": float("nan"), "method": "approx",
+        "rank_biserial": float("nan"), "cles": float("nan"),
+    }
+    if m == 0 or n == 0:
+        return out
+
+    pooled = av + bv
+    ranks = _average_ranks(pooled)
+    r_b = sum(ranks[m:])
+    # U(군2) = R2 - n(n+1)/2 — 순위합 항등식. 동점은 평균순위라 0.5씩 나눠 가집니다.
+    u = r_b - n * (n + 1) / 2.0
+    out["u_stat"] = u
+    mn = float(m * n)
+    out["rank_biserial"] = 2.0 * u / mn - 1.0
+    out["cles"] = u / mn
+
+    ties = len(set(pooled)) != len(pooled)
+    if method == "exact" and ties:
+        raise ValueError(
+            "정확 Mann–Whitney 검정은 결합 표본에 동점이 없어야 합니다 "
+            "(method='auto' 를 쓰면 자동으로 정규 근사로 전환됩니다).")
+    use_exact = (method == "exact") or (
+        method == "auto" and not ties
+        and m <= EXACT_MAX_N_2SAMPLE and n <= EXACT_MAX_N_2SAMPLE)
+
+    # 동점 보정 분산: Var(U) = mn/12 · [(N+1) − Σ(t³−t)/(N(N−1))]
+    N = m + n
+    counts: Dict[float, int] = {}
+    for v in pooled:
+        counts[v] = counts.get(v, 0) + 1
+    tie_sum = sum(t ** 3 - t for t in counts.values() if t > 1)
+    if N > 1:
+        var_u = mn / 12.0 * ((N + 1) - tie_sum / (N * (N - 1.0)))
+    else:
+        var_u = 0.0
+    if var_u <= 0:
+        out.update({"z": 0.0, "p_value": 1.0,
+                    "method": "exact" if use_exact else "approx"})
+        return out
+
+    num = u - mn / 2.0
+    cc = num - math.copysign(0.5, num) if num != 0 else 0.0   # 연속성 보정
+    z = cc / math.sqrt(var_u)
+    out["z"] = z
+
+    if use_exact:
+        out["p_value"] = _exact_mw_two_sided_p(u, m, n)
+        out["method"] = "exact"
+    else:
+        p = 2.0 * (1.0 - normal_cdf(abs(z)))
+        out["p_value"] = min(1.0, max(0.0, p))
+        out["method"] = "approx"
+    return out
+
+
+def pairwise_differences(a: Sequence[float], b: Sequence[float]) -> List[float]:
+    """모든 쌍 차이 b_j − a_i 를 정렬해 반환 (개수 = m·n)."""
+    av = [float(x) for x in a]
+    bv = [float(x) for x in b]
+    out = [y - x for y in bv for x in av]
+    out.sort()
+    return out
+
+
+def hodges_lehmann_2sample(a: Sequence[float], b: Sequence[float]) -> float:
+    """두 표본 Hodges–Lehmann 이동량 추정 = median(b_j − a_i).
+
+    Mann–Whitney 검정과 쌍대인 위치 이동(location shift) 추정량으로,
+    평균차보다 이상값에 강건합니다. 한쪽이 비면 NaN.
+    """
+    d = pairwise_differences(a, b)
+    if not d:
+        return float("nan")
+    return statistics.median(d)
+
+
+def mann_whitney_ci(a: Sequence[float], b: Sequence[float],
+                    alpha: float = 0.05) -> Dict[str, float]:
+    """이동량(b − a)의 분포무관 (1−alpha) 신뢰구간 — Mann–Whitney 쌍대.
+
+    정렬된 쌍 차이 D_(1..M), M = m·n 에 대해
+        k = max{ k ≥ 0 : P(U ≤ k) < alpha/2 }
+        CI = [ D_(k+1), D_(M−k) ]
+    이 구성은 wilcoxon_ci 와 **동일한 논리**이며 정확 양측 검정과 쌍대입니다:
+    U(Δ)=#{D_ij > Δ} 라 하면 기각 ⇔ U ≤ k 또는 U ≥ M−k ⇔ Δ ∉ [D_(k+1), D_(M−k)].
+    (동점이 없다는 가정 위에 있고, 동점이 있으면 구간은 보수적이 됩니다.)
+
+    n이 커서 정확 분포를 쓸 수 없으면 정규 근사로 k를 정합니다.
+    k 가 유효 범위를 벗어나면(표본 부족) (-∞, ∞) 와 ci_method="insufficient-n".
+
+    반환 키: ci_low, ci_high, ci_alpha, ci_k, ci_method, n_a, n_b, hl_shift
+    """
+    if not (0.0 < alpha < 1.0):
+        raise ValueError("alpha는 0과 1 사이여야 합니다.")
+    av = [float(x) for x in a]
+    bv = [float(x) for x in b]
+    m, n = len(av), len(bv)
+    out: Dict[str, float] = {
+        "ci_low": float("nan"), "ci_high": float("nan"), "ci_alpha": alpha,
+        "ci_k": float("nan"), "ci_method": None, "n_a": m, "n_b": n,
+        "hl_shift": float("nan"),
+    }
+    if m == 0 or n == 0:
+        return out
+
+    diffs = pairwise_differences(av, bv)
+    M = len(diffs)
+    out["hl_shift"] = statistics.median(diffs)
+
+    if m <= EXACT_MAX_N_2SAMPLE and n <= EXACT_MAX_N_2SAMPLE:
+        counts = mannwhitney_null_counts(m, n)
+        total = float(sum(counts))
+        cum = 0.0
+        k = -1
+        for u in range(len(counts)):
+            cum += counts[u] / total          # cum = P(U ≤ u)
+            if cum < alpha / 2.0:
+                k = u
+            else:
+                break
+        method = "exact"
+    else:
+        z = _inv_normal_cdf(1.0 - alpha / 2.0)
+        mean_u = m * n / 2.0
+        sd_u = math.sqrt(m * n * (m + n + 1) / 12.0)
+        k = int(math.floor(mean_u - z * sd_u))
+        method = "approx"
+
+    if k < 0 or k > (M - 1) // 2:
+        out["ci_low"] = float("-inf")
+        out["ci_high"] = float("inf")
+        out["ci_k"] = float("nan")
+        out["ci_method"] = "insufficient-n"
+        return out
+    out["ci_low"] = diffs[k]
+    out["ci_high"] = diffs[M - 1 - k]
+    out["ci_k"] = k
+    out["ci_method"] = method
+    return out
+
+
+def unpaired_summary(a: Sequence[float], b: Sequence[float],
+                     alpha: float = 0.05) -> Dict[str, float]:
+    """독립 2군(a=대조, b=개입) 한 지표의 요약 — 평행군 시험용.
+
+    유한한 값만 사용합니다(NaN 지표는 그 군에서 자동 제외).
+    반환 키:
+      n_a, n_b, mean_a, mean_b, sd_a, sd_b, median_a, median_b
+      mean_diff  : mean_b − mean_a
+      sd_pooled  : 합동 표준편차 (√(((na−1)sa²+(nb−1)sb²)/(na+nb−2)))
+      cohens_d   : mean_diff / sd_pooled
+      hedges_g   : 소표본 편의 보정 d (J = 1 − 3/(4(na+nb)−9))
+      hl_shift, ci_low, ci_high, ci_alpha, ci_method : HL 이동량과 분포무관 CI
+      u_stat, mw_z, mw_p, mw_method, rank_biserial, cles
+    """
+    av = [float(x) for x in a if _finite(x)]
+    bv = [float(x) for x in b if _finite(x)]
+    na, nb = len(av), len(bv)
+    out: Dict[str, float] = {"n_a": na, "n_b": nb}
+    if na == 0 or nb == 0:
+        return out
+    out["mean_a"] = statistics.fmean(av)
+    out["mean_b"] = statistics.fmean(bv)
+    out["mean_diff"] = out["mean_b"] - out["mean_a"]
+    out["median_a"] = statistics.median(av)
+    out["median_b"] = statistics.median(bv)
+    sa = statistics.stdev(av) if na >= 2 else 0.0
+    sb = statistics.stdev(bv) if nb >= 2 else 0.0
+    out["sd_a"] = sa
+    out["sd_b"] = sb
+    if na + nb > 2:
+        sp2 = ((na - 1) * sa * sa + (nb - 1) * sb * sb) / (na + nb - 2)
+        sp = math.sqrt(sp2)
+    else:
+        sp = 0.0
+    out["sd_pooled"] = sp
+    out["cohens_d"] = (out["mean_diff"] / sp) if sp > 0 else float("nan")
+    # Hedges g — d 는 소표본에서 효과를 과대추정하므로 J 로 보정합니다.
+    denom = 4.0 * (na + nb) - 9.0
+    j = (1.0 - 3.0 / denom) if denom > 0 else float("nan")
+    out["hedges_g"] = (out["cohens_d"] * j) if _finite(j) else float("nan")
+
+    ci = mann_whitney_ci(av, bv, alpha=alpha)
+    out["hl_shift"] = ci["hl_shift"]
+    out["ci_low"] = ci["ci_low"]
+    out["ci_high"] = ci["ci_high"]
+    out["ci_alpha"] = ci["ci_alpha"]
+    out["ci_method"] = ci["ci_method"]
+
+    w = mann_whitney_u(av, bv)
+    out["u_stat"] = w["u_stat"]
+    out["mw_z"] = w["z"]
+    out["mw_p"] = w["p_value"]
+    out["mw_method"] = w["method"]
+    out["rank_biserial"] = w["rank_biserial"]
+    out["cles"] = w["cles"]
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# 단조 추세 — Mann–Kendall / Kendall's tau-b
+#
+# 왜 필요한가: 한 기록을 여러 구간(epoch)으로 쪼개면 "RMSSD가 시간에 따라
+# 오르는가?" 라는 정상성(stationarity)·순응(habituation) 질문이 생깁니다.
+# 회귀 기울기는 이상 구간 하나에 끌려가므로 순위 기반 추세검정을 씁니다.
+# --------------------------------------------------------------------------- #
+def inversion_counts(n: int) -> List[int]:
+    """길이 n 순열의 역위(inversion) 수 분포 — counts[d] = 역위 d 인 순열 수.
+
+    Kendall S 의 정확 영분포에 필요합니다: S = C(n,2) − 2·D (D=역위 수).
+    생성함수 Π_{i=1..n} (1 + x + … + x^{i−1}) 를 전개합니다. Σcounts = n!.
+    """
+    if n < 0:
+        raise ValueError("n은 음수일 수 없습니다.")
+    max_d = n * (n - 1) // 2
+    counts = [0] * (max_d + 1)
+    counts[0] = 1
+    upto = 0
+    for i in range(2, n + 1):
+        upto += i - 1
+        # 슬라이딩 누적합으로 (1+x+…+x^{i-1}) 을 곱합니다 — O(n³) 전체.
+        prefix = [0] * (upto + 2)
+        for d in range(upto + 1):
+            prefix[d + 1] = prefix[d] + counts[d]
+        for d in range(upto, -1, -1):
+            lo = max(0, d - (i - 1))
+            counts[d] = prefix[d + 1] - prefix[lo]
+    return counts
+
+
+def mann_kendall(values: Sequence[float],
+                 method: str = "auto",
+                 positions: Optional[Sequence[float]] = None
+                 ) -> Dict[str, float]:
+    """Mann–Kendall 단조 추세 검정 (양측) + Kendall tau-b.
+
+    S = Σ_{i<j} sign(x_j − x_i). S>0 = 증가 추세.
+    method:
+      "auto"   — 동점이 없고 n ≤ EXACT_MAX_N_TREND(25) 이면 정확 분포, 아니면
+                 동점 보정 정규 근사(연속성 보정). (기본)
+      "exact"  — 항상 정확 분포. 동점이 있으면 ValueError.
+      "approx" — 항상 정규 근사.
+
+    positions: 각 값의 **실제 x좌표**(예: 창 번호). Theil–Sen 기울기 분모에 씁니다.
+      주지 않으면 0,1,2,… 를 씁니다. **비유한 값이 섞이면 반드시 주세요** —
+      이 함수는 비유한 값을 버리고 압축하므로, 압축된 리스트의 이웃은 원래
+      이웃이 아닙니다. 예: 창 12개 중 짝수 번째만 유한하면 압축 후 이웃 간격이
+      실제로는 2창인데 1창으로 계산돼 기울기가 **2배로 부풀려집니다**
+      (S·tau·p 는 순서만 쓰므로 영향 없음 — 기울기만 틀립니다).
+
+    반환 키: n, s, tau, z, p_value, method, slope
+      tau   : Kendall tau-b (동점 보정)
+      slope : Theil–Sen 기울기 = median((x_j−x_i)/(pos_j−pos_i))
+    n < 3 이면 검정 불가(z=NaN, p=NaN)이지만 tau/slope 는 가능하면 냅니다.
+    """
+    if method not in ("auto", "exact", "approx"):
+        raise ValueError(f"알 수 없는 method: {method!r} (auto/exact/approx)")
+    vals = [float(v) if _finite(v) else float("nan") for v in values]
+    if positions is None:
+        pos_all = [float(i) for i in range(len(vals))]
+    else:
+        if len(positions) != len(values):
+            raise ValueError(
+                f"positions 길이가 values 와 다릅니다 "
+                f"({len(positions)} != {len(values)}).")
+        pos_all = [float(p) for p in positions]
+    keep = [i for i, v in enumerate(vals) if _finite(v)]
+    x = [vals[i] for i in keep]
+    pos = [pos_all[i] for i in keep]
+    n = len(x)
+    out: Dict[str, float] = {
+        "n": n, "s": float("nan"), "tau": float("nan"), "z": float("nan"),
+        "p_value": float("nan"), "method": "approx", "slope": float("nan"),
+    }
+    if n < 2:
+        return out
+
+    s = 0
+    n_ties_pairs = 0
+    for i in range(n - 1):
+        for j in range(i + 1, n):
+            d = x[j] - x[i]
+            if d > 0:
+                s += 1
+            elif d < 0:
+                s -= 1
+            else:
+                n_ties_pairs += 1
+    out["s"] = float(s)
+
+    n0 = n * (n - 1) / 2.0
+    # tau-b: 시간축(1..n)에는 동점이 없으므로 분모는 √(n0·(n0 − ties)).
+    denom = math.sqrt(n0 * (n0 - n_ties_pairs))
+    out["tau"] = (s / denom) if denom > 0 else float("nan")
+
+    slopes = [(x[j] - x[i]) / (pos[j] - pos[i])
+              for i in range(n - 1) for j in range(i + 1, n)
+              if pos[j] != pos[i]]
+    out["slope"] = statistics.median(slopes) if slopes else float("nan")
+
+    if n < 3:
+        return out
+
+    ties = n_ties_pairs > 0
+    if method == "exact" and ties:
+        raise ValueError(
+            "정확 Mann–Kendall 검정은 동점이 없어야 합니다 "
+            "(method='auto' 를 쓰면 자동으로 정규 근사로 전환됩니다).")
+    use_exact = (method == "exact") or (
+        method == "auto" and not ties and n <= EXACT_MAX_N_TREND)
+
+    # 동점 보정 분산: Var(S) = [n(n−1)(2n+5) − Σ t(t−1)(2t+5)]/18
+    tie_groups: Dict[float, int] = {}
+    for v in x:
+        tie_groups[v] = tie_groups.get(v, 0) + 1
+    tie_term = sum(t * (t - 1) * (2 * t + 5)
+                   for t in tie_groups.values() if t > 1)
+    var_s = (n * (n - 1) * (2 * n + 5) - tie_term) / 18.0
+    if var_s <= 0:
+        out.update({"z": 0.0, "p_value": 1.0,
+                    "method": "exact" if use_exact else "approx"})
+        return out
+    if s > 0:
+        z = (s - 1) / math.sqrt(var_s)
+    elif s < 0:
+        z = (s + 1) / math.sqrt(var_s)
+    else:
+        z = 0.0
+    out["z"] = z
+
+    if use_exact:
+        counts = inversion_counts(n)
+        total = float(sum(counts))
+        # S = C(n,2) − 2D → D = (C(n,2) − S)/2. S 의 분포는 0 대칭입니다.
+        max_s = int(n0)
+        d_obs = (max_s - s) // 2
+        lower = sum(counts[: d_obs + 1]) / total          # P(D ≤ d) = P(S ≥ s)
+        upper = sum(counts[d_obs:]) / total               # P(D ≥ d) = P(S ≤ s)
+        out["p_value"] = min(1.0, 2.0 * min(lower, upper))
+        out["method"] = "exact"
+    else:
+        p = 2.0 * (1.0 - normal_cdf(abs(z)))
+        out["p_value"] = min(1.0, max(0.0, p))
+        out["method"] = "approx"
     return out

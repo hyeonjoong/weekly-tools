@@ -59,6 +59,100 @@ pipelines. Zero dependencies, so it runs anywhere Python 3.9+ is installed.
   기반이되, 꼬리를 버리지 않는 **양방향 구간 분할**(Kantelhardt/MF-DFA 방식)을 사용 —
   N이 구간 크기의 배수가 아니면 전방향 방식과 α1이 1–2% 다를 수 있으니 다른 도구와
   비교할 때 유의하세요. 백색잡음 α≈0.5·적분잡음 α≈1.5로 손 검산).
+- **장기 지표 / Long-term** (`--window`) — 겹치지 않는 5분 구간에서 **SDANN**(구간 평균
+  NN들의 SD)과 **SDNN index**(구간 SDNN들의 평균). Task Force 1996 **공식을 그대로**
+  적용합니다. 단 그 참고값(SDANN ≈ 127±35 ms, SDNN index ≈ 54±15 ms)은 **24시간 홀터**
+  기준이므로, 20분 기록에서 나온 SDANN은 공식상 맞아도 발표 값과 비교할 수 없습니다 —
+  기록이 6시간 미만이면 리포트가 그 사실을 같은 자리에 적습니다.
+
+---
+
+## 구간별 추이 / Windowed (epoch-wise) analysis (`--window`)
+
+Task Force 표준 지표는 **정상성(stationarity)을 가정한 5분 기록**에 대해 정의돼 있습니다.
+20분·야간 기록을 한 덩어리로 계산하면 각성→수면 전환, 자세 변화, 개입 순응 같은 **느린
+추세가 SDNN을 부풀리고**, "개입 중 언제 효과가 붙었는가"에 답할 수 없습니다.
+
+```bash
+hrvkit session.csv --window                 # 5분(300초) 구간, Task Force 표준
+hrvkit session.csv --window 120             # 2분 구간
+hrvkit session.csv --window 300 --step 60   # 5분 창을 1분씩 미는 슬라이딩
+hrvkit session.csv --window --format csv > epochs.csv   # 구간당 1행
+```
+
+출력은 세 블록입니다.
+
+- **[A] 구간별 지표** — 구간마다 n·이상박동%·HR·RMSSD·SDNN·pNN50·HF n.u.·LF/HF·SD1·DFA α1.
+- **[B] 요약 + 추세** — 지표별 mean±SD·CV·min–max 와 **Mann–Kendall 단조 추세 검정**
+  (Kendall tau-b, 동점 없고 구간 ≤25개면 **정확 분포**, 아니면 동점 보정 정규 근사) +
+  이상 구간에 강건한 **Theil–Sen 기울기(지표단위/구간)**. 지표 전체를 한 가족으로 보아
+  Holm(FWER)·BH(FDR) 보정 p를 함께 냅니다.
+- **[C] 장기 지표** — SDANN·SDNN index.
+
+정직성 장치(계산만큼 중요합니다):
+
+- 정제(이상박동 보정)는 **기록 전체에서 한 번만** 합니다. 창마다 다시 탐지하면 이미 보간된
+  값 위에서 탐지가 돌아 이상박동 비율이 0 %로 잘못 보고됩니다.
+- 마지막 **불완전 구간은 버리고**, 버린 초 수를 notes에 적습니다(길이가 다른 구간을 섞으면
+  SDANN·추세가 구간 길이에 오염됩니다).
+- 박동이 부족한 구간도 **표와 CSV에서 사라지지 않고** error 사유와 함께 남습니다.
+- 창이 겹치면 구간이 서로 독립이 아니므로 **SDANN을 생략**하고, 추세 p값이 낙관적임을
+  경고합니다.
+- 구간이 적으면 완벽한 단조 추세(tau=±1)라도 **기각이 원천적으로 불가능**합니다. 정확검정의
+  최소 양측 p는 2/n! 이므로 구간 4개면 0.083(보정 전에 이미 α 초과), 5개면 0.017이지만
+  9개 지표 Holm 보정 후 0.15, 6개면 0.0028 → 보정 후 0.025로 비로소 유의해질 수 있습니다.
+  즉 **보정 후 기각이 가능해지는 최소 구간 수는 6개**입니다. 리포트는 이 최소 p를 숫자로
+  찍어 줍니다 — "추세 없음"이 증거의 부재인지 부재의 증거인지 구분할 수 있게.
+- 창 길이가 300초가 아니면 SDANN·SDNN index를 다른 도구/논문 값과 직접 비교하지 말라고
+  같은 줄에 적습니다.
+
+---
+
+## 평행군(독립 2군) 비교 / Parallel-arm comparison (`--groups`)
+
+`--paired` 는 **같은 피험자의 pre–post**용입니다. 약물 대 위약, 디바이스 대 sham처럼
+**각 피험자가 한 군에만 속하는 설계**에는 짝지은 검정을 쓸 수 없습니다(짝짓기가 임의가
+되어 p값이 무의미해집니다). `--groups` 가 그 경우를 담당합니다.
+
+```bash
+hrvkit --groups arms.csv                    # 군간 비교 표
+hrvkit --groups arms.csv --format csv       # 지표당 1행 (논문 표용)
+hrvkit --groups arms.csv --json --alpha 0.01
+```
+
+`arms.csv` 는 **기록당 한 행**입니다(헤더 없으면 1열=파일, 2열=군).
+⚠️ **매니페스트에 먼저 나온 군이 기준(대조)** 이 되고, 모든 차이·이동량·방향 화살표는
+`(나중 군 − 먼저 군)` 방향입니다. 행 순서를 바꾸면 부호가 통째로 뒤집히므로,
+대조군을 위에 두세요. 리포트 머리글이 어느 쪽을 기준으로 삼았는지 이름으로 찍습니다.
+
+```
+file,group,subject
+C01.csv,control,C01
+C02.csv,control,C02
+D01.csv,device,D01
+D02.csv,device,D02
+```
+
+지표마다 다음을 냅니다.
+
+| 값 | 뜻 |
+|----|----|
+| mean±SD, median | 군별 기술통계 |
+| **HL shift** | Hodges–Lehmann 이동량 = median(개입−대조). 평균차보다 이상값에 강건 |
+| **분포무관 CI** | HL의 (1−α) 신뢰구간 — Mann–Whitney 정확검정과 **쌍대**(구간 밖 ⇔ 기각) |
+| **Hedges g** | 소표본 편의를 보정한 표준화 효과크기 (Cohen's d × J) |
+| **rank-biserial**, CLES | 순위 기반 효과크기 / P(개입 > 대조) |
+| **p (e/a)** | Mann–Whitney 양측 p — 동점 없고 군당 ≤30이면 **정확 분포**(`e`), 아니면 동점 보정 정규 근사(`a`) |
+| **p_holm / p_BH** | 지표 가족 전체에 대한 FWER / FDR 보정 |
+
+거부하는 입력(조용히 넘어가면 n이 부풀려집니다): 같은 파일 중복, 피험자 라벨 중복,
+군이 2개가 아님(3군 이상은 Kruskal–Wallis가 필요한데 이 도구는 제공하지 않습니다),
+군당 기록 1개.
+
+리포트는 **표본이 부족해 기각이 불가능한 경우를 숫자로 밝힙니다** — 예를 들어 n=5/5,
+지표 11개 보정에서는 완전분리(모든 개입값 > 모든 대조값)여도 최소 p=0.0079, Holm 보정
+후 0.087이라 α=0.05에서 유의할 수 없습니다. 이걸 말하지 않으면 "유의하지 않음"이
+"효과 없음"으로 오독됩니다.
 
 ---
 
@@ -85,6 +179,7 @@ n=1 방향 비교를 넘어, **여러 피험자의 (기저, 개입) 짝**을 모
 **통계적 유의성과 효과크기**를 냅니다. 장치 검증 연구의 핵심 산출물입니다.
 
 ```bash
+hrvkit --paired examples/paired/manifest.csv   # 예제 코호트(합성 10명)
 hrvkit --paired manifest.csv               # 코호트 통계 표
 hrvkit --paired manifest.csv --json        # 기계가 읽는 형태
 hrvkit --paired manifest.csv --format csv  # 논문 표/스프레드시트용 (지표당 1행)
@@ -114,11 +209,14 @@ S02_rest.csv,S02_slow.csv,S02
   (1.8배 보수적). 두 경로 모두 scipy와 대조 검증했습니다(정확: 완전 일치, 근사: 2e-16).
 - **Hodges–Lehmann 이동량과 분포무관 신뢰구간.** 평균차는 이상값에 끌리므로 위치
   추정은 Walsh 평균의 중앙값(HL)으로 냅니다. CI는 부호순위 검정과 **쌍대(duality)**
-  라서 "CI가 0을 포함하지 않음" ⇔ "p < α" 가 정확히 일치합니다 — 6만 개 격자점
-  전수 대조로 불일치 0을 확인했고, 정확 영분포로 계산한 **해석적 피복률이 n=6~25
+  라서 **|차이|에 동점이 없을 때** "CI가 0을 포함하지 않음" ⇔ "p < α" 가 정확히
+  일치합니다 — 6만 개(동점 없는) 격자점 전수 대조로 불일치 0을 확인했고, 정확 영분포로 계산한 **해석적 피복률이 n=6~25
   전 구간에서 명목 수준 이상**임을 테스트로 고정합니다. n이 너무 작아(α=0.05 에서
   n≤5) 어떤 유한 구간도 명목 수준을 담보할 수 없으면 전체 범위를 "95% 구간"이라
   부르지 않고 **(-∞, ∞) 와 "n부족"** 을 명시합니다. `--alpha` 로 수준을 바꿉니다.
+  **동점이 있으면** p는 동점 보정 정규 근사로 전환되는 반면 CI의 절단 지수는 정확
+  영분포에서 나오므로, 경계에서 둘이 완전히 일치하지 않을 수 있습니다(대개 CI 쪽이
+  더 보수적). 리포트가 `a` 표시와 함께 그 사실을 적습니다.
 - **Cohen's dz** 효과크기.
 - **다중비교 보정 p값** — 지표군 전체를 하나의 검정 가족으로 보아
   **Holm–Bonferroni**(`p_holm`, FWER 통제 — 확증적 분석용)와
@@ -179,7 +277,7 @@ HF n.u.·LF/HF의 "부교감 방향" 해석이 **역전**됩니다. `hrvkit`은 
   zero-pad), PSD는 `scipy.signal.welch(scaling='density')`와 **동일한 수식**을 순수
   파이썬으로 재현했습니다. 정규화는 Parseval을 만족(Σ P·df ≈ 신호 분산)해 합성 정현파로
   절대 스케일(ms²)까지 손 검산됩니다.
-- **교차검증된 테스트(총 250개, 전부 오프라인).**
+- **교차검증된 테스트(총 396개, 전부 오프라인).**
   - 직접 구현 FFT ↔ 소박한 O(n²) DFT: 무작위 벡터에서 최대오차 **< 1e-9**.
   - Welch PSD ↔ `scipy.signal.welch`: **rtol 1e-6** 일치 (scipy 있을 때).
   - Wilcoxon **정확 검정** ↔ `scipy.stats.wilcoxon(method='exact')`: 완전 일치.
@@ -277,7 +375,7 @@ hrvkit examples/slow_breathing.csv          # time_s,rr_ms → rr_ms 열 자동 
 hrvkit examples/slow_breathing.csv --col rr_ms --json
 ```
 
-> ⚠️ **`examples/` 의 두 CSV는 합성 데이터입니다** — 실제 피험자 기록이 아니라,
+> ⚠️ **`examples/` 의 모든 CSV(안정·느린호흡·20분 세션·평행군 10개·짝지은 10명)는 합성 데이터입니다** — 실제 피험자 기록이 아니라,
 > 도구의 입출력 형식을 보여주려고 각 특성(안정 호흡 / 더 느린 호흡 + 큰 RSA)을
 > 갖도록 생성한 것입니다. 따라서 아래 표는 **기전의 증거가 아니라 계산 예시**입니다
 > (그렇게 만든 데이터에서 그 결과가 나오는 것은 당연 — 순환논증). 도구가 실제
@@ -320,8 +418,12 @@ hrvkit my_watch_hr.csv --unit bpm      # 또는 --unit auto (기본, 중앙값�
 | `--no-sampen` | 표본 엔트로피 생략 |
 | `--compare` | 정확히 2개 파일을 기저 대 개입으로 짝지어 비교 |
 | `--paired MANIFEST` | 매니페스트 CSV로 여러 피험자 코호트 통계(Wilcoxon 정확검정·HL 신뢰구간·Holm/BH 보정) |
+| `--groups MANIFEST` | 평행군(독립 2군) 비교 — Mann–Whitney 정확검정·HL 이동량 CI·Hedges g·Holm/BH 보정 |
+| `--window [SEC]` | 파일 1개를 SEC초 구간으로 나눠 구간별 지표 + Mann–Kendall 추세 + SDANN/SDNN index (값 생략 시 300초) |
+| `--step SEC` | 구간 시작 간격(초). 기본은 `--window` 와 동일(겹치지 않음). 작게 주면 슬라이딩 창 |
+| `--min-window-beats N` | 구간을 분석하기 위한 최소 박동 수 (기본 20) |
 | `--alpha 0.05` | 유의수준 — HL 신뢰구간 수준(1-α)과 유의 판정 기준 |
-| `--format text\|json\|csv` | 출력 형식 (기본 text; 여러 파일은 표/CSV, 단일 파일도 1행 CSV, `--paired`는 지표당 1행 CSV) |
+| `--format text\|json\|csv` | 출력 형식 (기본 text; 여러 파일은 표/CSV, 단일 파일도 1행 CSV, `--paired`/`--groups`는 지표당 1행 CSV, `--window`는 구간당 1행 CSV) |
 | `--json` | `--format json` 의 단축 |
 | `--version`, `-h` | 버전 / 도움말 |
 
@@ -343,6 +445,15 @@ hrvkit my_watch_hr.csv --unit bpm      # 또는 --unit auto (기본, 중앙값�
 - **정규화 단위(n.u.)와 LF/HF는 상대 지표입니다.** 절대 파워(ms²)와 함께 해석하세요.
 - **주파수 방법을 반드시 명시.** 리샘플 주파수·창·구간 수가 값에 영향을 주므로 리포트에
   같이 출력합니다(재현성). 다른 도구와 비교할 땐 동일 설정인지 확인하세요.
+- **`--window` 구간의 VLF와 total_power는 쓰지 마세요.** 5분 창(fs 4 Hz)이면 Welch 구간이
+  64초로 VLF 주기(333초)보다 훨씬 짧습니다. VLF 대역에 빈은 2개가 잡히므로 결과는
+  **NaN이 아니라 심하게 과소추정된 유한 값**이고, `total_power`는 정의상 VLF를 포함하니
+  같은 편향을 그대로 물려받습니다. 구간별 출력은 `vlf_reliable` 플래그(텍스트 리포트의
+  주석, CSV·JSON의 열)로 이를 표시합니다 — 구간별로는 시간영역·Poincaré 지표를 보세요.
+- **`--groups` 는 무작위배정을 가정하지 않습니다.** 군간 차이는 그 자체로 인과가 아닙니다.
+  같은 피험자의 pre–post 자료가 있다면 `--paired` 가 검정력이 훨씬 높습니다.
+- **3군 이상 비교는 제공하지 않습니다.** Kruskal–Wallis + 사후검정이 필요하며, 2군만
+  골라 쓰면 다중비교가 숨습니다. `--groups` 는 군이 2개가 아니면 거부합니다.
 - 이 도구는 지표를 **계산·요약**할 뿐, 임상적 판단을 대신하지 않습니다.
 
 ---
@@ -350,7 +461,7 @@ hrvkit my_watch_hr.csv --unit bpm      # 또는 --unit auto (기본, 중앙값�
 ## Tests
 
 ```bash
-python3 -m pytest -q      # 250 tests, 전부 오프라인. numpy/scipy 있으면 교차검증
+python3 -m pytest -q      # 396 tests, 전부 오프라인. numpy/scipy 있으면 교차검증
                           # (FFT·Welch·SampEn·DFA), 없으면 해당 참조 테스트만 skip.
 ```
 

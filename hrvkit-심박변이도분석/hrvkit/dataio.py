@@ -47,7 +47,7 @@ import statistics
 from typing import List, Optional, Sequence, Tuple
 
 __all__ = ["parse_float", "load_series", "to_rr_ms", "detect_unit",
-           "load_manifest"]
+           "load_manifest", "load_group_manifest"]
 
 _NA_LABELS = {"NA", "N/A", "NAN", "NULL", ".", "-", "--", "?", "NONE"}
 
@@ -648,3 +648,146 @@ def _duplicates(items: Sequence) -> set:
             dup.add(it)
         seen.add(it)
     return dup
+
+
+def load_group_manifest(path: str) -> List[Tuple[str, str, str]]:
+    """평행군(독립 2군) 매니페스트 CSV를 (파일경로, 군, 라벨) 목록으로 로드.
+
+    형식: 최소 2개 열. 헤더가 있으면 이름으로 파일/군 열을 추정
+    (file/path/csv/파일/기록 vs group/arm/condition/treatment/군/그룹/조건),
+    없으면 1열=파일, 2열=군. 선택적 3번째 열은 피험자 라벨.
+    상대경로는 매니페스트 파일 디렉터리 기준으로 해석합니다.
+
+    load_manifest(짝지은) 와 달리 **각 행이 한 기록 = 한 피험자**입니다.
+    독립 2군 검정은 각 관측이 서로 다른 피험자여야 하므로:
+      - 같은 파일이 두 번 나오면 거부(같은 기록을 두 번 세면 n 이 부풀려짐).
+      - 피험자 라벨이 중복되면 거부(유사반복 → p값이 낙관적).
+      - 군이 정확히 2개가 아니면 거부(3군 이상은 Kruskal–Wallis 가 필요한데
+        이 도구는 제공하지 않습니다 — 조용히 2군만 쓰지 않고 알립니다).
+    """
+    header, data, _ = _read_table(path)
+    base_dir = os.path.dirname(os.path.abspath(path))
+
+    def _resolve(p: str) -> str:
+        p = p.strip()
+        return p if os.path.isabs(p) else os.path.join(base_dir, p)
+
+    def _looks_like_path(c: str) -> bool:
+        """셀이 (존재하지 않더라도) 파일 경로처럼 보이는지.
+
+        존재 여부만으로 판단하면 **오타 난 첫 행이 통째로 사라집니다**: 헤더가
+        없는 매니페스트의 첫 행은 `경로,군` 인데, 경로에 오타가 있으면 어느 셀도
+        파일이 아니라서 그 행이 헤더로 오인돼 조용히 버려지고, 군의 n 이 하나
+        줄어든 채 통계가 나옵니다(실측: 3대3 이 2대3 으로). 확장자·구분자도 함께
+        봅니다.
+        """
+        c = c.strip()
+        return bool(c) and (os.path.isfile(_resolve(c))
+                            or c.lower().endswith((".csv", ".tsv", ".txt"))
+                            or os.sep in c)
+
+    # load_manifest 와 같은 이유로 헤더 오인을 되돌립니다 — 첫 행 셀이 파일
+    # 경로처럼 보이면 그 행은 헤더가 아니라 데이터입니다.
+    if header is not None and any(_looks_like_path(c) for c in header):
+        data = [header] + data
+        header = None
+
+    if not data:
+        raise ValueError(f"군 매니페스트 '{path}' 에 데이터 행이 없습니다.")
+
+    fcol, gcol, lcol = 0, 1, None
+    if header:
+        toks = [set(_tokens(h)) for h in header]
+        file_k = {"file", "path", "filename", "csv", "record", "recording",
+                  "파일", "경로", "기록"}
+        group_k = {"group", "arm", "cohort", "condition", "treatment", "trt",
+                   "군", "그룹", "조건", "처치", "배정"}
+        subj_k = {"subject", "subj", "피험자", "대상자"}
+        pure_id = {"id", "subjid", "label", "라벨", "이름", "name"}
+        for i, t in enumerate(toks):
+            if t & file_k:
+                fcol = i
+            if t & group_k:
+                gcol = i
+        for i, t in enumerate(toks):
+            if i in (fcol, gcol):
+                continue
+            if (t & subj_k) or (t and t <= pure_id):
+                lcol = i
+    if fcol == gcol:
+        raise ValueError(
+            f"군 매니페스트 '{path}' 에서 파일 열과 군 열이 같은 열로 잡혔습니다. "
+            f"헤더를 'file,group[,subject]' 로 지정하세요. "
+            f"header={_short_header(header)}")
+
+    # 헤더가 없어도 3번째 열이 있으면 피험자 라벨로 씁니다 — 그래야 라벨 중복
+    # (유사반복) 검사가 헤더 유무와 무관하게 돕니다.
+    if header is None and data and len(data[0]) >= 3 and lcol is None:
+        lcol = 2
+
+    rows: List[Tuple[str, str, str]] = []
+    skipped: List[int] = []
+    first_data_line = 2 if header is not None else 1
+    for offset, r in enumerate(data):
+        line_no = first_data_line + offset
+        if max(fcol, gcol) >= len(r) or not r[fcol].strip() \
+                or not r[gcol].strip():
+            skipped.append(line_no)
+            continue
+        f, gname = r[fcol].strip(), r[gcol].strip()
+        label = r[lcol].strip() if (lcol is not None and lcol < len(r)) else ""
+        rows.append((_resolve(f), gname, label))
+    # 조용히 건너뛰면 군 n 이 사용자가 쓴 것과 달라집니다 — 중복을 큰소리로
+    # 거부하면서(=n 부풀리기) 누락은 조용히 넘기는 것은 앞뒤가 맞지 않습니다.
+    if skipped:
+        raise ValueError(
+            f"군 매니페스트 '{path}' 의 {len(skipped)}개 행에 파일 또는 군이 "
+            f"비어 있거나 열이 모자랍니다 (행 "
+            f"{', '.join(str(n) for n in skipped[:5])}"
+            f"{' …' if len(skipped) > 5 else ''}). 행을 지우거나 채우세요 — "
+            f"조용히 건너뛰면 군의 n 이 달라집니다.")
+    if not rows:
+        raise ValueError(
+            f"군 매니페스트 '{path}' 에서 유효한 (파일,군) 행을 찾지 못했습니다.")
+    missing = [f for f, _, _ in rows if not os.path.isfile(f)]
+    if missing:
+        raise ValueError(
+            f"군 매니페스트 '{path}' 가 가리키는 파일 {len(missing)}개를 찾을 수 "
+            f"없습니다: "
+            f"{', '.join(_short(os.path.basename(m), 24) for m in missing[:5])}"
+            f"{' …' if len(missing) > 5 else ''}. 경로는 매니페스트 파일 위치를 "
+            f"기준으로 해석합니다.")
+
+    dupe_files = _duplicates([f for f, _, _ in rows])
+    if dupe_files:
+        raise ValueError(
+            f"군 매니페스트 '{path}' 에 같은 파일이 여러 번 나옵니다: "
+            f"{', '.join(_short(os.path.basename(d), 24) for d in sorted(dupe_files)[:5])}"
+            f"{' …' if len(dupe_files) > 5 else ''}. 독립 2군 검정은 각 행이 "
+            f"서로 다른 기록이어야 합니다(중복 = n 부풀리기).")
+    dupe_lab = _duplicates([lab for _, _, lab in rows if lab])
+    if dupe_lab:
+        raise ValueError(
+            f"군 매니페스트 '{path}' 에 피험자 라벨이 중복됩니다: "
+            f"{', '.join(_short(d, 20) for d in sorted(dupe_lab)[:5])}"
+            f"{' …' if len(dupe_lab) > 5 else ''}. 독립 2군 검정은 각 행이 독립인 "
+            f"피험자여야 합니다(중복 = 유사반복 → p값이 부풀려짐).")
+
+    groups = []
+    for _, gname, _ in rows:
+        if gname not in groups:
+            groups.append(gname)
+    if len(groups) != 2:
+        raise ValueError(
+            f"군 매니페스트 '{path}' 의 군이 {len(groups)}개입니다 "
+            f"({', '.join(_short(g, 16) for g in groups[:6])}"
+            f"{' …' if len(groups) > 6 else ''}). --groups 는 정확히 2군만 "
+            f"비교합니다 — 3군 이상은 Kruskal–Wallis 등 다른 검정이 필요하며 "
+            f"이 도구는 제공하지 않습니다.")
+    for gname in groups:
+        n_g = sum(1 for _, g, _ in rows if g == gname)
+        if n_g < 2:
+            raise ValueError(
+                f"군 '{_short(gname, 16)}' 에 기록이 {n_g}개뿐입니다. 군 비교에는 "
+                f"군마다 최소 2개가 필요합니다.")
+    return rows

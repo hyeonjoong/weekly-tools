@@ -13,11 +13,15 @@ import os
 from typing import List, Sequence
 
 from .analyze import FLAT_COLUMNS, HRVResult, flat_metrics
-from .stats import benjamini_hochberg, holm_adjust, paired_summary
+from .stats import (benjamini_hochberg, holm_adjust, paired_summary,
+                    unpaired_summary)
+from .window import (TREND_METRICS, WindowSeries, long_term_indices,
+                     window_trends)
 
 __all__ = ["render_text", "render_comparison", "render_batch_table",
            "metrics_to_csv", "paired_group", "render_paired_group",
-           "paired_group_to_csv"]
+           "paired_group_to_csv", "render_windows", "windows_to_csv",
+           "group_compare", "render_group_compare", "group_compare_to_csv"]
 
 
 def _num(x, d: int = 2) -> str:
@@ -516,11 +520,476 @@ def render_paired_group(pairs: Sequence, alpha: float = 0.05) -> str:
           f"dz={_num(rm.get('cohens_dz'), 2)},")
         L(f"           p={_num(p, 4)} → Holm 보정 p={_num(ph, 4)} "
           f"→ 개입 효과 {sig} (α={alpha:g}, {m_tests}개 지표 보정).")
+    # 짝 수가 적으면 모든 피험자가 같은 방향이어도 정확검정 최소 p = 2^(1-n) 이라
+    # 보정 후 기각이 불가능합니다. 이를 밝히지 않으면 "유의하지 않음"이 효과 없음으로
+    # 오독됩니다.
+    n_eff = int(rm.get("n_pairs") or 0) if rm else 0
+    if 1 <= n_eff <= 12:
+        min_p = 2.0 ** (1 - n_eff)
+        if min_p * max(1, m_tests) >= alpha:
+            L(f"    ※ 유효 짝 n={n_eff} 에서 정확검정이 낼 수 있는 최소 p는 "
+              f"{min_p:.4f}, {m_tests}개 지표 보정 후에는 "
+              f"{min(1.0, min_p * max(1, m_tests)):.4f} 입니다 — 즉 **효과가 아무리 "
+              f"커도** α={alpha:g} 에서 Holm 기각이 불가능한 표본 수입니다.")
     if m_tests > 1:
         L(f"    ({m_tests}개 지표를 동시에 검정했습니다. 사전 지정한 주 지표가 있으면 "
           "그 지표의 p를,")
         L("     탐색적 스크리닝이면 p_BH(FDR)를, 확증적이면 p_holm(FWER)을 보고하세요.")
         L("     RMSSD와 SD1은 대수적으로 거의 같은 지표라 가족에 중복이 있습니다 →")
         L("     보정은 필요 이상으로 보수적입니다. 주 지표 사전 지정이 가장 강력합니다.)")
+    L("")
+    return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------- #
+# 구간(epoch)별 리포트
+# --------------------------------------------------------------------------- #
+# 구간 표에 보여줄 압축 열 (key, 헤더, 자릿수).
+_WINDOW_COLS = [
+    ("n_input", "n", 0),
+    ("pct_artifacts", "art%", 1),
+    ("mean_hr", "HR", 1),
+    ("rmssd", "RMSSD", 1),
+    ("sdnn", "SDNN", 1),
+    ("pnn50", "pNN50", 1),
+    ("hf_nu", "HF_nu", 1),
+    ("lf_hf_ratio", "LF/HF", 2),
+    ("sd1", "SD1", 1),
+    ("dfa_alpha1", "α1", 2),
+]
+
+
+def _mmss(sec: float) -> str:
+    """초를 mm:ss 로 (1시간 넘으면 h:mm:ss)."""
+    if not _finite(sec) or sec < 0:
+        return "?"
+    s = int(round(sec))
+    h, rem = divmod(s, 3600)
+    m, ss = divmod(rem, 60)
+    return f"{h}:{m:02d}:{ss:02d}" if h else f"{m}:{ss:02d}"
+
+
+def _window_flat(w) -> dict:
+    """구간의 평탄 지표 — 이상박동 수/비율만 **창 수준의 참값**으로 덮어씁니다.
+
+    `--clean remove` 에서는 이상박동이 시계열에서 아예 사라지므로 그 구간을
+    분석한 HRVResult 는 이상박동 0개를 보고합니다. 실제로는 그 시간대에
+    이상박동이 있었고, 사용자가 "이 구간을 믿을지" 판단하는 근거가 바로 그
+    숫자입니다. Window 는 원시 시간축에서 센 참값을 갖고 있으므로 그것을 씁니다.
+    """
+    flat = flat_metrics(w.result)
+    flat["pct_artifacts"] = w.pct_artifacts
+    return flat
+
+
+def windows_to_csv(series: WindowSeries) -> str:
+    """구간별 지표를 구간당 한 행인 CSV로 직렬화(헤더 포함).
+
+    앞에 window/start_sec/end_sec/n_beats/pct_artifacts_window 열을 붙이고
+    나머지는 단일 파일 CSV와 **같은 스키마**(FLAT_COLUMNS)를 씁니다 —
+    기존 파이프라인이 그대로 재사용됩니다. 분석에 실패한 구간도 행을 남기고
+    (지표는 빈칸) error 열에 사유를 적습니다: 조용히 사라지면 "그 시간대에
+    데이터가 있었다"는 사실 자체를 잃습니다.
+    """
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["window", "start_sec", "end_sec", "n_beats",
+                     "n_artifacts_window", "pct_artifacts_window"] +
+                    [k for k, _ in FLAT_COLUMNS] +
+                    ["vlf_reliable", "warnings", "error"])
+    for w in series.windows:
+        head = [w.index, _fmt_cell(w.start_sec, 1), _fmt_cell(w.end_sec, 1),
+                w.n_beats, w.n_artifacts, _fmt_cell(w.pct_artifacts, 1)]
+        if w.ok:
+            flat = _window_flat(w)
+            body = [_fmt_cell(flat.get(k), d) for k, d in FLAT_COLUMNS]
+            tail = [bool(w.result.freq.get("vlf_reliable")),
+                    " | ".join(w.result.warnings)]
+        else:
+            body = [""] * len(FLAT_COLUMNS)
+            tail = ["", ""]
+        writer.writerow(head + body + tail + [w.error or ""])
+    return buf.getvalue()
+
+
+def render_windows(series: WindowSeries) -> str:
+    """구간별 분석을 [A] 구간 표 · [B] 요약/추세 · [C] 장기 지표로 렌더링."""
+    lines: List[str] = []
+    L = lines.append
+    L("=" * 88)
+    L("  hrvkit — 구간별 추이 / Windowed (epoch-wise) HRV")
+    L("=" * 88)
+    if series.source:
+        L(f"  파일 source   : {series.source}")
+    L(f"  기록 길이     : {_num(series.duration_sec, 1)} s "
+      f"({_mmss(series.duration_sec)}), 입력 박동 {series.n_input}개, "
+      f"이상박동 {_num(series.pct_artifacts, 1)}% → 보정 {series.clean_method}")
+    L(f"  창 window     : {_num(series.window_sec, 0)} s, "
+      f"step {_num(series.step_sec, 0)} s "
+      f"({'겹침 overlapping' if series.overlapping else '겹치지 않음'}) → "
+      f"분석된 구간 {len(series.ok_windows)}/{len(series.windows)}개")
+    L("")
+
+    # ---------------- [A] 구간 표 ----------------
+    L("[A] 구간별 지표 / Per-window metrics")
+    header = "  " + "win".ljust(5) + "start".rjust(9)
+    for _, name, _ in _WINDOW_COLS:
+        header += "  " + name.rjust(7)
+    L(header)
+    L("  " + "-" * (14 + len(_WINDOW_COLS) * 9))
+    for w in series.windows:
+        row = "  " + str(w.index).ljust(5) + _mmss(w.start_sec).rjust(9)
+        if w.ok:
+            flat = _window_flat(w)
+            for key, _, d in _WINDOW_COLS:
+                row += "  " + _fmt_cell(flat.get(key), d).rjust(7)
+        else:
+            row += "  " + (w.error or "분석 불가")
+        L(row)
+
+    # ---------------- [A'] 구간별 경고 ----------------
+    # 구간마다 나온 경고(느린/공명 호흡 레짐, 주파수영역 생략, 높은 이상박동률…)를
+    # 텍스트 리포트에서도 보여 줍니다. 과거엔 --json 사용자만 볼 수 있었습니다.
+    wmsgs: dict = {}
+    for w in series.windows:
+        for msg in (w.result.warnings if w.ok else []):
+            wmsgs.setdefault(msg, []).append(w.index)
+    if wmsgs:
+        L("")
+        L("  [!] 구간별 경고 / Per-window warnings")
+        for msg, idxs in wmsgs.items():
+            shown = ",".join(str(i) for i in idxs[:8])
+            more = f" …(+{len(idxs) - 8})" if len(idxs) > 8 else ""
+            L(f"      - 창 {shown}{more}: {msg}")
+
+    # ---------------- [B] 요약 + 추세 ----------------
+    tr = window_trends(series)
+    meta = tr["_meta"]
+    L("")
+    L("[B] 구간 요약과 단조 추세 / Summary + Mann–Kendall trend"
+      f"   (구간 {meta['n_windows']}개, 보정 m={meta['n_tests']})")
+    L(f"  {'metric':<16}{'n':>4}{'mean±SD':>20}{'CV':>8}{'min–max':>20}"
+      f"{'tau':>8}{'slope/창':>11}{'p':>9}{'p_holm':>9}")
+    L("  " + "-" * 103)
+    partial = False
+    for key, label, d in TREND_METRICS:
+        s = tr[key]
+        if not s.get("n"):
+            L(f"  {label:<16}{0:>4}{'(no data)':>20}")
+            continue
+        # 지표별 유효 창 수 — NaN 구간(짧은 창의 SampEn, HF=0 의 LF/HF=inf 등)이
+        # 빠지면 그 행만 다른 n 으로 계산됩니다. 숨기면 같은 n 으로 오독됩니다.
+        n_s = int(s["n"])
+        if n_s < meta["n_windows"]:
+            partial = True
+        n_disp = f"{n_s}*" if n_s < meta["n_windows"] else str(n_s)
+        ms = f"{_num(s.get('mean'), d)}±{_num(s.get('sd'), d)}"
+        cv = _num(s.get("cv"), 3)
+        mm = f"{_num(s.get('min'), d)}–{_num(s.get('max'), d)}"
+        tau = _num(s.get("tau"), 3)
+        slope = _num(s.get("slope_per_window"), d)
+        mark = {"exact": "e", "approx": "a"}.get(s.get("trend_method"), "")
+        p_s = _num(s.get("trend_p"), 4) + mark
+        ph_s = _num(s.get("p_holm"), 4)
+        L(f"  {label:<16}{n_disp:>4}{ms:>20}{cv:>8}{mm:>20}{tau:>8}{slope:>11}"
+          f"{p_s:>9}{ph_s:>9}")
+    L("")
+    L("  tau = Kendall tau-b (구간 순서 대비 단조 추세, +면 시간에 따라 증가).")
+    L("  slope = Theil–Sen 중앙값 기울기(지표단위/구간) — 이상 구간에 강건.")
+    L("  p 뒤 e=정확(exact) 분포, a=정규 근사.")
+    if partial:
+        L(f"  n 뒤 * = 그 지표가 유한한 창이 전체 {meta['n_windows']}개보다 적음"
+          " (해당 구간은 제외하고 검정·기울기 계산).")
+
+    # ---------------- [C] 장기 지표 ----------------
+    lt = long_term_indices(series)
+    L("")
+    L("[C] 장기 지표 / Long-term indices (Task Force 1996 공식 적용)")
+    if _finite(lt["sdann"]):
+        L(f"    SDANN              : {_num(lt['sdann'], 2)} ms   "
+          f"(구간 평균 NN 들의 SD)")
+    else:
+        reason = ("창이 겹쳐 정의되지 않음" if lt["overlapping"]
+                  else "구간이 2개 미만이라 계산 불가")
+        L(f"    SDANN              : —   ({reason})")
+    L(f"    SDNN index         : {_num(lt['sdnn_index'], 2)} ms   "
+      f"(구간 SDNN 들의 평균"
+      + ("; 창이 겹쳐 같은 박동을 여러 번 셈 — 참고용" if lt["overlapping"]
+         else "") + ")")
+    if lt["short_record"]:
+        L(f"    ※ Task Force 는 이 둘을 **24시간 홀터** 지표로 정의했고 참고값"
+          f"(SDANN ≈ 127±35, SDNN index ≈ 54±15 ms)도 24시간 기준입니다. 이 기록은 "
+          f"{_num(lt['duration_sec'] / 60.0, 1)}분뿐이라 공식은 맞아도 발표된 "
+          f"SDANN·SDNN index 값과 비교할 수 없습니다.")
+    if lt["nonstandard_window"]:
+        L(f"    ※ 표준 정의는 5분(300 s) 구간입니다. 현재 창은 "
+          f"{_num(series.window_sec, 0)} s 이므로 위 두 값을 다른 도구/논문의 "
+          f"SDANN·SDNN index 와 직접 비교하지 마세요.")
+    # 구간이 짧으면 Welch 구간도 짧아 VLF가 심하게 과소추정되고, total_power 는
+    # 정의상 VLF를 포함하므로 그 편향을 그대로 물려받습니다. "NaN 이 아니니까
+    # 괜찮다"는 오독을 막습니다.
+    n_unrel = sum(1 for w in series.ok_windows
+                  if not w.result.freq.get("vlf_reliable"))
+    if n_unrel:
+        L("")
+        L(f"    ※ 구간 {n_unrel}/{len(series.ok_windows)}개에서 VLF 가 신뢰 불가"
+          f"(vlf_reliable=False)입니다 — 구간 길이가 VLF 주기(333 s)보다 짧기 "
+          f"때문입니다. VLF 는 NaN 이 아니라 **심하게 과소추정된 유한 값**으로 "
+          f"나오고, total_power 는 정의상 VLF 를 포함하므로 같은 편향을 갖습니다. "
+          f"구간별로는 total_power/VLF 대신 시간영역·Poincaré 지표를 쓰세요.")
+
+    # ---------------- 해석 ----------------
+    L("")
+    L("[해석 / Interpretation]")
+    rm = tr.get("rmssd", {})
+    if rm.get("n", 0) >= 3 and _finite(rm.get("trend_p")):
+        ph = rm.get("p_holm")
+        direction = "증가" if (rm.get("s") or 0) > 0 else "감소"
+        if _finite(ph) and ph < 0.05:
+            L(f"    RMSSD 가 구간에 따라 단조 {direction} 하는 추세가 보입니다 "
+              f"(tau={_num(rm.get('tau'), 3)}, Holm p={_num(ph, 4)}, "
+              f"기울기 {_num(rm.get('slope_per_window'), 2)} ms/창).")
+            L("    → 기록이 정상적(stationary)이지 않습니다. 전체를 한 덩어리로 낸 "
+              "SDNN 은 이 추세를 변동성으로 흡수해 부풀려집니다.")
+        else:
+            L(f"    RMSSD 에서 유의한 단조 추세는 확인되지 않았습니다 "
+              f"(tau={_num(rm.get('tau'), 3)}, Holm p={_num(ph, 4)}).")
+    else:
+        L("    추세 검정에는 구간이 3개 이상 필요합니다 (창을 줄이거나 더 긴 기록 필요).")
+    # 구간 수가 적으면 **완벽한 단조 추세(tau=±1)여도** 정확검정이 낼 수 있는 최소
+    # p가 α를 넘어 기각이 원천적으로 불가능합니다. 이걸 말하지 않으면 "추세 없음"이
+    # 증거의 부재가 아니라 부재의 증거처럼 읽힙니다.
+    n_w = meta["n_windows"]
+    if 3 <= n_w <= 8:
+        min_p = 2.0 / math.factorial(n_w)
+        L(f"    ※ 구간이 {n_w}개뿐이라 정확검정이 낼 수 있는 최소 p는 "
+          f"{min_p:.4f} 입니다"
+          + (f" — 보정 후에는 어떤 지표도 α=0.05 에서 유의할 수 없습니다."
+             if min_p * max(1, meta['n_tests']) >= 0.05 else
+             " (완벽한 단조 추세일 때의 값).")
+          + " 추세를 검정하려면 더 긴 기록이나 더 짧은 창이 필요합니다.")
+    L("    (주의: 구간별 지표는 짧은 기록이라 주파수영역이 특히 불안정합니다 — "
+      "창 길이와 대역 해상도를 함께 보세요.)")
+    if series.notes:
+        L("")
+        L("[!] 주의 / Notes")
+        for nlines in series.notes:
+            L(f"    - {nlines}")
+    L("")
+    return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------- #
+# 독립 2군(평행군) 비교
+# --------------------------------------------------------------------------- #
+# 군 비교에 보여줄 지표 (key, 라벨, 자릿수, 부교감 방향, HF기반).
+_GROUP_METRICS = list(_PAIRED_METRICS)
+
+
+def group_compare(a_results: Sequence[HRVResult],
+                  b_results: Sequence[HRVResult],
+                  alpha: float = 0.05) -> dict:
+    """독립 2군(a=대조, b=개입)의 지표별 Mann–Whitney 요약.
+
+    각 지표에 대해 unpaired_summary(평균·Hedges g·Hodges–Lehmann 이동량·
+    분포무관 CI·Mann–Whitney p)를 내고, _GROUP_METRICS 전체를 하나의 검정
+    가족으로 보아 Holm(FWER)·BH(FDR) 보정 p를 덧붙입니다.
+
+    paired_group 과 같은 주의: 가족 안에 대수적으로 중복인 지표(RMSSD≈SD1·√2)가
+    있어 m 이 독립 검정 수를 과대평가하므로 보정은 필요 이상으로 보수적입니다.
+
+    반환: {metric_key: summary}. '_meta' 에 군별 n, 느린/공명 호흡 레짐 기록 수,
+    가족 크기, alpha.
+    """
+    a_flat = [flat_metrics(r) for r in a_results]
+    b_flat = [flat_metrics(r) for r in b_results]
+    slow_n = sum(1 for r in list(a_results) + list(b_results)
+                 if r.freq.get("slow_breathing_regime"))
+    keys = [k for k, _, _, _, _ in _GROUP_METRICS]
+    out: dict = {}
+    for key in keys:
+        out[key] = unpaired_summary([fm.get(key) for fm in a_flat],
+                                    [fm.get(key) for fm in b_flat],
+                                    alpha=alpha)
+    pvals = [out[k].get("mw_p", float("nan")) for k in keys]
+    for key, ph, pb in zip(keys, holm_adjust(pvals), benjamini_hochberg(pvals)):
+        out[key]["p_holm"] = ph
+        out[key]["p_bh"] = pb
+    out["_meta"] = {
+        "n_a": len(a_results),
+        "n_b": len(b_results),
+        "n_slow_regime": slow_n,
+        "n_tests": sum(1 for p in pvals if _finite(p)),
+        "alpha": alpha,
+    }
+    return out
+
+
+# 군 비교 CSV 열 (key, 자릿수).
+_GROUP_CSV_COLS = [
+    ("n_a", 0), ("n_b", 0), ("mean_a", 4), ("mean_b", 4), ("sd_a", 4),
+    ("sd_b", 4), ("median_a", 4), ("median_b", 4), ("mean_diff", 4),
+    ("sd_pooled", 4), ("cohens_d", 4), ("hedges_g", 4), ("hl_shift", 4),
+    ("ci_low", 4), ("ci_high", 4), ("ci_alpha", 3), ("ci_method", None),
+    ("u_stat", 1), ("mw_z", 4), ("mw_p", 6), ("mw_method", None),
+    ("rank_biserial", 4), ("cles", 4), ("p_holm", 6), ("p_bh", 6),
+]
+
+
+def group_compare_to_csv(a_results: Sequence[HRVResult],
+                         b_results: Sequence[HRVResult],
+                         alpha: float = 0.05) -> str:
+    """독립 2군 비교 통계를 지표당 한 행인 CSV로 직렬화(헤더 포함)."""
+    g = group_compare(a_results, b_results, alpha=alpha)
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["metric"] + [k for k, _ in _GROUP_CSV_COLS])
+    for key, _label, _d, _dir, _hf in _GROUP_METRICS:
+        s = g.get(key) or {}
+        writer.writerow([key] +
+                        [_fmt_cell(s.get(k), d) for k, d in _GROUP_CSV_COLS])
+    return buf.getvalue()
+
+
+def render_group_compare(a_results: Sequence[HRVResult],
+                         b_results: Sequence[HRVResult],
+                         a_label: str = "control",
+                         b_label: str = "treatment",
+                         alpha: float = 0.05) -> str:
+    """독립 2군 비교를 기술 표 + 추론 표로 렌더링 (평행군 시험용)."""
+    g = group_compare(a_results, b_results, alpha=alpha)
+    meta = g["_meta"]
+    slow = meta["n_slow_regime"]
+    m_tests = meta["n_tests"]
+    pct = int(round((1.0 - alpha) * 100))
+    lines: List[str] = []
+    L = lines.append
+    L("=" * 90)
+    L("  hrvkit — 독립 2군 비교 / Two-group (parallel-arm) comparison")
+    L("=" * 90)
+    L(f"  기준(대조) {a_label}: n = {meta['n_a']}    "
+      f"비교(개입) {b_label}: n = {meta['n_b']}"
+      + (f"   (느린/공명 호흡 레짐 {slow}건: HF 기반 지표 해석 주의)"
+         if slow else ""))
+    # 어느 군이 기준인지 명시합니다 — 매니페스트 행 순서로 정해지므로, 모르면
+    # 행 순서만 바꿔도 HL 이동량과 방향 화살표가 통째로 뒤집힙니다.
+    L(f"  ※ 기준군은 매니페스트에 **먼저 나온 군**('{a_label}')입니다. "
+      f"모든 차이·이동량은 {b_label} − {a_label} 방향입니다.")
+    L("  검정: Mann–Whitney U(=Wilcoxon 순위합, 양측) — 각 피험자가 한 군에만 "
+      "속하는 설계용.")
+    L("")
+
+    # ---------------- [A] 기술 ----------------
+    L("[A] 기술 / Descriptive   (mean±SD)")
+    L(f"  {'metric':<16}{a_label[:14]:>22}{b_label[:14]:>22}{'Δmean':>12}"
+      f"{'n_a/n_b':>10}")
+    L("  " + "-" * 82)
+    partial = False
+    for key, label, d, _dir, _hf in _GROUP_METRICS:
+        s = g[key]
+        if not s.get("n_a") or not s.get("n_b"):
+            L(f"  {label:<16}{'(no data)':>22}")
+            continue
+        av = f"{s['mean_a']:.{d}f}±{s['sd_a']:.{d}f}"
+        bv = f"{s['mean_b']:.{d}f}±{s['sd_b']:.{d}f}"
+        dm = f"{s['mean_diff']:+.{d}f}"
+        # 지표별 유효 n — NaN 지표(짧은 기록의 SampEn 등)는 그 군에서 빠지므로
+        # 헤더의 n 과 달라질 수 있습니다. 숨기면 5대5 결과로 오독됩니다.
+        if s["n_a"] < meta["n_a"] or s["n_b"] < meta["n_b"]:
+            partial = True
+        nn = f"{s['n_a']}/{s['n_b']}"
+        if s["n_a"] < meta["n_a"] or s["n_b"] < meta["n_b"]:
+            nn += "*"
+        L(f"  {label:<16}{av:>22}{bv:>22}{dm:>12}{nn:>10}")
+    if partial:
+        L(f"  * = 그 지표가 유한한 기록이 전체({meta['n_a']}/{meta['n_b']})보다 "
+          "적음 — 아래 검정도 그 n 으로 계산됩니다.")
+
+    # ---------------- [B] 추론 ----------------
+    L("")
+    L("[B] 추론 / Inference"
+      f"   — Mann–Whitney · Hodges–Lehmann {pct}% CI · 다중비교 보정(m={m_tests})")
+    L(f"  {'metric':<16}{'HL shift':>10}{f'{pct}% CI':>22}{'g':>8}{'rb':>7}"
+      f"{'p':>9}{'p_holm':>9}{'p_BH':>9}  방향")
+    L("  " + "-" * 97)
+    for key, label, d, direction, hf_based in _GROUP_METRICS:
+        s = g[key]
+        if not s.get("n_a") or not s.get("n_b"):
+            L(f"  {label:<16}{'(no data)':>10}")
+            continue
+        hl_s = _num(s.get("hl_shift"), d)
+        lo, hi = s.get("ci_low"), s.get("ci_high")
+        if _finite(lo) and _finite(hi):
+            ci_s = f"[{_num(lo, d)}, {_num(hi, d)}]"
+        elif s.get("ci_method") == "insufficient-n":
+            ci_s = "(-∞, ∞)†"
+        else:
+            ci_s = "—"
+        g_s = _num(s.get("hedges_g"), 2)
+        rb_s = _num(s.get("rank_biserial"), 2)
+        mark = {"exact": "e", "approx": "a"}.get(s.get("mw_method"), "")
+        p_s = _num(s.get("mw_p"), 4) + mark
+        ph_s = _num(s.get("p_holm"), 4)
+        pb_s = _num(s.get("p_bh"), 4)
+        arrow = ""
+        if hf_based and slow:
+            arrow = "레짐?"
+        elif direction != 0:
+            shift = s.get("hl_shift")
+            if not _finite(shift):
+                shift = s.get("mean_diff")
+            if _finite(shift) and shift != 0:
+                toward = (shift > 0 and direction > 0) or \
+                         (shift < 0 and direction < 0)
+                arrow = "↑부교감" if toward else "↑교감"
+        L(f"  {label:<16}{hl_s:>10}{ci_s:>22}{g_s:>8}{rb_s:>7}"
+          f"{p_s:>9}{ph_s:>9}{pb_s:>9}  {arrow}")
+
+    L("")
+    L(f"  HL shift = Hodges–Lehmann 이동량 median({b_label} − {a_label}), 강건. "
+      "g = Hedges g, rb = 순위이연 상관.")
+    L("  p 뒤 e=정확(exact) 분포, a=정규 근사(동점 보정).")
+    L("  † = 이 표본 수에서는 해당 수준의 유한 신뢰구간이 존재하지 않음.")
+    # 동점이 있으면 p는 근사, CI의 절단 지수 k는 정확 분포에서 나옵니다 —
+    # 둘의 기준이 달라 경계에서 어긋날 수 있다는 것을 숨기지 않습니다.
+    if any(g[k].get("mw_method") == "approx" for k, _, _, _, _ in _GROUP_METRICS
+           if g[k].get("n_a")):
+        L("  ※ 'a' 표시 지표는 동점 때문에 p 가 정규 근사입니다. 신뢰구간의 절단"
+          " 지수는 정확 분포에서 나오므로 (동점이 있을 때) p 와 CI 가 경계에서")
+        L("     완전히 일치하지 않을 수 있습니다 — 대개 CI 쪽이 더 보수적입니다.")
+
+    # ---------------- 해석 ----------------
+    L("")
+    L("[해석 / Interpretation]")
+    if slow:
+        L("    일부 기록이 느린/공명 호흡 레짐 → HF 기반 지표(HF·HF n.u.·LF/HF)의 "
+          "방향은 신뢰할 수 없습니다. 시간영역 vagal 지표로 판단하세요.")
+    rm = g.get("rmssd", {})
+    if rm.get("n_a", 0) >= 2 and rm.get("n_b", 0) >= 2 and \
+            _finite(rm.get("mw_p")):
+        ph = rm.get("p_holm")
+        lo, hi = rm.get("ci_low"), rm.get("ci_high")
+        ci_s = (f", {pct}% CI [{_num(lo, 1)}, {_num(hi, 1)}] ms"
+                if _finite(lo) and _finite(hi) else "")
+        sig = "유의미" if _finite(ph) and ph < alpha else "유의하지 않음"
+        L(f"    RMSSD: HL 이동량 {_num(rm.get('hl_shift'), 1)} ms{ci_s}, "
+          f"Hedges g={_num(rm.get('hedges_g'), 2)},")
+        L(f"           p={_num(rm.get('mw_p'), 4)} → Holm 보정 "
+          f"p={_num(ph, 4)} → 군간 차이 {sig} (α={alpha:g}, "
+          f"{m_tests}개 지표 보정).")
+    # 표본이 작으면 완전분리(모든 개입값 > 모든 대조값)여도 정확검정의 최소 p가
+    # 커서 보정 후 기각이 원천적으로 불가능합니다 — 이걸 밝히지 않으면 "유의하지
+    # 않음"이 효과 없음으로 오독됩니다.
+    na, nb = meta["n_a"], meta["n_b"]
+    if na >= 1 and nb >= 1:
+        min_p = 2.0 / math.comb(na + nb, na)
+        if min_p * max(1, m_tests) >= alpha:
+            L(f"    ※ n={na}/{nb} 에서 정확검정이 낼 수 있는 최소 p는 "
+              f"{min_p:.4f} 이고, {m_tests}개 지표 보정 후에는 "
+              f"{min(1.0, min_p * max(1, m_tests)):.4f} 입니다 — 즉 **효과가 아무리 "
+              f"커도** α={alpha:g} 에서 Holm 기각이 불가능한 표본 수입니다. "
+              f"주 지표를 사전 지정해 보정 없는 p를 보고하거나, 표본을 늘리세요.")
+    L("    (주의: 무작위배정이 아니면 군간 차이는 인과가 아닙니다. 짝지은 "
+      "pre–post 설계라면 --paired 를 쓰세요 — 그쪽이 검정력이 훨씬 높습니다.)")
     L("")
     return "\n".join(lines)

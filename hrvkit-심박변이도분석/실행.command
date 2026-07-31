@@ -16,7 +16,9 @@ echo "    python3 -m hrvkit.cli 내파일.csv                 (단일 열 RR/HR)
 echo "    python3 -m hrvkit.cli 내파일.csv --col rr_ms      (값 열 지정)"
 echo "    python3 -m hrvkit.cli 안정.csv 느린호흡.csv --compare   (짝지은 비교)"
 echo "    python3 -m hrvkit.cli data/*.csv --format csv     (일괄 요약 CSV)"
-echo "    python3 -m hrvkit.cli --paired manifest.csv       (여러 피험자 코호트 통계)"
+echo "    python3 -m hrvkit.cli --paired manifest.csv       (같은 피험자 pre-post 코호트 통계)"
+echo "    python3 -m hrvkit.cli --groups arms.csv           (평행군 독립 2군 비교)"
+echo "    python3 -m hrvkit.cli 세션.csv --window           (5분 구간별 추이 + 추세)"
 echo "=================================================================="
 echo ""
 
@@ -47,11 +49,29 @@ echo ""
 run examples/resting.csv examples/slow_breathing.csv --compare
 
 echo ""
-echo "### 예제 4) 여러 피험자 짝 통계 — 연구의 핵심 산출물"
-echo "\$ hrvkit --paired manifest.csv"
+echo "### 예제 4) 구간별 추이 — 20분 세션을 5분 창으로 (--window)"
+echo "\$ hrvkit examples/session_20min.csv --window"
+echo "    구간별 지표 + Mann-Kendall 추세(tau·Theil-Sen 기울기·정확 p) +"
+echo "    Task Force 장기 지표(SDANN·SDNN index) 를 냅니다."
+echo ""
+run examples/session_20min.csv --window
+
+echo ""
+echo "### 예제 5) 평행군(독립 2군) 비교 — 대조 5명 대 디바이스 5명 (--groups)"
+echo "\$ hrvkit --groups examples/parallel_arm/manifest.csv"
+echo "    Mann-Whitney 정확검정 p, Hodges-Lehmann 이동량 + 95% 신뢰구간,"
+echo "    Hedges g, Holm/BH 보정 p 를 냅니다. (매니페스트: file,group,subject)"
+echo ""
+run --groups examples/parallel_arm/manifest.csv
+
+echo ""
+echo "### 예제 6) 여러 피험자 짝 통계 — 연구의 핵심 산출물 (--paired)"
+echo "\$ hrvkit --paired examples/paired/manifest.csv"
 echo "    지표별 Wilcoxon 정확검정 p, Hodges-Lehmann 이동량 + 95% 신뢰구간,"
 echo "    Cohen's dz, Holm/BH 다중비교 보정 p 를 냅니다."
 echo "    (매니페스트: baseline,intervention,subject 열 / 피험자당 한 행)"
+echo ""
+run --paired examples/paired/manifest.csv
 
 echo ""
 echo "### 요약: 이 합성 예제에서 느린 호흡 쪽이 RMSSD·HF·SD1 ↑, LF/HF ↓ 로 계산됩니다."

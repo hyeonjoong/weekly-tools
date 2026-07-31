@@ -15,10 +15,15 @@ from .frequency import frequency_domain
 from .analyze import HRVResult, analyze_rr, flat_metrics
 from .stats import (wilcoxon_signed_rank, paired_summary, hodges_lehmann,
                     wilcoxon_ci, holm_adjust, benjamini_hochberg,
-                    walsh_averages)
+                    walsh_averages, mann_whitney_u, mann_whitney_ci,
+                    hodges_lehmann_2sample, unpaired_summary, mann_kendall)
+from .window import (Window, WindowSeries, analyze_windows, window_trends,
+                     long_term_indices)
 from .report import (render_text, render_comparison, render_batch_table,
                      render_paired_group, paired_group, metrics_to_csv,
-                     paired_group_to_csv)
+                     paired_group_to_csv, render_windows, windows_to_csv,
+                     group_compare, render_group_compare,
+                     group_compare_to_csv)
 
 __all__ = [
     "clean_rr",
@@ -47,6 +52,21 @@ __all__ = [
     "paired_group",
     "metrics_to_csv",
     "paired_group_to_csv",
+    "mann_whitney_u",
+    "mann_whitney_ci",
+    "hodges_lehmann_2sample",
+    "unpaired_summary",
+    "mann_kendall",
+    "Window",
+    "WindowSeries",
+    "analyze_windows",
+    "window_trends",
+    "long_term_indices",
+    "render_windows",
+    "windows_to_csv",
+    "group_compare",
+    "render_group_compare",
+    "group_compare_to_csv",
 ]
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
