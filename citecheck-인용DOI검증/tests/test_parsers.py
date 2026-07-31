@@ -1,3 +1,5 @@
+import pytest
+
 from citecheck.parsers import find_doi, find_year, parse_bibtex, parse_references, parse_text
 
 BIB = r"""
@@ -452,3 +454,126 @@ def test_guess_text_author_is_linear():
     assert _guess_text_author("Kim H, Lee S.") == "Kim"
     assert _guess_text_author("[12] Smith J") == "Smith"
     assert _guess_text_author("1. Jones K") == "Jones"
+
+
+# --- DOIs with invisible / non-ASCII characters glued on ---------------------
+#
+# `_DOI_RE` stops only at whitespace, so anything abutting the DOI is captured
+# with it. The result is the worst error this tool can make: it tells the author
+# their CORRECT DOI is a typo, and prints a string that looks identical to the
+# right one on screen. Every case below came out of an ordinary authoring tool.
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        # Invisible formatting characters (Unicode category Cf).
+        ("doi:10.1000/x​", "10.1000/x"),        # zero-width space (web copy)
+        ("doi:10.1000/x­", "10.1000/x"),        # soft hyphen (Word)
+        ("doi:10.1000/x﻿", "10.1000/x"),        # inline BOM
+        ("doi:10.1000/x⁠", "10.1000/x"),        # word joiner
+        ("doi:10.10​00/x", "10.1000/x"),        # ...even mid-DOI
+        # CJK / full-width punctuation from a Korean or Japanese manuscript.
+        ("doi:10.5665/sleep.1872。", "10.5665/sleep.1872"),      # 。
+        ("doi:10.1000/x（2021）", "10.1000/x"),              # （2021）
+        ("doi:10.1000/x，", "10.1000/x"),                        # ，
+        ("doi:10.1000/x、", "10.1000/x"),                        # 、
+        # Adjacent Hangul with no separating space.
+        ("doi:10.1000/x입니다", "10.1000/x"),
+    ],
+)
+def test_doi_survives_invisible_and_cjk_characters(raw, expected):
+    assert find_doi(raw) == expected
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        # The ASCII behaviour these fixes must not disturb.
+        ("10.1016/S0140-6736(97)11096-0", "10.1016/s0140-6736(97)11096-0"),
+        ("(doi: 10.1000/x)", "10.1000/x"),
+        ("10.5555/foo[bar]", "10.5555/foo[bar]"),
+        ("10.5555/foo)", "10.5555/foo"),
+        ("10.1000/x-y_z.w", "10.1000/x-y_z.w"),
+        ("doi:10.1000/x, 2021", "10.1000/x"),
+        ("https://doi.org/10.1000/x?utm_source=z", "10.1000/x"),
+    ],
+)
+def test_ascii_doi_cleanup_is_unchanged(raw, expected):
+    assert find_doi(raw) == expected
+
+
+def test_invisible_character_doi_does_not_become_a_false_typo_error(tmp_path, capsys):
+    """End-to-end: the symptom was `doi-not-resolving` on a correct DOI."""
+    import json as _json
+
+    from citecheck.cli import run
+    from citecheck.core import CrossrefClient
+
+    real = "10.1371/journal.pone.0312345"
+    path = tmp_path / "zwsp.bib"
+    # A zero-width space between the DOI and the closing brace, as a web copy
+    # or a Word autocorrect leaves it.
+    path.write_text(
+        "@article{k, title={Sleep}, doi={%s​}}" % real, encoding="utf-8"
+    )
+    record = {"DOI": real, "title": ["Sleep"], "author": [{"family": "Kim"}],
+              "issued": {"date-parts": [[2024]]}}
+    code = run([str(path), "--json", "--delay", "0"],
+               client=CrossrefClient(_fetch=lambda d: {real: record}.get(d),
+                                     _resolve=lambda d: False))
+    payload = _json.loads(capsys.readouterr().out)
+    assert payload[0]["doi"] == real
+    codes = [f["code"] for f in payload[0]["findings"]]
+    assert "doi-not-resolving" not in codes
+    assert code == 0
+
+
+# --- CSV: the delimiter must never be glued onto a DOI ----------------------
+#
+# parse_csv scans the whole row for a DOI when no DOI column holds one — the
+# documented "the DOI is often parked in a URL or Notes column" path. It used to
+# build that scan text with `delim.join(...)`, and `_DOI_RE` stops only at
+# whitespace, so the next column came along for the ride and the author's
+# correct DOI was reported as a typo.
+
+@pytest.mark.parametrize("delim", [",", ";", "|", "\t"])
+def test_csv_doi_in_a_notes_column_is_not_glued_to_the_next_column(delim):
+    text = (
+        delim.join(["Title", "DOI", "Notes", "Year"]) + "\n"
+        + delim.join(["Sleep and CBT", "", "see doi 10.1016/j.sleep.2021.01.001", "2021"])
+        + "\n"
+    )
+    (ref,) = parse_references(text, fmt="csv")
+    assert ref.doi == "10.1016/j.sleep.2021.01.001"
+
+
+@pytest.mark.parametrize("delim", [",", ";", "|"])
+def test_csv_doi_in_a_url_column_is_not_glued_to_the_next_column(delim):
+    text = (
+        delim.join(["Title", "DOI", "URL", "Year"]) + "\n"
+        + delim.join(["Insomnia trial", "", "https://doi.org/10.5664/jcsm.8000", "2020"])
+        + "\n"
+    )
+    (ref,) = parse_references(text, fmt="csv")
+    assert ref.doi == "10.5664/jcsm.8000"
+
+
+def test_csv_pmid_in_a_notes_column_is_not_glued_to_the_next_column():
+    text = (
+        "Title,PMID,Notes,Year\n"
+        "Sleep and CBT,,PMID 23842505,2021\n"
+    )
+    (ref,) = parse_references(text, fmt="csv")
+    assert ref.pmid == "23842505"
+
+
+def test_csv_row_scan_still_finds_a_doi_when_a_real_doi_column_is_empty():
+    """The feature the fix protects: a proper DOI column still wins outright."""
+    text = (
+        "Title,DOI,Notes\n"
+        "A,10.1000/from-column,see doi 10.9999/from-notes\n"
+        "B,,see doi 10.9999/from-notes\n"
+    )
+    a, b = parse_references(text, fmt="csv")
+    assert a.doi == "10.1000/from-column"
+    assert b.doi == "10.9999/from-notes"

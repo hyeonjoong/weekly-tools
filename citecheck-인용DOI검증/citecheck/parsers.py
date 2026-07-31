@@ -37,6 +37,13 @@ _DOI_PREFIX_RE = re.compile(
 )
 _DOI_TRAIL = ".,;:'\"”’`)]}>"
 
+# Unicode format characters (category Cf) — zero-width space, soft hyphen, BOM,
+# bidi marks. Invisible, so a DOI carrying one looks correct to the author while
+# resolving nowhere. See ``_clean_doi``.
+_INVISIBLE_RE = re.compile(r"[­​-‏‪-‮⁠-⁤﻿]")
+# Everything outside printable ASCII. A DOI is truncated here — see ``_clean_doi``.
+_NON_ASCII_RE = re.compile(r"[^\x20-\x7e]")
+
 # A PubMed identifier is a bare integer, but we only trust it when it is
 # explicitly labelled "PMID" (or given as a PubMed URL), so we never mistake a
 # page number, sample size, or accession for one. Up to 9 digits (PubMed's
@@ -88,6 +95,30 @@ def _clean_doi(doi: str) -> Optional[str]:
     Trailing punctuation is stripped, but a closing bracket that has a matching
     opener inside the DOI is preserved (so ``(97)11096-0`` survives while a
     wrapping ``)`` from "(doi: 10.x)" is removed).
+
+    Invisible formatting characters are removed outright, and the DOI is
+    truncated at the first non-ASCII character. Both exist because the
+    alternative is the worst error this tool can make: telling an author their
+    perfectly correct DOI is a typo. ``_DOI_RE`` stops only at whitespace, so
+    anything glued to the DOI comes along with it, and the resulting ``✗ DOI
+    does not resolve anywhere — check for a typo: 10.5665/sleep.1872。`` is
+    indistinguishable on screen from the correct DOI. Real cases, all produced
+    by ordinary authoring tools:
+
+    * ``10.1000/x\\u200b`` — zero-width space, from copying out of a web page
+    * ``10.1000/x\\u00ad`` — soft hyphen, inserted by Word
+    * ``10.1000/x\\ufeff`` — an inline BOM
+    * ``10.5665/sleep.1872。`` / ``10.1000/x（2021）`` — CJK full stop and
+      full-width parentheses, from a Korean or Japanese manuscript
+    * ``10.1000/x입니다`` — Korean text abutting the DOI with no space
+
+    Truncating at the *first* non-ASCII character rather than only stripping
+    trailing ones is deliberate: ``10.1000/x（2021）`` needs the full-width
+    opening paren dropped too, and stripping from the right alone leaves
+    ``10.1000/x（2021``. The DOI spec does permit non-ASCII in a suffix, so this
+    could in principle truncate a real DOI — but such a DOI does not exist in
+    Crossref in practice, and it was already unusable here (whatever followed it
+    was glued on anyway), so this trades nothing away for a common real fix.
     """
     if not doi:
         return None
@@ -95,6 +126,11 @@ def _clean_doi(doi: str) -> Optional[str]:
     # Drop a URL query string / fragment (e.g. "?utm_source=…" from a
     # browser-copied link); real DOIs do not contain '?' or '#'.
     doi = re.split(r"[?#]", doi, maxsplit=1)[0]
+    # Unicode format characters (category Cf: ZWSP, soft hyphen, BOM, bidi
+    # marks) are invisible by definition, so a DOI carrying one looks correct
+    # everywhere the author can inspect it. No DOI legitimately contains one.
+    doi = _INVISIBLE_RE.sub("", doi)
+    doi = _NON_ASCII_RE.split(doi, maxsplit=1)[0]
     doi = doi.lower()
     while doi and doi[-1] in _DOI_TRAIL:
         if doi[-1] == ")" and doi.count("(") >= doi.count(")"):
@@ -111,8 +147,14 @@ def find_doi(text: str) -> Optional[str]:
     Handles DOIs embedded in URLs or ``doi:`` labels by matching the ``10.…``
     core directly. Uses a >=4-digit registrant lower bound so clinical dosing
     text like "10.55/kg" is not misread as a DOI.
+
+    Invisible characters are removed *before* matching, not just afterwards in
+    ``_clean_doi``. A soft hyphen or zero-width space landing inside the
+    registrant code (``10.10<ZWSP>00/x`` — Word will insert one at a line break)
+    breaks the ``10\\.\\d{4,}/`` match outright, so the DOI is not found at all
+    and the reference silently reports ``no-doi`` instead of being verified.
     """
-    m = _DOI_RE.search(text)
+    m = _DOI_RE.search(_INVISIBLE_RE.sub("", text))
     return _clean_doi(m.group(0)) if m else None
 
 
@@ -129,6 +171,8 @@ def normalize_doi_field(value: str) -> Optional[str]:
     """
     if not value:
         return None
+    # Strip invisibles before matching, for the same reason as `find_doi`.
+    value = _INVISIBLE_RE.sub("", value)
     stripped = _DOI_PREFIX_RE.sub("", value.strip()).strip()
     m = _DOI_FIELD_RE.search(stripped)
     if m:
@@ -846,7 +890,22 @@ def parse_csv(text: str) -> list[Reference]:
     for row in rows[header_idx + 1 :]:
         if not any((c or "").strip() for c in row):
             continue  # blank separator row
-        raw = delim.join(c for c in row if c is not None).strip()
+        # Join cells with a SPACE, not with the delimiter. The delimiter is a
+        # field separator, never part of a field's value, and `_DOI_RE` stops
+        # only at whitespace — so `delim.join` glued the next column straight
+        # onto a DOI found in a Notes/URL column:
+        #
+        #   Title,DOI,Notes,Year
+        #   Sleep and CBT,,see doi 10.1016/j.sleep.2021.01.001,2021
+        #     -> DOI "10.1016/j.sleep.2021.01.001,2021"
+        #     -> "✗ DOI does not resolve anywhere — check for a typo"
+        #
+        # i.e. it broke the "a table that keeps the DOI in a Notes or URL
+        # column still verifies" promise in this function's own docstring, and
+        # reported the author's correct DOI as their mistake. Tab-separated
+        # files happened to be safe (a tab is whitespace); comma, semicolon and
+        # pipe were not.
+        raw = " ".join(c.strip() for c in row if c and c.strip())
 
         doi_cell = _cell(row, fields, "doi")
         doi = normalize_doi_field(doi_cell) if doi_cell else None

@@ -73,8 +73,89 @@ def test_non_utf8_file_does_not_crash(tmp_path, capsys):
 
 def test_decode_helper_fallbacks():
     assert _decode("hello".encode("utf-8")) == ("hello", "utf-8")
+    # Assert the decoded TEXT, not merely that some non-utf-8 codec was chosen.
+    # Checking only `enc != "utf-8"` passed just as happily when the bytes were
+    # mis-decoded into mojibake, which is the only failure that matters here.
     text, enc = _decode("café".encode("latin-1"))
+    assert text == "café"
     assert enc != "utf-8"
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "Deutsches Ärzteblatt",  # a real medical journal
+        "Ángel",
+        "Müller",
+        "Öztürk",
+        "Ferreira Gonçalves",
+        "Łopez Ñuñez".replace("Ł", "L"),  # Ł is latin-2, not latin-1
+        "Kraüter Bäcker Möller",  # several accents in one line
+    ],
+)
+def test_latin1_european_names_are_not_mis_decoded_as_cp949(name):
+    """A European reference list must survive decoding intact.
+
+    Regression: cp949 was tried before latin-1 and accepted on "it didn't
+    raise". An accented byte followed by an ordinary letter is a legal cp949
+    pair, so "Ärzteblatt" decoded cleanly to "훣zteblatt" with only a soft
+    stderr note — corrupting author names and journal titles, and producing
+    false author-mismatch/journal-mismatch warnings against Crossref.
+
+    Note the corruption was data-dependent ("Müller" survived, because 0xFC 0x6C
+    is not a legal cp949 pair), so this is parametrized over several shapes
+    rather than trusting one example.
+    """
+    text, enc = _decode(name.encode("latin-1"))
+    assert text == name
+    assert enc == "latin-1"
+
+
+@pytest.mark.parametrize(
+    "korean",
+    [
+        "수면 장애 연구",
+        "@article{k, author={김현중}, title={불면증 인지행동치료}}",
+        "김지성. 불면증. 대한수면의학회지. 2024.",
+    ],
+)
+def test_cp949_korean_input_still_decodes_as_cp949(korean):
+    """The latin-1 fix must not cost the Korean support it was guarding."""
+    text, enc = _decode(korean.encode("cp949"))
+    assert text == korean
+    assert enc == "cp949"
+
+
+def test_encoding_override_still_forces_cp949():
+    """The Hangul-run heuristic is only a *default*; --encoding still wins.
+
+    This is the escape hatch for the rare Korean file whose only Hangul is one
+    isolated syllable, which the heuristic deliberately declines to guess at.
+    """
+    assert _decode("잠".encode("cp949"), override="cp949") == ("잠", "cp949")
+
+
+def test_european_bib_does_not_produce_a_false_author_mismatch(tmp_path, capsys):
+    """End-to-end: the decoding bug's real-world symptom was a bogus finding."""
+    data = (
+        "@article{k, author={Ärzte, Anna}, journal={Deutsches Ärzteblatt}, "
+        "doi={10.1371/journal.pone.0312345}}"
+    ).encode("latin-1")
+    path = write(tmp_path, "eu.bib", data)
+    record = {
+        "DOI": "10.1371/journal.pone.0312345",
+        "title": ["Ein Titel"],
+        "author": [{"family": "Ärzte", "given": "Anna"}],
+        "container-title": ["Deutsches Ärzteblatt"],
+        "issued": {"date-parts": [[2024]]},
+    }
+    code = run([path, "--json", "--delay", "0"],
+               client=fake_client({"10.1371/journal.pone.0312345": record}))
+    payload = json.loads(capsys.readouterr().out)
+    codes = [f["code"] for item in payload for f in item["findings"]]
+    assert "author-mismatch" not in codes
+    assert "journal-mismatch" not in codes
+    assert code == 0
 
 
 # --- JSON output shape ------------------------------------------------------
@@ -396,6 +477,52 @@ def test_duplicate_pmid_not_double_reported_with_doi(tmp_path, capsys):
         msgs = [f["message"] for f in item["findings"]]
         assert any("Duplicate DOI" in m for m in msgs)
         assert not any("Duplicate PMID" in m for m in msgs)
+
+
+def test_duplicate_pmid_suppression_keys_on_code_not_prose():
+    """The "already reported as a duplicate DOI" test must key on the finding
+    CODE, not on the English wording of the duplicate-DOI message.
+
+    Regression: it used to test ``"Duplicate DOI" in f.message``, so rewording
+    that one f-string would silently restore a double warning on every
+    same-paper duplicate. Here the duplicate-DOI finding carries the right code
+    but deliberately different prose — suppression must still hold.
+    """
+    from citecheck.cli import _flag_duplicate_pmids
+    from citecheck.core import CheckResult, WARNING
+    from citecheck.parsers import Reference
+
+    results = [
+        CheckResult(reference=Reference(raw="a", doi="10.1/x", pmid="111")),
+        CheckResult(reference=Reference(raw="b", doi="10.1/x", pmid="111")),
+    ]
+    for r in results:
+        r.add(WARNING, "This DOI is cited by 2 references: 10.1/x", "duplicate-doi")
+
+    _flag_duplicate_pmids(results)
+
+    for r in results:
+        assert [f.code for f in r.findings] == ["duplicate-doi"]
+
+
+def test_duplicate_pmid_still_flagged_when_no_duplicate_doi_code():
+    """The suppression must not over-fire: a finding that merely *mentions* a
+    duplicate DOI, without carrying the code, does not count as one."""
+    from citecheck.cli import _flag_duplicate_pmids
+    from citecheck.core import CheckResult, WARNING
+    from citecheck.parsers import Reference
+
+    results = [
+        CheckResult(reference=Reference(raw="a", pmid="111")),
+        CheckResult(reference=Reference(raw="b", pmid="111")),
+    ]
+    for r in results:
+        r.add(WARNING, "Duplicate DOI mentioned in prose only", "title-mismatch")
+
+    _flag_duplicate_pmids(results)
+
+    for r in results:
+        assert "duplicate-pmid" in [f.code for f in r.findings]
 
 
 # --- --pubmed cross-check (injected client) ---------------------------------

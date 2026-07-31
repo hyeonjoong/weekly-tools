@@ -351,3 +351,190 @@ def test_a_retracted_candidate_loses_to_nothing_rather_than_being_swapped():
     res = suggest(WAKEFIELD_REF, [WAKEFIELD_HIT, unrelated])
     assert res.status == ERROR
     assert suggestion_of(res) is None
+
+
+# --- the raw-line fallback must never carry a structured row off the machine ---
+#
+# `--suggest-doi` is the tool's only path that sends free text (rather than a
+# DOI/PMID) to a third party. `ref.raw` is the whole input line in text mode,
+# but in CSV mode it is EVERY CELL OF THE ROW joined together — including the
+# Study-ID / MRN / Notes / Comments columns a clinical screening table carries.
+# A row whose Title cell was empty used to be URL-encoded verbatim into a GET
+# query to api.crossref.org. These pin the fix.
+
+def test_structured_row_without_a_title_is_never_sent_to_crossref():
+    """A CSV row with an empty Title cell must not become a Crossref query.
+
+    Regression: `_bibliographic_query` fell back to `ref.raw` for *any* ref
+    without a title, so this row went out as
+    `query.bibliographic=S-002,,Kim,,subject 88213 relapsed, PHQ9=19, MRN 4429981`.
+    """
+    from citecheck.parsers import parse_references
+
+    csv_text = (
+        "study_id,title,author,doi,notes\n"
+        'S-002,,Kim,,"subject 88213 relapsed, PHQ9=19, MRN 4429981"\n'
+    )
+    (ref,) = parse_references(csv_text, fmt="csv")
+
+    assert "88213" in ref.raw and "4429981" in ref.raw  # the row really does carry it
+    assert _bibliographic_query(ref) == ""
+
+
+def test_structured_row_without_a_title_makes_no_search_call_at_all():
+    """Not merely redacted — the network call must not happen."""
+    from citecheck.parsers import parse_references
+
+    csv_text = "study_id,title,author,doi,notes\nS-002,,Kim,,MRN 4429981 PHQ9=19\n"
+    (ref,) = parse_references(csv_text, fmt="csv")
+
+    searched = []
+
+    def spy(query):
+        searched.append(query)
+        return []
+
+    c = CrossrefClient(_fetch=lambda d: None, _resolve=lambda d: False, _search=spy)
+    res = check_reference(ref, c, suggest_missing=True)
+
+    assert searched == []
+    assert c.remote_calls == 0
+    # It still reports honestly that it could not verify the reference.
+    assert [f.code for f in res.findings] == ["no-doi"]
+
+
+def test_free_text_reference_still_sends_its_line():
+    """The restriction must not break free text, where the line IS the query."""
+    from citecheck.parsers import parse_references
+
+    (ref,) = parse_references("Kim H. Sleep and insomnia in adults. Sleep. 2020.\n", fmt="text")
+    assert ref.heuristic_fields is True
+    assert _bibliographic_query(ref) == "Kim H. Sleep and insomnia in adults. Sleep. 2020."
+
+
+def test_structured_reference_with_a_title_sends_only_bibliographic_fields():
+    """A titled CSV row is searchable — but only its named fields go out, never
+    the Notes cell sitting beside them."""
+    from citecheck.parsers import parse_references
+
+    csv_text = (
+        "title,author,year,journal,doi,notes\n"
+        '"Sleep as a transdiagnostic node",Kim,2024,"PLOS ONE",,"MRN 4429981"\n'
+    )
+    (ref,) = parse_references(csv_text, fmt="csv")
+
+    query = _bibliographic_query(ref)
+    assert "Sleep as a transdiagnostic node" in query
+    assert "Kim" in query and "2024" in query
+    assert "4429981" not in query
+    assert "MRN" not in query
+
+
+# --- a GUESSED field must not veto a suggestion -----------------------------
+#
+# For a free-text reference, `year` and `author` are scraped heuristically.
+# `_compare` already refuses to report mismatches on them because they are
+# unreliable; `_score_candidate` nonetheless treated them as hard vetoes, so a
+# bad guess silently deleted a correct DOI suggestion with no explanation.
+
+def test_a_year_guessed_from_the_sentence_does_not_veto_a_perfect_match():
+    """"...in 2000 patients... 2019;42:11-19" -> find_year() returns 2000."""
+    from citecheck.parsers import parse_references
+
+    line = (
+        "Kim H, Lee S. A randomised trial of digital therapy in 2000 patients "
+        "with chronic insomnia disorder. Sleep Medicine. 2019;42:11-19."
+    )
+    (ref,) = parse_references(line, fmt="text")
+    assert ref.year == 2000 and ref.heuristic_fields is True  # the bad guess
+
+    candidate = {
+        "DOI": "10.1016/j.sleep.2019.01.001",
+        "title": [
+            "A randomised trial of digital therapy in 2000 patients with "
+            "chronic insomnia disorder"
+        ],
+        "author": [{"family": "Kim"}],
+        "issued": {"date-parts": [[2019]]},
+    }
+    assert _score_candidate(ref, candidate) > 0.9
+
+
+def test_an_author_guessed_from_a_leading_word_does_not_veto_a_match():
+    """A line starting "In: ..." -> _guess_text_author() returns 'In'."""
+    from citecheck.parsers import parse_references
+
+    line = (
+        "In: Smith J, editor. A randomised trial of digital therapy in chronic "
+        "insomnia disorder. 2019."
+    )
+    (ref,) = parse_references(line, fmt="text")
+    assert ref.author == "In" and ref.heuristic_fields is True
+
+    candidate = {
+        "DOI": "10.1016/j.sleep.2019.01.001",
+        "title": ["A randomised trial of digital therapy in chronic insomnia disorder"],
+        "author": [{"family": "Kim"}],
+        "issued": {"date-parts": [[2019]]},
+    }
+    assert _score_candidate(ref, candidate) > 0.9
+
+
+def test_a_free_text_reference_still_rejects_an_unrelated_candidate():
+    """Dropping the vetoes must not drop the bar: title overlap still decides."""
+    from citecheck.parsers import parse_references
+
+    (ref,) = parse_references(
+        "Kim H. A randomised trial of digital therapy for insomnia. 2019.", fmt="text"
+    )
+    unrelated = {
+        "DOI": "10.1/other",
+        "title": ["Cardiac surgery outcomes in elderly patients undergoing bypass"],
+        "author": [{"family": "Kim"}],
+        "issued": {"date-parts": [[2019]]},
+    }
+    assert _score_candidate(ref, unrelated) == 0.0
+
+
+def test_a_STRUCTURED_reference_still_vetoes_on_a_stated_year_disagreement():
+    """The veto is right when the field was actually stated, not guessed."""
+    ref = Reference(raw="", title=TITLE, author="Kim", year=1999)
+    assert ref.heuristic_fields is False
+    assert _score_candidate(ref, HIT) == 0.0  # HIT is 2024
+
+
+def test_a_STRUCTURED_reference_still_vetoes_on_a_stated_author_disagreement():
+    ref = Reference(raw="", title=TITLE, author="Nonmatching", year=2024)
+    assert _score_candidate(ref, HIT) == 0.0
+
+
+def test_a_repeated_word_does_not_satisfy_the_min_title_tokens_guard():
+    """SUGGEST_MIN_TITLE_TOKENS must count DISTINCT words, not occurrences.
+
+    Regression: the reference side counted the token *list* while the candidate
+    side counted a *set*, so "Erratum. Erratum. Erratum. Erratum." passed a
+    guard written to reject exactly that — 4 tokens, 1 distinctive word — and
+    was emitted as a 100%-confident DOI suggestion.
+    """
+    title = "Erratum. Erratum. Erratum. Erratum."
+    ref = Reference(raw="x", title=title)
+    assert _score_candidate(ref, {"DOI": "10.9999/whatever", "title": [title]}) == 0.0
+
+
+def test_a_short_generic_title_is_still_rejected():
+    for title in ("Editorial", "Correction", "Reply", "Sleep. Sleep."):
+        ref = Reference(raw="x", title=title)
+        assert _score_candidate(ref, {"DOI": "10.9999/x", "title": [title]}) == 0.0, title
+
+
+def test_a_genuinely_distinctive_title_is_still_accepted():
+    """The guard must not swallow real titles that repeat a word."""
+    title = "Sleep quality and sleep duration in adolescents with chronic insomnia"
+    ref = Reference(raw="x", title=title, author="Kim", year=2024)
+    candidate = {
+        "DOI": "10.1/real",
+        "title": [title],
+        "author": [{"family": "Kim"}],
+        "issued": {"date-parts": [[2024]]},
+    }
+    assert _score_candidate(ref, candidate) > 0.9

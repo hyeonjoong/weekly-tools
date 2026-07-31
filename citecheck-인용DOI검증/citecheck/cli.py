@@ -59,6 +59,17 @@ def _color(text: str, severity: str, enabled: bool) -> str:
     return f"{_COLORS[severity]}{text}{_COLORS['reset']}"
 
 
+# Hangul (syllables, conjoining jamo, compatibility jamo) in runs of two or more.
+#
+# This is what tells a genuinely cp949-encoded Korean file from a latin-1
+# European one that merely *happens* to decode as cp949. Korean words are
+# multi-syllable, so real Korean text is full of runs; latin-1 mojibake produces
+# LONE syllables, because each accented byte pairs with the ASCII letter that
+# follows it and the rest of the word survives as ASCII —
+# "Ärzteblatt" (0xC4 0x72 …) becomes "훣zteblatt", one syllable adrift in Latin.
+_HANGUL_RUN_RE = re.compile(r"[가-힣ᄀ-ᇿ㄰-㆏]{2,}")
+
+
 def _decode(raw: bytes, override: Optional[str] = None) -> tuple[str, str]:
     """Decode input bytes, tolerating common non-UTF-8 encodings.
 
@@ -78,9 +89,34 @@ def _decode(raw: bytes, override: Optional[str] = None) -> tuple[str, str]:
             pass
     for enc in ("utf-8", "cp949", "latin-1"):
         try:
-            return raw.decode(enc), enc
+            decoded = raw.decode(enc)
         except UnicodeDecodeError:
             continue
+        # cp949 is tried before latin-1 because a Korean file must not be
+        # silently mangled — but cp949 accepts far more byte sequences than it
+        # should, so "it decoded" is not evidence that it was right. A European
+        # reference list in latin-1/cp1252 decodes *cleanly* as cp949 whenever an
+        # accented byte is followed by a valid trail byte, which an ordinary
+        # letter is:
+        #
+        #     "Deutsches Ärzteblatt" -> "Deutsches 훣zteblatt"   (cp949)
+        #     "Ángel"                -> "햚gel"                  (cp949)
+        #
+        # No exception is raised, so the old fall-through loop accepted it and
+        # reported only a soft "input was not UTF-8" note. The corruption is
+        # data-dependent — "Müller" survives, because 0xFC 0x6C is not a legal
+        # cp949 pair — which makes it worse, not better: it mangles some author
+        # names and journal titles in a file and leaves others intact, and the
+        # damage surfaces downstream as false `author-mismatch` and
+        # `journal-mismatch` warnings against Crossref.
+        #
+        # So cp949 must also *look* like Korean before we believe it. If it does
+        # not, fall through to latin-1, which is what such a file almost always
+        # is. (`--encoding cp949` still forces the issue for the rare Korean file
+        # whose only Hangul is a single isolated syllable.)
+        if enc == "cp949" and not _HANGUL_RUN_RE.search(decoded):
+            continue
+        return decoded, enc
     return raw.decode("utf-8", errors="replace"), "utf-8/replace"
 
 
@@ -204,12 +240,21 @@ def _flag_duplicate_dois(results: list[CheckResult]) -> None:
 
 def _flag_duplicate_pmids(results: list[CheckResult]) -> None:
     """Warn on PMIDs cited more than once — but only where it isn't already
-    caught as a duplicate DOI (same paper, two entries), to avoid double noise."""
+    caught as a duplicate DOI (same paper, two entries), to avoid double noise.
+
+    The "already reported" test is keyed on the finding *code*, not on the
+    English prose of ``_flag_duplicate_dois``'s message. Matching
+    ``"Duplicate DOI" in f.message`` made the de-duplication silently depend on
+    one f-string's exact wording: rephrasing it to "This DOI is cited twice"
+    would have restored the double warning on every same-paper duplicate, with
+    no test failing. That is precisely the coupling the codes exist to retire
+    (see the note on ``lookup-failed`` and exit codes below).
+    """
     counts = Counter(r.reference.pmid for r in results if r.reference.pmid)
     dups = {pmid for pmid, n in counts.items() if n > 1}
     for r in results:
         pmid = r.reference.pmid
-        if pmid in dups and not any("Duplicate DOI" in f.message for f in r.findings):
+        if pmid in dups and not any(f.code == "duplicate-doi" for f in r.findings):
             r.add(
                 WARNING, f"Duplicate PMID — cited by {counts[pmid]} references: {pmid}",
                 "duplicate-pmid",

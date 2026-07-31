@@ -498,7 +498,27 @@ def _norm(s: str) -> str:
 
 
 def _similar(a: str, b: str) -> float:
-    return SequenceMatcher(None, _norm(a), _norm(b)).ratio()
+    """Similarity of two strings, 0.0–1.0, diacritic-folded and case-insensitive.
+
+    ``autojunk=False`` is load-bearing, not a tuning knob. difflib's autojunk
+    heuristic is designed for diffing source code: once the second sequence
+    reaches 200 elements it treats any element occurring more than
+    ``len(b)//100 + 1`` times as junk and refuses to match on it. On *characters*
+    that means common letters stop counting, so the score collapses — and
+    clinical trial titles routinely pass 200 characters:
+
+        cited:    "...ventilator associated pneumonia ... stepped wedge..."
+        crossref: "...ventilator-associated pneumonia ... stepped-wedge..."
+        (identical but for the author dropping the hyphens)
+          with autojunk:  0.864     <- below the 0.80 title threshold's headroom
+          without:        0.986
+
+    It also made the score *discontinuous* in the length of the Crossref title:
+    truncating the same pair at 199 vs 200 characters scored 0.930 vs 0.856. The
+    visible symptoms were false ``title-mismatch`` warnings on long trial names,
+    and `--suggest-doi` (threshold 0.92) silently discarding the correct DOI.
+    """
+    return SequenceMatcher(None, _norm(a), _norm(b), autojunk=False).ratio()
 
 
 def _as_list(value) -> list:
@@ -700,7 +720,12 @@ def _journal_matches(cited: str, candidates: list[str], threshold: float) -> boo
         cand_key = _journal_key(cand)
         if cited_key == cand_key:
             return True
-        if cand_key and SequenceMatcher(None, cited_key, cand_key).ratio() >= threshold:
+        # autojunk=False for the same reason as `_similar` — a long
+        # society-journal name plus subtitle can clear 200 characters.
+        if (
+            cand_key
+            and SequenceMatcher(None, cited_key, cand_key, autojunk=False).ratio() >= threshold
+        ):
             return True
         if _is_abbrev_of(cited, cand) or _is_abbrev_of(cand, cited):
             return True
@@ -980,6 +1005,25 @@ def _bibliographic_query(ref: Reference) -> str:
     With structured fields, a title+author+journal+year blob matches best. With
     only free text (a pasted reference list), the raw line *is* the bibliographic
     string Crossref's matcher expects — it is trimmed only to keep the URL sane.
+
+    The raw-line fallback is deliberately restricted to *free-text* references
+    (``heuristic_fields``), and this restriction is load-bearing for privacy.
+    ``ref.raw`` is the whole input line in text mode, but in CSV mode it is
+    **every cell of the row joined together** (``parsers.parse_csv``), and in
+    BibTeX/RIS it is the whole entry. A clinical screening table exported from
+    Excel or Covidence routinely carries Study-ID, MRN, Notes and Comments
+    columns next to the bibliographic ones, so a row whose Title cell happened
+    to be empty used to be URL-encoded verbatim into a GET query string to
+    api.crossref.org — e.g. ``query.bibliographic=S-002,,Kim,,subject 88213
+    relapsed, PHQ9=19, MRN 4429981`` — where it lands in third-party access logs
+    and any intercepting institutional proxy. That is patient data leaving the
+    machine, for a lookup that could not have worked anyway.
+
+    It could not have worked because the same text is *also* useless as a query:
+    a structured reference with no title has no bibliographic string to match
+    on, so Crossref ranks against clinical notes and ``_score_candidate`` throws
+    the result away. So we skip the search entirely rather than pay a network
+    call to leak a row. The reference still reports ``no-doi`` as before.
     """
     if ref.title:
         parts = [ref.title]
@@ -987,7 +1031,9 @@ def _bibliographic_query(ref: Reference) -> str:
             if extra:
                 parts.append(extra)
         return " ".join(" ".join(p.split()) for p in parts)[:500]
-    return " ".join(ref.raw.split())[:500]
+    if ref.heuristic_fields:
+        return " ".join(ref.raw.split())[:500]
+    return ""
 
 
 # A suggestion is only worth showing if it is almost certainly the same paper —
@@ -1036,21 +1082,47 @@ def _score_candidate(ref: Reference, candidate: dict) -> float:
     * **Too little title to judge.** See ``SUGGEST_MIN_TITLE_TOKENS``.
 
     A field neither side states is never a reject — only a stated *disagreement*
-    is.
+    is. And a field the parser *guessed* is not "stated" at all: when
+    ``ref.heuristic_fields`` is set, year and author were scraped out of free
+    text and are not evidence either way, so neither can veto. This mirrors
+    ``_compare``, which already skips exactly these two checks for the same
+    references and the same reason — the two had drifted apart, so a guess good
+    enough to be distrusted for *reporting* was still trusted to silently delete
+    a correct suggestion:
+
+    * ``find_year`` takes the first 4-digit token in the line, so "a randomised
+      trial of digital therapy in 2000 patients … 2019;42:11-19" yields
+      ``year=2000`` and vetoed the perfect 2019 match.
+    * ``_guess_text_author`` takes the first capitalised word, so a line
+      beginning "In: Smith J, editor." yields ``author='In'``, which matches no
+      Crossref surname and vetoed everything.
+
+    Both produced score 0.0 — no suggestion, no explanation — on references
+    where the title matched exactly. What remains is still a high bar: the
+    free-text branch below requires 80% of the candidate's title words to appear
+    in the cited line.
     """
     cr_titles = _crossref_title_candidates(candidate)
     if not cr_titles:
         return 0.0
 
-    cr_years = _crossref_years(candidate)
-    if ref.year and cr_years and ref.year not in cr_years:
-        return 0.0
+    if not ref.heuristic_fields:
+        cr_years = _crossref_years(candidate)
+        if ref.year and cr_years and ref.year not in cr_years:
+            return 0.0
 
-    if not _author_families_match(ref, candidate):
-        return 0.0
+        if not _author_families_match(ref, candidate):
+            return 0.0
 
     if ref.title:
-        if len(_alpha_tokens(ref.title)) < SUGGEST_MIN_TITLE_TOKENS:
+        # DISTINCT words, not word occurrences. Counting the list let a repeated
+        # word satisfy the guard that exists precisely to reject titles with too
+        # little signal: "Erratum. Erratum. Erratum. Erratum." counts as 4 tokens
+        # but carries exactly 1 distinctive word, scored 1.00 against any work
+        # titled "Erratum", and was emitted as "Crossref has a 100%-confident
+        # match — consider citing DOI ...". The candidate side of this same guard
+        # (below) already counted a set; the two disagreed.
+        if len(set(_alpha_tokens(ref.title))) < SUGGEST_MIN_TITLE_TOKENS:
             return 0.0
         score = max(_similar(ref.title, t) for t in cr_titles)
         return score if score >= SUGGEST_TITLE_THRESHOLD else 0.0
