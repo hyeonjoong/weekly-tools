@@ -173,9 +173,14 @@ def test_huge_interim_is_rejected_without_allocating():
 
 def test_inflation_never_drops_below_one():
     """극단적 --timing에서 경계 탐색이 상한에 걸려도 팽창계수는 1 이상이어야 한다."""
-    for timing in ((0.01, 0.02, 1.0), (0.001, 1.0), (0.999, 1.0)):
+    for timing in ((0.01, 0.02, 1.0), (0.01, 1.0), (0.98, 1.0)):
         seq = sequential_plan(len(timing) - 1, 0.05, 2, 0.90, "obf", timing)
         assert seq["inflation"] >= 1.0
+    # 라운드 4: 그보다 촘촘한 간격은 합성곱 격자가 앨리어싱을 일으켜 확률이 1을
+    # 넘고 표본수가 고정설계보다 작아졌다. 이제는 계산하지 않고 거절한다.
+    for timing in ((0.001, 1.0), (0.999, 1.0), (0.5, 0.500001, 1.0)):
+        with pytest.raises(PowerPlanError, match="촘촘"):
+            sequential_plan(len(timing) - 1, 0.05, 2, 0.90, "obf", timing)
 
 
 # ==========================================================================

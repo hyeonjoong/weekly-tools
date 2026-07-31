@@ -9,6 +9,7 @@ echo "  한국어·영어 문장까지 만들어 줍니다. (외부 의존성 0)
 echo "   · 두 군/전후/3군 이상/반복측정(MMRM)/비율/상관/생존분석 설계"
 echo "   · 비열등성·동등성(TOST) — 연속형과 이분형 모두 · 대응 비율(McNemar)"
 echo "   · 중간분석(군차별설계): α 소비함수 경계·표본수 팽창계수·기대 표본수"
+echo "   · 무익성(futility) 중단 경계: β 소비함수, 비구속적 — DSMB 헌장용"
 echo "   · 평균·ANOVA 계열은 비중심 t·F 분포로 정확 계산 (G*Power 값과 일치)"
 echo "     비율은 정규근사 z, 상관은 Fisher z, ICC·LoA는 근사식 (한계는 결과에 표시)"
 echo "   · 분석 표본수 → 설계효과(군집) → 탈락 보정 → 모집 표본수를 구분해 제시"
@@ -26,6 +27,7 @@ echo "    powerplan prop2 --p1 0.30 --p2 0.50 --power 0.8            # 반응률
 echo "    powerplan survival --hr 0.7 --median1 12 --accrual 18 --followup 12 --power 0.8"
 echo "    powerplan repeated --d 0.4 --post 3 --rho 0.6 --power 0.8   # 반복측정"
 echo "    powerplan ttest2 --d 0.5 --power 0.9 --interim 1            # 중간분석 1회"
+echo "    powerplan ttest2 --d 0.5 --power 0.9 --interim 1 --futility obf  # + 무익성 경계"
 echo "    powerplan pilot 내파일.csv --value 결과 --group 군 --power 0.8"
 echo "    powerplan --help                                           # 전체 설계 목록"
 echo "=================================================================="
@@ -88,7 +90,13 @@ echo ""
 run ttest2 --d 0.5 --power 0.9 --interim 1 --spending pocock
 
 echo ""
-echo "### 예제 8) 확보 가능한 인원이 군당 30명뿐이라면? (검정력 역산)"
+echo "### 예제 8) DSMB 헌장에 넣을 무익성(futility) 중단 경계까지 함께"
+echo "\$ powerplan ttest2 --d 0.5 --power 0.9 --interim 1 --futility obf"
+echo ""
+run ttest2 --d 0.5 --power 0.9 --interim 1 --futility obf
+
+echo ""
+echo "### 예제 9) 확보 가능한 인원이 군당 30명뿐이라면? (검정력 역산)"
 echo "\$ powerplan ttest2 --d 0.5 --n 30 --power 0.8"
 echo ""
 run ttest2 --d 0.5 --n 30 --power 0.8

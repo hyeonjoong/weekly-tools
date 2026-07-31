@@ -70,7 +70,7 @@ def test_pocock_inflation_factor_matches_published(k, published):
     """Pocock 설계의 표본수 팽창계수 (양측 0.05, 검정력 0.80) — 고전 표."""
     timing = _equal_timing(k)
     c = bisect_increasing(lambda x: -_type1((x,) * k, timing), -0.05, 1.0, 5.0, tol=1e-13)
-    drift = S._drift_for_power((c,) * k, timing, 0.80, True)
+    drift, _fut = S._drift_for_power((c,) * k, timing, 0.80, True)
     assert abs((drift / (Z975 + Z80)) ** 2 - published) < 1e-3
 
 
@@ -94,14 +94,25 @@ def test_single_look_reduces_to_fixed_design():
     """중간분석 0회는 지원하지 않지만, 정보비율이 (1.0,) 하나면 고정설계와 같아야 한다."""
     bounds = S._solve_bounds((1.0,), 0.05, "obf", True)
     assert abs(bounds[0] - Z975) < 1e-6
-    drift = S._drift_for_power(bounds, (1.0,), 0.90, True)
+    drift, _fut = S._drift_for_power(bounds, (1.0,), 0.90, True)
     assert abs(drift - (Z975 + Z90)) < 1e-5
 
 
 def test_last_look_timing_equal_one_is_no_interim():
-    """중간분석 시점이 1.0에 가까우면 팽창계수가 1에 수렴한다."""
-    seq = sequential_plan(1, 0.05, 2, 0.90, "obf", (0.999, 1.0))
-    assert abs(seq["inflation"] - 1.0) < 5e-3
+    """중간분석 시점을 1.0 쪽으로 밀수록 팽창계수가 1로 단조 수렴한다.
+
+    (라운드 4부터 0.999처럼 마지막과 1% 미만으로 붙은 --timing은 거절한다 —
+    합성곱 격자가 앨리어싱을 일으키기 때문이다. 그래서 허용 범위 안에서 수렴을 본다.)
+    """
+    infl = [sequential_plan(1, 0.05, 2, 0.90, "obf", (t, 1.0))["inflation"]
+            for t in (0.3, 0.5, 0.8, 0.9, 0.95, 0.98)]
+    assert all(x >= 1.0 for x in infl), infl
+    # 아주 이른 시점은 OBF가 α를 거의 안 써서 대가가 없고, 아주 늦은 시점은 남은
+    # 정보가 없어 대가가 없다 — 그래서 팽창계수는 중간(≈0.8)에서 최대가 된다.
+    peak = infl.index(max(infl))
+    assert 0 < peak < len(infl) - 1, infl
+    assert all(a > b for a, b in zip(infl[peak:], infl[peak + 1:])), infl
+    assert infl[-1] < 1.02
 
 
 def test_obf_spends_less_early_than_pocock():
@@ -293,8 +304,8 @@ def test_grid_resolution_is_converged():
     coarse = S._solve_bounds(timing, 0.05, "obf", True, npts=S._GRID)
     fine = S._solve_bounds(timing, 0.05, "obf", True, npts=321)
     assert all(abs(a - b) < 1e-7 for a, b in zip(coarse, fine))
-    d1 = S._drift_for_power(fine, timing, 0.9, True, npts=S._GRID)
-    d2 = S._drift_for_power(fine, timing, 0.9, True, npts=321)
+    d1, _ = S._drift_for_power(fine, timing, 0.9, True, npts=S._GRID)
+    d2, _ = S._drift_for_power(fine, timing, 0.9, True, npts=321)
     # 표본수 팽창계수는 이동모수의 제곱비 — 상대오차 1e-6이면 100만 명에서 1명 미만
     assert abs(d1 - d2) / d2 < 1e-6
 
