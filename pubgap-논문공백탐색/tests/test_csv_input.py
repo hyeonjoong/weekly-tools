@@ -143,7 +143,7 @@ def test_bundled_csv_example_matches_xml_example():
     """번들 예시: 지저분한 CSV 내보내기가 원본 XML 과 같은 코퍼스를 만들어야 한다."""
     xml_arts = load_articles(EXAMPLE_CSV.parent / "sleep_pubmed.xml")
     csv_arts = load_articles(EXAMPLE_CSV)
-    assert len(csv_arts) == len(xml_arts) == 18
+    assert len(csv_arts) == len(xml_arts) == 28
     assert [a.pmid for a in csv_arts] == [a.pmid for a in xml_arts]
     assert [a.year for a in csv_arts] == [a.year for a in xml_arts]
     assert [a.mesh for a in csv_arts] == [a.mesh for a in xml_arts]

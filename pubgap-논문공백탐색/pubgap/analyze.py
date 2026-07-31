@@ -20,7 +20,7 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass, field
 from itertools import combinations
-from math import comb, erf, exp, lgamma, log2, sqrt
+from math import comb, erf, exp, lgamma, log, log1p, log2, sqrt
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from .records import Article
@@ -253,6 +253,200 @@ def _normal_cdf(z: float) -> float:
     return 0.5 * (1.0 + erf(z / sqrt(2.0)))
 
 
+# --------------------------------------------------------------------------- #
+# 정확 신뢰구간 — 점추정만으로는 "이 공백이 견고한가"를 답할 수 없다
+# --------------------------------------------------------------------------- #
+# 표에 lift 0.12 라고만 적으면, 그것이 관측 1편/기대 8편(꽤 견고)인지 관측 0편/기대
+# 2편(한 편만 색인돼도 뒤집힘)인지 구분되지 않는다. 아래 두 함수로 **정확(exact)**
+# 신뢰구간을 붙여, 작은 표본에서의 불확실성을 리포트가 숨기지 않게 한다.
+# 외부 의존성 없이(정규화 불완전 감마·베타를 직접 구현) 계산한다.
+_BETACF_MAX_ITER = 300
+_TINY = 1e-300
+_EPS = 3e-16
+
+
+def _betacf(a: float, b: float, x: float) -> float:
+    """정규화 불완전 베타의 연분수(모던 Lentz 알고리즘)."""
+    qab, qap, qam = a + b, a + 1.0, a - 1.0
+    c = 1.0
+    d = 1.0 - qab * x / qap
+    if abs(d) < _TINY:
+        d = _TINY
+    d = 1.0 / d
+    h = d
+    for m in range(1, _BETACF_MAX_ITER + 1):
+        m2 = 2 * m
+        aa = m * (b - m) * x / ((qam + m2) * (a + m2))
+        d = 1.0 + aa * d
+        if abs(d) < _TINY:
+            d = _TINY
+        c = 1.0 + aa / c
+        if abs(c) < _TINY:
+            c = _TINY
+        d = 1.0 / d
+        h *= d * c
+        aa = -(a + m) * (qab + m) * x / ((a + m2) * (qap + m2))
+        d = 1.0 + aa * d
+        if abs(d) < _TINY:
+            d = _TINY
+        c = 1.0 + aa / c
+        if abs(c) < _TINY:
+            c = _TINY
+        d = 1.0 / d
+        delta = d * c
+        h *= delta
+        if abs(delta - 1.0) < _EPS:
+            break
+    return h
+
+
+def reg_inc_beta(a: float, b: float, x: float) -> float:
+    """정규화 불완전 베타 I_x(a, b) ∈ [0,1] — 이항분포 CDF 의 닫힌 형태."""
+    if x <= 0.0:
+        return 0.0
+    if x >= 1.0:
+        return 1.0
+    if a <= 0.0 or b <= 0.0:
+        raise ValueError(f"a, b 는 양수여야 합니다: a={a}, b={b}")
+    front = exp(
+        lgamma(a + b) - lgamma(a) - lgamma(b) + a * log(x) + b * log1p(-x)
+    )
+    # 연분수는 x 가 작을 때 빨리 수렴한다. 큰 x 는 대칭관계로 옮겨 계산하되,
+    # **재귀 호출은 쓰지 않는다** — x 가 정확히 경계값이면 두 분기가 서로를 계속
+    # 호출해 RecursionError 가 난다(실제로 a=b, x=0.5 에서 발생했다).
+    if x < (a + 1.0) / (a + b + 2.0):
+        return min(1.0, front * _betacf(a, b, x) / a)
+    return max(0.0, min(1.0, 1.0 - front * _betacf(b, a, 1.0 - x) / b))
+
+
+def _beta_ppf(p: float, a: float, b: float) -> float:
+    """I_x(a,b) = p 를 만족하는 x — 이분법(단조 함수라 항상 수렴)."""
+    if p <= 0.0:
+        return 0.0
+    if p >= 1.0:
+        return 1.0
+    lo, hi = 0.0, 1.0
+    for _ in range(200):
+        mid = 0.5 * (lo + hi)
+        if reg_inc_beta(a, b, mid) < p:
+            lo = mid
+        else:
+            hi = mid
+    return 0.5 * (lo + hi)
+
+
+def clopper_pearson(k: int, n: int, alpha: float = 0.05) -> Tuple[float, float]:
+    """이항비율의 Clopper–Pearson **정확** 신뢰구간 (기본 95%).
+
+    'RCT 3/12편 = 25%' 같은 값은 표본이 작을수록 신뢰구간이 넓다(여기서는 5~57%).
+    구간 없이 25% 만 적으면 독자가 그 수치를 과신한다. 정규근사(Wald)는 0% 나 100%
+    에서 폭이 0 이 되는 치명적 결함이 있어, 경계에서도 정직한 정확구간을 쓴다.
+
+    k=0 이면 하한 0, k=n 이면 상한 1(정의상 정확).
+    """
+    if n <= 0:
+        return (0.0, 1.0)
+    if k < 0 or k > n:
+        raise ValueError(f"0 <= k <= n 이어야 합니다: k={k}, n={n}")
+    if not 0.0 < alpha < 1.0:
+        raise ValueError(f"alpha 는 0 과 1 사이여야 합니다: {alpha}")
+    half = alpha / 2.0
+    lo = 0.0 if k == 0 else _beta_ppf(half, k, n - k + 1)
+    hi = 1.0 if k == n else _beta_ppf(1.0 - half, k + 1, n - k)
+    return (max(0.0, min(1.0, lo)), max(0.0, min(1.0, hi)))
+
+
+def _reg_lower_gamma(s: float, x: float) -> float:
+    """정규화 불완전 감마 P(s, x) — 급수/연분수(포아송 CDF 의 닫힌 형태)."""
+    if x <= 0.0:
+        return 0.0
+    if s <= 0.0:
+        return 1.0
+    if x < s + 1.0:  # 급수 전개
+        term = 1.0 / s
+        total = term
+        n = s
+        for _ in range(1000):
+            n += 1.0
+            term *= x / n
+            total += term
+            if abs(term) < abs(total) * _EPS:
+                break
+        return min(1.0, total * exp(-x + s * log(x) - lgamma(s)))
+    # 연분수(상단 불완전 감마) → 1 - Q
+    b = x + 1.0 - s
+    c = 1.0 / _TINY
+    d = 1.0 / b
+    h = d
+    for i in range(1, 1000):
+        an = -i * (i - s)
+        b += 2.0
+        d = an * d + b
+        if abs(d) < _TINY:
+            d = _TINY
+        c = b + an / c
+        if abs(c) < _TINY:
+            c = _TINY
+        d = 1.0 / d
+        delta = d * c
+        h *= delta
+        if abs(delta - 1.0) < _EPS:
+            break
+    q = exp(-x + s * log(x) - lgamma(s)) * h
+    return max(0.0, min(1.0, 1.0 - q))
+
+
+def _gamma_ppf(p: float, s: float) -> float:
+    """P(s, x) = p 를 만족하는 x (scale=1) — 구간을 넓힌 뒤 이분법."""
+    if p <= 0.0 or s <= 0.0:
+        return 0.0
+    if p >= 1.0:
+        return float("inf")
+    hi = max(1.0, s + 10.0 * sqrt(s) + 10.0)
+    for _ in range(100):
+        if _reg_lower_gamma(s, hi) >= p:
+            break
+        hi *= 2.0
+    lo = 0.0
+    for _ in range(200):
+        mid = 0.5 * (lo + hi)
+        if _reg_lower_gamma(s, mid) < p:
+            lo = mid
+        else:
+            hi = mid
+    return 0.5 * (lo + hi)
+
+
+def poisson_count_ci(k: int, alpha: float = 0.05) -> Tuple[float, float]:
+    """관측 편수 k 에 대한 포아송 평균의 **정확(Garwood)** 신뢰구간.
+
+    L = gammaincinv(k, α/2), U = gammaincinv(k+1, 1−α/2) (χ² 형태와 동치).
+    k=0 → (0, 3.689) 처럼 관측이 0 이어도 상한이 유한하다.
+    """
+    if k < 0:
+        raise ValueError(f"k 는 0 이상이어야 합니다: {k}")
+    if not 0.0 < alpha < 1.0:
+        raise ValueError(f"alpha 는 0 과 1 사이여야 합니다: {alpha}")
+    half = alpha / 2.0
+    lo = 0.0 if k == 0 else _gamma_ppf(half, float(k))
+    hi = _gamma_ppf(1.0 - half, float(k) + 1.0)
+    return (lo, hi)
+
+
+def lift_ci(observed: int, expected: float, alpha: float = 0.05) -> Tuple[Optional[float], Optional[float]]:
+    """lift(=관측/기대)의 신뢰구간 — 관측 편수의 포아송 정확구간을 기대값으로 나눈 값.
+
+    역학에서 표준화발생비(SIR/SMR)에 쓰는 것과 **같은 방식**이다: 기대값은 고정으로
+    보고 관측 편수만 확률변수로 취급한다. 초기하(유한모집단)보다 약간 보수적이라
+    구간이 조금 넓지만, 기대값이 표본 크기에 비해 작은(여기서는 항상 그렇다) 상황에서
+    포아송 근사는 매우 정확하다. 기대값이 0 이면 비를 정의할 수 없어 (None, None).
+    """
+    if expected is None or expected <= 0:
+        return (None, None)
+    lo, hi = poisson_count_ci(observed, alpha=alpha)
+    return (lo / expected, hi / expected)
+
+
 @dataclass
 class TrendTest:
     """Mann–Kendall 단조추세 검정 결과."""
@@ -441,6 +635,10 @@ class GapPair:
     jaccard: float = 0.0   # |A∩B| / |A∪B| — 공동출현의 절대적 겹침 정도
     cosine: float = 0.0    # Ochiai/코사인 = obs / sqrt(cA·cB) — 공어(co-word) 분석 표준
     npmi: float = 0.0      # 정규화 점별상호정보량 ∈ [-1,1]; obs=0 이면 -1(완전 배타)
+    # lift 의 95% 정확 신뢰구간(포아송/Garwood). 관측 0편·기대 2편과 관측 1편·기대
+    # 8편은 lift 가 비슷해도 견고함이 전혀 다르다 — 구간이 그 차이를 드러낸다.
+    lift_ci_low: Optional[float] = None
+    lift_ci_high: Optional[float] = None
     observed_early: int = 0    # 초기 구간의 동시등장 편수
     observed_recent: int = 0   # 최근 구간의 동시등장 편수
     gap_trend: str = "unknown"  # 'closing'(메워지는 중) | 'widening' | 'stable' | 'unknown'
@@ -448,6 +646,20 @@ class GapPair:
     pmids_b: List[str] = field(default_factory=list)      # B만 다룬 대표 논문
     pmids_both: List[str] = field(default_factory=list)   # 둘 다 다룬 논문(observed>0일 때)
     bridges: List = field(default_factory=list)           # Swanson ABC 가교: [[C, A&C수, C&B수], ...]
+    # 대표 논문의 **서지 정보**(id, 연도, 저널, 제목). 리포트는 "대표 논문을 직접
+    # 확인하라"고 말하는데, 번호만 주면 그 조언을 실행하려고 브라우저를 아홉 번
+    # 열어야 한다. 제목까지 주면 대부분 그 자리에서 판단할 수 있다.
+    refs_a: List[List] = field(default_factory=list)
+    refs_b: List[List] = field(default_factory=list)
+    refs_both: List[List] = field(default_factory=list)
+    # 함께 다룬 논문들의 **연구 설계 구성**({tier: 편수}). "관찰연구만 12편, RCT 0편"
+    # 과 "아무것도 0편"은 전혀 다른 상황이다 — 앞은 시험을 설계할 자리, 뒤는 대개
+    # 색인 artifact 이거나 애초에 성립하지 않는 조합이다.
+    both_tiers: Dict[str, int] = field(default_factory=dict)
+    # 어휘상 상하위어(부모–자식)로 의심되는 쌍인가 — 한쪽 이름이 다른 쪽에 포함.
+    hierarchy_suspect: bool = False
+    n_early: int = 0     # 초기 구간 논문 수(추이를 비율로 읽기 위한 분모)
+    n_recent: int = 0    # 최근 구간 논문 수
 
 
 def _pair_metrics(n: int, ca: int, cb: int, observed: int) -> Tuple[float, float, float]:
@@ -563,17 +775,25 @@ def _enrich_gap(
     드문 제3의 주제 C. "A는 C를 통해 B와 연결된다"는 기전 서사를 만들어, 리뷰어에게
     '왜 이 주제인가'를 설명할 근거가 된다. 순위는 `_rank_bridges`(lift 곱) 참고.
 
-    반환: (pmids_a, pmids_b, pmids_both, bridges, obs_early, obs_recent).
+    반환: dict(pmids_*, refs_*, both_tiers, bridges, observed_early, observed_recent).
     `split` 이 주어지면 동시등장 편수를 초기/최근으로 나눠 세어 공백이 메워지는
     중인지 판정할 재료를 만든다(연도 미상 논문은 어느 구간에도 넣지 않는다).
     """
     pa: List[str] = []
     pb: List[str] = []
     both: List[str] = []
+    ref_a: List[list] = []
+    ref_b: List[list] = []
+    ref_both: List[list] = []
+    both_tiers: Counter = Counter()
     ac: Counter = Counter()
     cb: Counter = Counter()
     obs_early = 0
     obs_recent = 0
+
+    def _ref(art) -> list:
+        return [art.pmid, art.year, art.journal, art.title]
+
     if freq is None:
         freq = _mesh_freq(articles)
     n_total = len(articles)
@@ -584,6 +804,8 @@ def _enrich_gap(
         if has_a and has_b:
             if len(both) < n_examples:
                 both.append(art.pmid)
+                ref_both.append(_ref(art))
+            both_tiers[article_tier(art)] += 1
             if split is not None and art.year is not None:
                 if art.year < split:
                     obs_early += 1
@@ -591,8 +813,10 @@ def _enrich_gap(
                     obs_recent += 1
         elif has_a and not has_b and len(pa) < n_examples:
             pa.append(art.pmid)
+            ref_a.append(_ref(art))
         elif has_b and not has_a and len(pb) < n_examples:
             pb.append(art.pmid)
+            ref_b.append(_ref(art))
         if bridge_top_n:
             if has_a:
                 for c in ms:
@@ -603,7 +827,12 @@ def _enrich_gap(
                     if c != a and c != b:
                         cb[c] += 1
     bridges = _rank_bridges(ac, cb, freq, n_total, bridge_top_n)
-    return pa, pb, both, bridges, obs_early, obs_recent
+    return {
+        "pmids_a": pa, "pmids_b": pb, "pmids_both": both,
+        "refs_a": ref_a, "refs_b": ref_b, "refs_both": ref_both,
+        "both_tiers": dict(both_tiers), "bridges": bridges,
+        "observed_early": obs_early, "observed_recent": obs_recent,
+    }
 
 
 # 가교 후보에서 뺄 '거의 모든 논문에 붙는' 주제의 유병률 상한(코퍼스의 80%). 대부분의
@@ -645,6 +874,28 @@ def _rank_bridges(
         scored.append((-score, -min(n_ac, n_cb), c, n_ac, n_cb))
     scored.sort()
     return [[c, n_ac, n_cb] for _, _, c, n_ac, n_cb in scored[:top_n]]
+
+
+_WORD_RE = __import__("re").compile(r"[^a-z0-9]+")
+
+
+def looks_hierarchical(term_a: str, term_b: str) -> bool:
+    """두 주제어가 MeSH 트리에서 부모–자식일 가능성이 높은가(어휘 휴리스틱).
+
+    `Sleep` × `Sleep, REM`, `Respiration` × `Respiration, Artificial`,
+    `Heart Rate` × `Heart Rate, Fetal` 처럼 한쪽 이름이 다른 쪽에 **통째로** 들어가는
+    쌍은 사실상 같은 개념의 상하위어다. 그런 쌍은 정의상 함께 색인되지 않으므로
+    lift 가 낮게 나오지만 **연구 공백이 아니다** — 사용법 문서가 사용자에게 손으로
+    걸러내라고 시키던 첫 번째 규칙이 바로 이것이라, 도구가 대신 표시해 준다.
+
+    MeSH 트리 파일 없이 어휘만 보므로 완벽하지 않다(표시만 하고 제외하지 않는다).
+    """
+    wa = [w for w in _WORD_RE.split(term_a.lower()) if w]
+    wb = [w for w in _WORD_RE.split(term_b.lower()) if w]
+    if not wa or not wb or wa == wb:
+        return False
+    sa, sb = set(wa), set(wb)
+    return sa < sb or sb < sa
 
 
 # --gap-sort 로 고를 수 있는 정렬 키. 값이 작을수록(=튜플이 앞설수록) 위에 온다.
@@ -722,10 +973,12 @@ def gap_pairs(
         lift = observed / expected if expected > 0 else 0.0
         p = hypergeom_lower_tail(n, ca, cb, observed)
         jac, cos, npmi = _pair_metrics(n, ca, cb, observed)
+        ci_lo, ci_hi = lift_ci(observed, expected)
         candidates.append(
             GapPair(
                 a_term, b_term, observed, expected, lift, ca, cb, p,
                 deficit=expected - observed, jaccard=jac, cosine=cos, npmi=npmi,
+                lift_ci_low=ci_lo, lift_ci_high=ci_hi,
             )
         )
 
@@ -742,14 +995,346 @@ def gap_pairs(
     n_early = sum(1 for a in articles if a.year is not None and split is not None and a.year < split)
     n_recent = sum(1 for a in articles if a.year is not None and split is not None and a.year >= split)
     for g in out:
-        pa, pb, both, bridges, oe, orc = _enrich_gap(
+        info = _enrich_gap(
             articles, g.term_a, g.term_b, n_examples=n_examples,
             bridge_top_n=bridge_top_n, split=split, freq=freq,
         )
-        g.pmids_a, g.pmids_b, g.pmids_both, g.bridges = pa, pb, both, bridges
-        g.observed_early, g.observed_recent = oe, orc
-        g.gap_trend = _classify_gap_trend(oe, orc, n_early, n_recent, observed=g.observed)
+        for key, value in info.items():
+            setattr(g, key, value)
+        g.gap_trend = _classify_gap_trend(
+            g.observed_early, g.observed_recent, n_early, n_recent, observed=g.observed
+        )
+        g.hierarchy_suspect = looks_hierarchical(g.term_a, g.term_b)
+        g.n_early, g.n_recent = n_early, n_recent
     return out
+
+
+# --------------------------------------------------------------------------- #
+# 연구 각도(MeSH 부주제어/qualifier) 공백 — '무엇을' 이 아니라 '어떻게' 의 축
+# --------------------------------------------------------------------------- #
+# PubMed 색인자는 주제어에 부주제어를 붙여 그 논문이 주제를 **어떤 각도로** 다뤘는지
+# 표시한다: `Hypertension/drug therapy`, `Insomnia/therapy`, `Melatonin/adverse effects`.
+# 임상·제약 연구자에게 이 축은 주제쌍만큼 중요하다 — "이 질환은 병태생리 논문만 잔뜩
+# 있고 약물치료(drug therapy)·이상반응(adverse effects) 논문은 없다" 가 곧 개발 공백이다.
+@dataclass
+class AngleGap:
+    """한 주제(term) × 한 연구각도(qualifier)의 저조 조합.
+
+    **분석 단위는 논문이 아니라 '색인 표목(heading) = (논문, 주제어) 한 칸'** 이다.
+    색인자는 논문마다 주제어를 여러 개 달고, 각 주제어에 부주제어를 붙인다. 따라서
+    "이 각도가 이 주제에 붙었는가"는 표목 수준의 사건이고, 주변확률도 표목 수준에서
+    세어야 같은 모집단이 된다(아래 `n_term`·`n_qualifier` 참고).
+    """
+
+    term: str
+    qualifier: str
+    n_term: int            # 그 주제가 **부주제어와 함께** 색인된 표목 수
+    n_qualifier: int       # 그 각도가 붙은 표목 수(어느 주제에든)
+    observed: int          # 그 주제에 **그 각도**가 붙은 표목 수
+    expected: float        # 독립 가정 기대값 = n_term · n_qualifier / N(전체 표목 수)
+    deficit: float         # 기대 − 관측
+    lift: float            # 관측 / 기대
+    p_value: float         # 초기하 하단꼬리
+    q_value: float = 1.0   # BH-FDR
+    lift_ci_low: Optional[float] = None
+    lift_ci_high: Optional[float] = None
+    # 그 주제가 **실제로** 많이 쓰인 각도 상위 3개 — "그럼 뭘 하고 있나"의 맥락.
+    top_angles: List[List] = field(default_factory=list)
+    # 이 조합이 MeSH 색인 규칙상 **가능해 보이는가**(휴리스틱, `_angle_plausible`).
+    # False 라도 검정에서 빼지 않는다 — 표시 순서만 뒤로 미루고 표에 표시한다.
+    plausible: bool = True
+
+
+ANGLE_SORTS: Tuple[str, ...] = ("deficit", "lift", "q", "expected")
+
+
+def article_angles(article: "Article") -> List[Tuple[str, str]]:
+    """이 논문의 (주제, 각도) 쌍 중 **현재 분석 대상 주제**에 해당하는 것만.
+
+    `strip_check_tags`/`drop_terms`/`--major-topics-only` 는 `mesh` 만 바꾸고
+    `qualifiers` 는 원본 그대로 둔다. 각도 분석이 `qualifiers` 를 그대로 쓰면
+    사용자가 뺀 주제가 각도 표에 되살아난다 — 여기서 한 번에 걸러 준다.
+    """
+    ms = set(article.mesh)
+    out: List[Tuple[str, str]] = []
+    seen = set()
+    for t, q in article.qualifiers:
+        if t in ms and (t, q) not in seen:
+            seen.add((t, q))
+            out.append((t, q))
+    return out
+
+
+def qualifier_coverage(articles: Sequence[Article]) -> Dict:
+    """부주제어 색인 커버리지 — 각도 분석을 신뢰할 수 있는지 판단할 근거.
+
+    RIS/CSV 내보내기나 아직 색인되지 않은 최신 논문은 부주제어가 아예 없다.
+    커버리지를 밝히지 않으면 '각도 공백'이 '색인 부재'와 구분되지 않는다.
+    """
+    n = len(articles)
+    n_q = 0
+    quals: Counter = Counter()
+    for a in articles:
+        pairs = article_angles(a)
+        if pairs:
+            n_q += 1
+            for q in {q for _t, q in pairs}:
+                quals[q] += 1
+    return {
+        "n_articles": n,
+        "n_with_qualifiers": n_q,
+        "coverage": (n_q / n) if n else 0.0,
+        "n_distinct": len(quals),
+        "top_qualifiers": _ranked(quals)[:10],
+    }
+
+
+def _qualifier_families(
+    quals_by_term: Dict[str, set],
+    topics_by_qual: Dict[str, set],
+    quals: Sequence[str],
+) -> Dict[str, Counter]:
+    """각 부주제어가 속한 '가족' — 그 각도를 쓰는 주제들이 **함께** 쓰는 다른 각도들.
+
+    NLM 은 descriptor 범주별로 붙일 수 있는 부주제어를 정해 둔다 — 해부·생리 용어에는
+    `/physiology`·`/drug effects`, 진단기법에는 `/methods`·`/instrumentation`, 질환에는
+    `/therapy`·`/drug therapy` … 그래서 '진단기법 × /physiology' 같은 칸은 연구 공백이
+    아니라 **애초에 색인될 수 없는 조합**이다.
+
+    MeSH 규칙 파일을 넣지 않고도(무의존 유지) 이를 데이터에서 추정한다: 같은 범주의
+    주제들은 같은 각도 어휘를 공유하므로, "Q 를 쓰는 주제들이 함께 쓰는 각도"를 Q 의
+    가족으로 본다. 집합이 아니라 **Counter**(각 각도를 몇 개의 주제가 쓰는지)로 두는
+    이유는 `_angle_plausible` 이 후보 주제 자신의 기여를 빼고(leave-one-out) 판단하기
+    위해서다 — 그래야 판정이 '검정하려는 칸의 결과'에 의존하지 않는다.
+
+    비용 주의: 이 함수는 **실제로 검정할 상위 각도(`quals`)에 대해서만** 계산한다.
+    코퍼스 전체 각도로 돌리면 O(|Q|²) 로 부풀어(실측: 서로 다른 각도 16,000종인
+    251KB 입력에서 2GB) 작은 파일 하나가 메모리를 고갈시킨다.
+    """
+    family: Dict[str, Counter] = {}
+    for q in quals:
+        fam: Counter = Counter()
+        for t in topics_by_qual.get(q, ()):  # Q 를 쓰는 주제들
+            for q2 in quals_by_term.get(t, ()):
+                fam[q2] += 1
+        fam.pop(q, None)  # Q 자신은 공유 신호가 될 수 없다
+        family[q] = fam
+    return family
+
+
+def _angle_plausible(
+    term: str,
+    qual: str,
+    quals_by_term: Dict[str, set],
+    topics_by_qual: Dict[str, set],
+    family: Dict[str, Counter],
+) -> bool:
+    """이 (주제, 각도) 칸이 **색인될 수 있는** 조합으로 보이는가(휴리스틱).
+
+    판정은 **그 칸의 결과(관측 편수)와 무관해야 한다**. 예전 구현은 "주제가 이미 그
+    각도를 쓰고 있으면 가능"이라는 지름길을 뒀는데, 그것은 곧 `관측 ≥ 1` 과 같은 말이라
+    **관측 0인 칸(=바로 우리가 찾는 공백)만 골라서** 탈락시켰다. 그래서 여기서는
+    후보 주제 자신의 기여를 빼고(leave-one-out) 다른 주제들의 어휘만 본다:
+
+      가능 ⟺ (주제가 쓰는 다른 각도) ∩ (T 를 뺀, Q 를 쓰는 주제들의 각도 어휘) ≠ ∅
+
+    주제의 각도 정보가 전혀 없으면 판단하지 않고 통과시킨다(없는 근거로 후보를 지우는
+    쪽이 더 위험하다). 판정 결과는 **검정에서 빼는 데 쓰지 않고**(BH-FDR 의 분모가
+    결과에 의존하면 안 되므로) 표시 순서와 경고 표시에만 쓴다.
+    """
+    own = quals_by_term.get(term)
+    if not own:
+        return True
+    fam = family.get(qual)
+    if not fam:
+        return False
+    term_uses_qual = term in topics_by_qual.get(qual, ())
+    for q2 in own:
+        if q2 == qual:
+            continue
+        # T 자신이 Q 를 쓰고 있었다면 fam[q2] 에 T 의 기여 1 이 들어 있다 — 빼고 본다.
+        others = fam.get(q2, 0) - (1 if term_uses_qual else 0)
+        if others > 0:
+            return True
+    return False
+
+
+def _angle_candidates(
+    articles: Sequence[Article],
+    top_k: int,
+    top_qualifiers: int,
+    min_expected: float,
+    min_term_articles: int,
+    alpha: float,
+) -> Tuple[List[AngleGap], int]:
+    """(검정한 모든 (주제×각도) 칸, 그 중 구조적 불가로 보이는 칸 수).
+
+    **분석 단위는 색인 표목(heading) = (논문, 주제어) 한 칸**이며, 부주제어가 하나라도
+    붙은 표목만 센다. 이게 핵심이다 — 예전 구현은 주변확률을 *논문* 수준
+    (`그 각도를 어느 주제에든 쓴 논문 수`)에서 세면서 관측은 *표목* 수준
+    (`그 주제에 그 각도가 붙은 논문 수`)에서 세어, 서로 다른 모집단을 비교했다.
+    그 결과 논문당 주제어가 d개면 lift 가 체계적으로 1/d 로 눌려 **모든 칸이 공백으로**
+    보였다(실측: 진짜 귀무가설 코퍼스에서 p≤0.05 비율이 1.00, 중앙값 p=0). 표목 수준
+    에서는 같은 시뮬레이션이 0.04 로 정상 보정된다.
+
+    부주제어가 안 붙은 표목(bare descriptor)은 분모에서 빠진다 — '색인자가 각도를
+    안 붙였다'와 '그 각도의 연구가 없다'를 섞지 않기 위해서다.
+
+    **한계**: NLM 은 descriptor 범주별로 붙일 수 있는 부주제어를 제한한다. 그런 칸은
+    `plausible=False` 로 표시하고 순위를 뒤로 미루지만, **검정에서 빼지는 않는다**
+    (제외하면 BH-FDR 의 분모 m 이 결과에 의존하게 되어 q 가 정직하지 않게 된다).
+    """
+    if top_k <= 0 or top_qualifiers <= 0:
+        return [], 0
+
+    slot_term: Counter = Counter()      # 주제별 표목 수
+    slot_qual: Counter = Counter()      # 각도별 표목 수
+    cell: Counter = Counter()           # (주제, 각도) 표목 수
+    n_slots = 0
+    angles_by_term: Dict[str, Counter] = {}
+    quals_by_term: Dict[str, set] = {}
+    topics_by_qual: Dict[str, set] = {}
+    for a in articles:
+        by_desc: Dict[str, set] = {}
+        for t, q in article_angles(a):
+            by_desc.setdefault(t, set()).add(q)
+        for t, qs in by_desc.items():
+            n_slots += 1
+            slot_term[t] += 1
+            for q in qs:
+                slot_qual[q] += 1
+                cell[(t, q)] += 1
+                angles_by_term.setdefault(t, Counter())[q] += 1
+                quals_by_term.setdefault(t, set()).add(q)
+                topics_by_qual.setdefault(q, set()).add(t)
+    if n_slots == 0:
+        return [], 0
+
+    top_terms = [t for t, c in _ranked(slot_term)[:top_k] if c >= min_term_articles]
+    top_quals = [q for q, _ in _ranked(slot_qual)[:top_qualifiers]]
+    family = _qualifier_families(quals_by_term, topics_by_qual, top_quals)
+
+    n_implausible = 0
+    candidates: List[AngleGap] = []
+    for t in top_terms:
+        kt = slot_term[t]
+        for q in top_quals:
+            nq = slot_qual[q]
+            expected = kt * nq / n_slots
+            if expected < min_expected:
+                continue
+            obs = cell.get((t, q), 0)
+            lo, hi = lift_ci(obs, expected, alpha=alpha)
+            ok = _angle_plausible(t, q, quals_by_term, topics_by_qual, family)
+            if not ok:
+                n_implausible += 1
+            candidates.append(
+                AngleGap(
+                    term=t,
+                    qualifier=q,
+                    n_term=kt,
+                    n_qualifier=nq,
+                    observed=obs,
+                    expected=expected,
+                    deficit=expected - obs,
+                    lift=obs / expected if expected > 0 else 0.0,
+                    p_value=hypergeom_lower_tail(n_slots, kt, nq, obs),
+                    lift_ci_low=lo,
+                    lift_ci_high=hi,
+                    top_angles=[
+                        [qq, cc] for qq, cc in _ranked(angles_by_term.get(t, Counter()))[:3]
+                    ],
+                    plausible=ok,
+                )
+            )
+
+    for g, qv in zip(candidates, benjamini_hochberg([c.p_value for c in candidates])):
+        g.q_value = qv
+    return candidates, n_implausible
+
+
+def sort_angle_gaps(gaps: Sequence[AngleGap], sort: str = "deficit") -> List[AngleGap]:
+    """각도 공백 정렬 — **구조적으로 불가능해 보이는 칸은 항상 뒤로** 미룬다.
+
+    그런 칸은 관측이 0이라 어떤 기준으로 정렬하든 맨 위를 차지한다(실측: 기대 7.0편의
+    `Sleep × methods` 가 1위). 지우지는 않되(검정 집합은 정직해야 하므로) 순위에서만
+    내리고 표에 표시한다. 동률은 항상 결정론적으로 깨뜨린다.
+    """
+    if sort not in ANGLE_SORTS:
+        raise ValueError(f"알 수 없는 정렬 기준: {sort!r} (가능: {', '.join(ANGLE_SORTS)})")
+    keyfuncs = {
+        "deficit": lambda g: (-g.deficit, g.lift, g.term, g.qualifier),
+        "lift": lambda g: (g.lift, -g.expected, g.term, g.qualifier),
+        "q": lambda g: (g.q_value, g.lift, g.term, g.qualifier),
+        "expected": lambda g: (-g.expected, g.lift, g.term, g.qualifier),
+    }
+    key = keyfuncs[sort]
+    return sorted(gaps, key=lambda g: (not g.plausible,) + tuple(key(g)))
+
+
+def angle_analysis(
+    articles: Sequence[Article],
+    top_k: int = 12,
+    top_qualifiers: int = 10,
+    min_expected: float = 1.0,
+    max_lift: float = 0.5,
+    min_term_articles: int = 3,
+    sort: str = "deficit",
+    alpha: float = 0.05,
+    hide_implausible: bool = False,
+) -> Tuple[List[AngleGap], int, int]:
+    """(표시할 칸, 검정한 칸 수 m, 그 중 구조적 불가로 보이는 칸 수).
+
+    m 을 밝히지 않으면 "왜 q≤0.05 인 후보가 없는지"를 사용자가 알 수 없다.
+    `hide_implausible=True` 면 구조적 불가로 보이는 칸을 **표시에서만** 뺀다
+    (검정은 그대로 수행하므로 q 는 변하지 않는다).
+    """
+    if sort not in ANGLE_SORTS:
+        raise ValueError(f"알 수 없는 정렬 기준: {sort!r} (가능: {', '.join(ANGLE_SORTS)})")
+    cands, n_implausible = _angle_candidates(
+        articles, top_k=top_k, top_qualifiers=top_qualifiers,
+        min_expected=min_expected, min_term_articles=min_term_articles, alpha=alpha,
+    )
+    keep = [g for g in cands if g.lift <= max_lift]
+    if hide_implausible:
+        keep = [g for g in keep if g.plausible]
+    return sort_angle_gaps(keep, sort), len(cands), n_implausible
+
+
+def angle_gaps(
+    articles: Sequence[Article],
+    top_k: int = 12,
+    top_qualifiers: int = 10,
+    min_expected: float = 1.0,
+    max_lift: float = 0.5,
+    min_term_articles: int = 3,
+    sort: str = "deficit",
+    alpha: float = 0.05,
+    hide_implausible: bool = False,
+) -> List[AngleGap]:
+    """주제 × 연구각도 격자의 저조 조합(=각도 공백) 목록. 자세한 설명은 `angle_analysis`."""
+    return angle_analysis(
+        articles, top_k=top_k, top_qualifiers=top_qualifiers,
+        min_expected=min_expected, max_lift=max_lift,
+        min_term_articles=min_term_articles, sort=sort, alpha=alpha,
+        hide_implausible=hide_implausible,
+    )[0]
+
+
+def count_angle_tests(
+    articles: Sequence[Article],
+    top_k: int = 12,
+    top_qualifiers: int = 10,
+    min_expected: float = 1.0,
+    min_term_articles: int = 3,
+) -> int:
+    """각도 공백에서 실제로 수행되는 검정 수 m(= BH-FDR 의 분모)."""
+    return len(
+        _angle_candidates(
+            articles, top_k=top_k, top_qualifiers=top_qualifiers,
+            min_expected=min_expected, min_term_articles=min_term_articles, alpha=0.05,
+        )[0]
+    )
 
 
 def gap_candidate_terms(articles: Sequence[Article], top_k: int) -> List[str]:
@@ -1006,6 +1591,7 @@ def evidence_profile(articles: Sequence[Article], tiers: Optional[Sequence[str]]
     n_int = sum(
         1 for a, t in zip(articles, tiers) if t != "other" and is_interventional(a)
     )
+    ci_lo, ci_hi = clopper_pearson(n_int, n_typed) if n_typed else (0.0, 1.0)
     return {
         "n_articles": n,
         "n_typed": n_typed,
@@ -1014,6 +1600,7 @@ def evidence_profile(articles: Sequence[Article], tiers: Optional[Sequence[str]]
         "tiers": rows,
         "n_interventional": n_int,
         "interventional_share": (n_int / n_typed) if n_typed else 0.0,
+        "interventional_share_ci": [ci_lo, ci_hi],
     }
 
 
@@ -1031,6 +1618,10 @@ class TopicEvidence:
     p_value: float           # Fisher 정확검정 양측(주제 × 개입여부, 나머지 대비)
     q_value: float = 1.0     # 검정한 주제 전체에 BH-FDR 보정
     tier_counts: Dict[str, int] = field(default_factory=dict)
+    # 개입비율의 Clopper–Pearson 95% 정확구간. '0/8편 = 0%' 를 구간 없이 적으면
+    # "이 주제엔 시험이 없다"로 읽히지만, 실제 상한은 37% 다.
+    share_ci_low: float = 0.0
+    share_ci_high: float = 1.0
 
 
 # 개입(interventional) 판정에 쓰는 PublicationType. **대표 tier 가 아니라 '존재 여부'**
@@ -1105,6 +1696,7 @@ def topic_evidence(
         rest_n = n_typed - n_t
         rest_i = total_int - i_t
         p = fisher_exact_two_sided(i_t, n_t - i_t, rest_i, rest_n - rest_i)
+        ci_lo, ci_hi = clopper_pearson(i_t, n_t)
         out.append(
             TopicEvidence(
                 term=term,
@@ -1116,6 +1708,8 @@ def topic_evidence(
                 rest_share=(rest_i / rest_n) if rest_n else 0.0,
                 p_value=p,
                 tier_counts=dict(tiers_by_term[term]),
+                share_ci_low=ci_lo,
+                share_ci_high=ci_hi,
             )
         )
 

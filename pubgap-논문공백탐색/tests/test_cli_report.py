@@ -22,9 +22,9 @@ def load_example():
 
 def test_build_report_on_example():
     arts = load_example()
-    assert len(arts) == 18
+    assert len(arts) == 28
     rep = build_report(arts, "example")
-    assert rep["n_articles"] == 18
+    assert rep["n_articles"] == 28
     assert rep["year_span"] == [2015, 2024]
     # 상위 공백은 EEG × (Heart Rate / Respiration) — 설계상 lift 0
     gaps = rep["gaps"]
@@ -45,7 +45,7 @@ def test_render_markdown_contains_sections():
     md = render_markdown(build_report(load_example(), "example"))
     assert "# 연구 동향·공백 리포트" in md
     assert "## 연도별 발행량" in md
-    assert "덜 연구된 각도" in md
+    assert "덜 연구된 주제 조합" in md
     assert "Electroencephalography" in md
 
 
@@ -60,7 +60,7 @@ def test_cli_json_output_valid(capsys):
     rc = main(["--from-file", str(EXAMPLE), "--json"])
     assert rc == 0
     data = json.loads(capsys.readouterr().out)
-    assert data["n_articles"] == 18
+    assert data["n_articles"] == 28
     assert "gaps" in data and "emerging" in data
 
 
@@ -125,8 +125,8 @@ def test_cli_network_path_is_isolated(monkeypatch, capsys):
     def fake_fetch(*a, **k):
         return fetch_mod.FetchResult(
             xml_text=EXAMPLE.read_text(encoding="utf-8"),
-            total_available=18,
-            n_fetched=18,
+            total_available=28,
+            n_fetched=28,
         )
 
     monkeypatch.setattr(fetch_mod, "fetch_articles", fake_fetch)
@@ -159,7 +159,8 @@ def test_render_csv_structure():
     csv_text = render_csv(build_report(load_example(), "example"))
     lines = csv_text.lstrip("﻿").splitlines()
     assert lines[0] == (
-        "term_a,term_b,observed,expected,deficit,lift,jaccard,cosine,npmi,"
+        "term_a,term_b,observed,expected,deficit,lift,"
+        "lift_ci_low,lift_ci_high,jaccard,cosine,npmi,"
         "count_a,count_b,p_value,q_value,"
         "observed_early,observed_recent,gap_trend,"
         "pmids_a,pmids_b,pmids_both,bridges,"
@@ -183,7 +184,7 @@ def test_cli_format_json_equivalent_to_flag(capsys):
     rc = main(["--from-file", str(EXAMPLE), "--format", "json"])
     assert rc == 0
     data = json.loads(capsys.readouterr().out)
-    assert data["n_articles"] == 18
+    assert data["n_articles"] == 28
 
 
 def test_cli_gap_max_q_filters(capsys):
@@ -214,7 +215,7 @@ def test_cli_major_topics_only_on_corpus_without_major_topics(capsys):
     cap = capsys.readouterr()
     assert "대표(별표) MeSH 주제가 하나도 없어" in cap.err
     data = json.loads(cap.out)
-    assert data["n_articles"] == 18      # 논문은 그대로
+    assert data["n_articles"] == 28      # 논문은 그대로
     assert data["top_mesh"] == []        # 주제만 비었다
     assert data["gaps"] == []
 
@@ -261,7 +262,7 @@ def test_cli_reads_gzip_file(tmp_path, capsys):
     gz.write_bytes(gzip.compress(EXAMPLE.read_bytes()))
     rc = main(["--from-file", str(gz), "--json"])
     assert rc == 0
-    assert json.loads(capsys.readouterr().out)["n_articles"] == 18
+    assert json.loads(capsys.readouterr().out)["n_articles"] == 28
 
 
 # --------------------------------------------------------------------------- #
@@ -344,7 +345,9 @@ def test_markdown_shows_bridge_and_pmids():
         arts.append(Article(f"d{i}", 2020, "J", "t", ["Inflammation"]))
     md = render_markdown(build_report(arts, "x", gap_min_expected=1.0, gap_max_lift=1.0))
     assert "가교(Swanson ABC)" in md
-    assert "대표 논문 ID" in md
+    assert "대표 논문(확인용" in md
+    # 번호만이 아니라 **제목**이 함께 나와야 확인이 실제로 가능하다.
+    assert "`a0`" in md and "Sleep — " in md
 
 
 def test_two_year_corpus_suppresses_cagr_line(tmp_path, capsys):

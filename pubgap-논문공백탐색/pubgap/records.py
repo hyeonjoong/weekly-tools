@@ -12,6 +12,7 @@ import csv
 import gzip
 import io
 import re
+import stat
 import zlib
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -26,7 +27,10 @@ import xml.etree.ElementTree as ET
 #      단순히 경계만 요구하면 이 필드가 통째로 해석 불가가 되어 연도가 유실된다.
 # 그래서 '경계 있는 4자리' 또는 '경계 있는 YYYYMMDD' 를 모두 인정하고, 어느 쪽이든
 # 앞 4자리를 연도로 쓴다. (YYYYMM 6자리는 accession 과 구분이 안 되므로 받지 않는다.)
-_YEAR_RE = re.compile(r"(?<!\d)((?:19|20)\d{2})(?:(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01]))?(?!\d)")
+_YEAR_RE = re.compile(
+    r"(?<!\d)(1[5-9]\d{2}|20\d{2}|21\d{2})"
+    r"(?:(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01]))?(?!\d)"
+)
 
 
 # 발행연도로 인정할 범위. 데이터에서 온 연도도 반드시 걸러야 한다 — XML 의
@@ -74,12 +78,20 @@ class Article:
     mesh_major: List[str] = field(default_factory=list)  # 대표(별표) 주제만
     keywords: List[str] = field(default_factory=list)     # 저자 키워드(MeSH 보조)
     pub_types: List[str] = field(default_factory=list)    # PublicationType(연구 설계)
+    # MeSH 부주제어(qualifier/subheading) 쌍 — ('Hypertension', 'drug therapy') 처럼
+    # "그 주제를 **어떤 각도로** 다뤘는가"를 담는다. 임상·제약 연구자에게 이 축은
+    # 주제쌍 공백만큼 중요하다("이 질환에 /drug therapy 논문이 하나도 없다").
+    qualifiers: List[Tuple[str, str]] = field(default_factory=list)
+    doi: str = ""                                          # 소문자 정규화 전 원본 DOI
 
     def has(self, term: str) -> bool:
         return term in self.mesh
 
 
 _CONTROL_WS_RE = re.compile(r"[\r\n\t\x0b\x0c]+")
+# 양방향 서식 제어문자(RLO/LRO/isolate…). 남겨 두면 주제어 하나가 리포트 한 줄의
+# 표시 순서를 통째로 뒤집어, 사람이 읽는 숫자와 실제 값이 달라진다.
+_BIDI_RE = re.compile("[\u202a-\u202e\u2066-\u2069\u200e\u200f]")
 
 
 def clean_value(text: str) -> str:
@@ -92,7 +104,7 @@ def clean_value(text: str) -> str:
     """
     if not text:
         return ""
-    return _CONTROL_WS_RE.sub(" ", text).strip()
+    return _BIDI_RE.sub("", _CONTROL_WS_RE.sub(" ", text)).strip()
 
 
 def _text(el: Optional[ET.Element]) -> str:
@@ -133,17 +145,21 @@ def _extract_journal(art: ET.Element) -> str:
 
 
 def _extract_mesh(art: ET.Element):
-    """(모든 descriptor, 대표(major) descriptor) 두 리스트를 반환.
+    """(모든 descriptor, 대표(major) descriptor, (descriptor, qualifier) 쌍) 을 반환.
 
     MeSH heading 은 descriptor 나 qualifier 중 하나라도 MajorTopicYN='Y' 이면
     그 논문의 '대표 주제'로 본다(PubMed 의 별표 표기와 동일).
+    qualifier(부주제어)는 '어떤 각도로 다뤘는가'(therapy / drug therapy /
+    adverse effects …)를 담고 있어 별도 축으로 쓴다.
     """
     # 중복 판정은 반드시 set 으로. list 멤버십(`txt not in terms`)은 주제 수에
     # 대해 O(m²) 라, MeSH 를 수천 개 단 레코드에서 파싱만 20초 넘게 걸렸다.
     terms: List[str] = []
     major: List[str] = []
+    quals: List[Tuple[str, str]] = []
     seen_terms: set = set()
     seen_major: set = set()
+    seen_quals: set = set()
     for mh in art.findall(".//MeshHeadingList/MeshHeading"):
         d = mh.find("DescriptorName")
         txt = _text(d)
@@ -160,7 +176,59 @@ def _extract_mesh(art: ET.Element):
         if is_major and txt not in seen_major:
             seen_major.add(txt)
             major.append(txt)
-    return terms, major
+        for q in mh.findall("QualifierName"):
+            qt = normalize_qualifier(_text(q))
+            if not qt:
+                continue
+            key = (txt, qt)
+            if key not in seen_quals:
+                seen_quals.add(key)
+                quals.append(key)
+    return terms, major, quals
+
+
+# NLM 이 실제로 쓰는 MeSH 부주제어(subheading) 전체 목록.
+# 왜 필요한가: `Descriptor/qualifier` 표기는 RIS·CSV 의 **저자 키워드**에도 우연히
+# 나타난다("AI/machine learning", "cost/benefit analysis", "input/output"). 목록 없이
+# '/' 만 보고 자르면 `AI` 라는 주제를 `machine learning` 이라는 *연구 각도*로 다뤘다는
+# 완전한 허구가 만들어지고, 리포트는 그것을 "이 분야가 주로 보는 각도"로 소개한다
+# (실측). 공식 목록에 있는 것만 부주제어로 인정한다.
+# 출처: https://www.nlm.nih.gov/mesh/subhierarchy.html (2024 기준 76종)
+NLM_SUBHEADINGS = frozenset({
+    "abnormalities", "administration & dosage", "adverse effects", "agonists",
+    "analogs & derivatives", "analysis", "anatomy & histology",
+    "antagonists & inhibitors", "biosynthesis", "blood", "blood supply",
+    "cerebrospinal fluid", "chemical synthesis", "chemically induced", "chemistry",
+    "classification", "complications", "congenital", "cytology", "deficiency",
+    "diagnosis", "diagnostic imaging", "diet therapy", "drug effects",
+    "drug therapy", "economics", "education", "embryology", "enzymology",
+    "epidemiology", "ethics", "ethnology", "etiology", "genetics",
+    "growth & development", "history", "immunology", "injuries", "innervation",
+    "instrumentation", "isolation & purification", "legislation & jurisprudence",
+    "metabolism", "methods", "microbiology", "mortality", "nursing",
+    "organization & administration", "parasitology", "pathogenicity", "pathology",
+    "pharmacokinetics", "pharmacology", "physiology", "physiopathology",
+    "poisoning", "prevention & control", "psychology", "radiation effects",
+    "radiotherapy", "rehabilitation", "secondary", "standards",
+    "statistics & numerical data", "supply & distribution", "surgery",
+    "therapeutic use", "therapy", "toxicity", "transmission", "transplantation",
+    "trends", "ultrastructure", "urine", "veterinary", "virology",
+})
+
+
+def is_subheading(text: str) -> bool:
+    """이 문자열이 NLM 공식 부주제어인가(대소문자·별표·공백 무시)."""
+    return normalize_qualifier(text) in NLM_SUBHEADINGS
+
+
+def normalize_qualifier(text: str) -> str:
+    """부주제어 표기를 정규화한다(소문자·별표 제거·공백 정리).
+
+    같은 부주제어가 XML 에서는 'drug therapy', NBIB 에서는 '*drug therapy',
+    일부 내보내기에서는 'Drug Therapy' 로 온다. 정규화하지 않으면 같은 각도가
+    세 개로 쪼개져 '각도 공백' 통계가 통째로 어긋난다.
+    """
+    return clean_value(str(text or "")).lstrip("*").strip().lower()
 
 
 def _extract_keywords(art: ET.Element) -> List[str]:
@@ -188,6 +256,42 @@ def _extract_pub_types(art: ET.Element) -> List[str]:
             seen.add(txt)
             pts.append(txt)
     return pts
+
+
+_DOI_RE = re.compile(r"10\.\d{4,9}/[^\s\"'<>]+")
+
+
+def normalize_doi(value: str) -> str:
+    """DOI 표기를 비교 가능한 형태로 정규화한다(소문자, 접두 URL/`doi:` 제거).
+
+    같은 논문이 PubMed XML 에서는 `10.1016/j.sleep.2020.01.001`, Scopus CSV 에서는
+    `https://doi.org/10.1016/J.SLEEP.2020.01.001` 로 온다. 정규화하지 않으면
+    여러 출처를 합쳤을 때 같은 논문이 두 편으로 세어져 모든 통계가 부풀려진다.
+    DOI 규격상 대소문자는 구분하지 않는다.
+    """
+    s = clean_value(str(value or "")).strip()
+    if not s:
+        return ""
+    m = _DOI_RE.search(s)
+    if not m:
+        return ""
+    doi = m.group(0).rstrip(".,;)]}。")
+    return doi.lower()
+
+
+def _extract_doi(art: ET.Element) -> str:
+    """PubMed XML 에서 DOI 를 뽑는다(ELocationID 우선, 없으면 ArticleId)."""
+    for el in art.findall(".//ELocationID"):
+        if (el.get("EIdType") or "").lower() == "doi":
+            doi = normalize_doi(_text(el))
+            if doi:
+                return doi
+    for el in art.findall(".//ArticleIdList/ArticleId"):
+        if (el.get("IdType") or "").lower() == "doi":
+            doi = normalize_doi(_text(el))
+            if doi:
+                return doi
+    return ""
 
 
 def _strip_namespaces(el: ET.Element) -> None:
@@ -225,7 +329,7 @@ def _article_from_element(art: ET.Element) -> Article:
         pmid_node = art.find(".//PMID")
     pmid = _text(pmid_node) or "?"
     title = _text(art.find(".//ArticleTitle")) or _text(art.find(".//BookTitle")) or "(no title)"
-    mesh, major = _extract_mesh(art)
+    mesh, major, quals = _extract_mesh(art)
     return Article(
         pmid=pmid,
         year=_extract_year(art),
@@ -235,6 +339,8 @@ def _article_from_element(art: ET.Element) -> Article:
         mesh_major=major,
         keywords=_extract_keywords(art),
         pub_types=_extract_pub_types(art),
+        qualifiers=quals,
+        doi=_extract_doi(art),
     )
 
 
@@ -242,6 +348,8 @@ def _article_from_element(art: ET.Element) -> Article:
 _XML_FEED_CHUNK = 1 << 18  # 256 KiB
 # 레코드 요소 이름 — 논문(PubmedArticle)과 책/챕터(PubmedBookArticle) 둘 다 받는다.
 _XML_RECORD_TAGS = ("PubmedArticle", "PubmedBookArticle")
+# 레코드가 0건이어도 정상일 수 있는 최상위 요소(검색 결과가 실제로 0편인 경우).
+_XML_ROOT_TAGS = ("PubmedArticleSet", "PubmedBookArticleSet")
 
 
 def parse_efetch_xml(xml_text: str) -> List[Article]:
@@ -258,9 +366,10 @@ def parse_efetch_xml(xml_text: str) -> List[Article]:
         raise ValueError("빈 XML 입력입니다.")
     assert_no_internal_entities(xml_text)
 
-    parser = ET.XMLPullParser(events=("end",))
+    parser = ET.XMLPullParser(events=("start", "end"))
     articles: List[Article] = []
     errors: List[str] = []
+    root_tag = ""
 
     def _local(tag) -> str:
         # '{ns}PubmedArticle' → 'PubmedArticle'. 네임스페이스가 붙은 변형(일부 저장소
@@ -268,7 +377,12 @@ def parse_efetch_xml(xml_text: str) -> List[Article]:
         return tag.rsplit("}", 1)[-1] if isinstance(tag, str) else ""
 
     def _drain() -> None:
+        nonlocal root_tag
         for _event, el in parser.read_events():
+            if _event == "start":
+                if not root_tag:
+                    root_tag = _local(el.tag)
+                continue
             if _local(el.tag) in _XML_RECORD_TAGS:
                 articles.append(_article_from_element(el))
                 el.clear()  # 서브트리 해제 — 빈 껍데기만 부모에 남는다
@@ -288,6 +402,15 @@ def parse_efetch_xml(xml_text: str) -> List[Article]:
 
     if not articles and errors:
         raise ValueError(f"PubMed XML 오류 응답: {errors[0]}")
+    if not articles and root_tag and root_tag not in _XML_ROOT_TAGS:
+        # PMC/JATS(`<article>`)나 다른 XML 을 내려받는 것은 흔한 실수다. 예전에는
+        # 조용히 빈 리스트를 돌려줘 CLI 가 "검색 결과가 없습니다 — 검색어를 바꿔
+        # 보세요"라고 안내했다(파일 분석에는 검색어라는 게 없는데도).
+        raise ValueError(
+            f"PubMed 레코드를 찾지 못했습니다(최상위 요소가 <{root_tag}>). "
+            "PubMed efetch(db=pubmed&retmode=xml) 결과 또는 MEDLINE/NBIB·RIS·CSV 로 "
+            "내려받은 파일인지 확인하세요 — PMC/JATS 전문 XML 은 지원하지 않습니다."
+        )
     return articles
 
 
@@ -338,6 +461,7 @@ def parse_medline_nbib(text: str) -> List[Article]:
         mh_list: List[str] = []
         ot_list: List[str] = []
         pt_list: List[str] = []
+        id_list: List[str] = []
         for tag, val in rec:
             if tag == "MH":
                 mh_list.append(val)
@@ -345,6 +469,8 @@ def parse_medline_nbib(text: str) -> List[Article]:
                 ot_list.append(val)
             elif tag == "PT":  # 반복 태그 — 한 논문에 설계가 여러 개 붙는다
                 pt_list.append(val)
+            elif tag in ("AID", "LID"):  # 반복 태그 — DOI/PII 가 섞여 온다
+                id_list.append(val)
             else:
                 fields.setdefault(tag, val)  # 첫 값 사용
 
@@ -355,7 +481,8 @@ def parse_medline_nbib(text: str) -> List[Article]:
         title = fields.get("TI") or "(no title)"
         journal = fields.get("TA") or fields.get("JT") or "(unknown journal)"
         year = _nbib_year(fields)
-        mesh, major = _nbib_mesh(mh_list)
+        mesh, major, quals = _nbib_mesh(mh_list)
+        doi = _nbib_doi(id_list)
         keywords: List[str] = []
         for kw in ot_list:
             k = kw.strip()
@@ -377,9 +504,29 @@ def parse_medline_nbib(text: str) -> List[Article]:
                 mesh_major=major,
                 keywords=keywords,
                 pub_types=pub_types,
+                qualifiers=quals,
+                doi=doi,
             )
         )
     return articles
+
+
+def _nbib_doi(values: Sequence[str]) -> str:
+    """MEDLINE AID/LID 값들 → DOI. '[doi]' 표시가 붙은 값을 우선한다.
+
+    AID 는 PII·pmc·doi 를 섞어 반복하므로(`AID - S1389-9457(19)30... [pii]`),
+    표시를 보지 않고 첫 값을 쓰면 DOI 가 아닌 식별자를 DOI 로 저장하게 된다.
+    """
+    for v in values:
+        if "[doi]" in v.lower():
+            doi = normalize_doi(v)
+            if doi:
+                return doi
+    for v in values:  # 표시가 없어도 DOI 모양이면 인정
+        doi = normalize_doi(v)
+        if doi:
+            return doi
+    return ""
 
 
 def _nbib_year(fields: dict) -> Optional[int]:
@@ -392,23 +539,31 @@ def _nbib_year(fields: dict) -> Optional[int]:
     return None
 
 
-def _nbib_mesh(mh_values: List[str]):
-    """MEDLINE MH 값들 → (descriptor 리스트, 대표 descriptor 리스트).
+def _nbib_mesh(mh_values: Sequence[str]):
+    """MEDLINE MH 값들 → (descriptor, 대표 descriptor, (descriptor, qualifier) 쌍).
 
     'Heart Rate/*physiology' → descriptor 'Heart Rate', qualifier physiology 가
-    대표('*'). '*Sleep' → descriptor 자체가 대표. descriptor 는 첫 '/' 앞부분.
+    대표('*'). '*Sleep' → descriptor 자체가 대표. descriptor 는 첫 '/' 앞부분이며,
+    그 뒤의 '/' 로 구분된 조각은 모두 부주제어(qualifier)다
+    (`Brain/*drug effects/metabolism` 처럼 한 줄에 둘 이상 올 수 있다).
     """
     terms: List[str] = []
     major: List[str] = []
+    quals: List[Tuple[str, str]] = []
     seen_terms: set = set()
     seen_major: set = set()
+    seen_quals: set = set()
     for raw in mh_values:
         val = raw.strip()
         if not val:
             continue
         is_major = "*" in val
-        descriptor = val.split("/", 1)[0]
-        descriptor = descriptor.lstrip("*").strip()
+        parts = val.split("/")
+        # '/' 뒤가 **공식 부주제어일 때만** 분해한다. 저자 키워드의 'cost/benefit
+        # analysis' 를 주제 'cost' × 각도 'benefit analysis' 로 오해하지 않기 위해서다.
+        if len(parts) > 1 and not all(is_subheading(x) for x in parts[1:]):
+            parts = [val]
+        descriptor = parts[0].lstrip("*").strip()
         if not descriptor:
             continue
         if descriptor not in seen_terms:
@@ -417,7 +572,15 @@ def _nbib_mesh(mh_values: List[str]):
         if is_major and descriptor not in seen_major:  # 이미 있으면 대표 여부만 승격
             seen_major.add(descriptor)
             major.append(descriptor)
-    return terms, major
+        for piece in parts[1:]:
+            qt = normalize_qualifier(piece)
+            if not qt:
+                continue
+            key = (descriptor, qt)
+            if key not in seen_quals:
+                seen_quals.add(key)
+                quals.append(key)
+    return terms, major, quals
 
 
 # --------------------------------------------------------------------------- #
@@ -478,20 +641,33 @@ def _ris_records(text: str) -> List[List[Tuple[str, str]]]:
     return records
 
 
-_MESH_MARKER_RE = re.compile(r"^\*|/\*?[a-z][a-z \-]*$")
+def _looks_mesh_indexed(value: str) -> bool:
+    """이 키워드 하나가 MeSH 색인 표기인가 — 선두 '*' 또는 '/공식 부주제어'."""
+    v = (value or "").strip()
+    if not v:
+        return False
+    if v.startswith("*"):
+        return True
+    parts = v.split("/")
+    return len(parts) > 1 and all(is_subheading(x) for x in parts[1:])
 
 
 def _keywords_look_like_mesh(all_kw: Sequence[str]) -> bool:
-    """KW 값들이 MeSH 색인 표기(선두 '*' 또는 '/소문자qualifier')를 쓰는지 판단.
+    """KW 값들이 MeSH 색인 표기(선두 '*' 또는 '/공식 부주제어')를 쓰는지 판단.
 
     PubMed 가 내보낸 RIS/CSV 는 KW 에 MeSH descriptor 를 그대로 넣어 준다
     (`*Sleep`, `Heart Rate/*physiology`). 반면 저자 키워드는 그런 표기가 없다.
     **레코드 단위가 아니라 코퍼스 단위로** 한 번만 판단해야 한다 — 논문마다 다르게
     해석하면 같은 개념이 어떤 논문에선 주제, 어떤 논문에선 키워드로 갈려 통계가 깨진다.
+
+    예전에는 '/소문자단어' 이기만 하면 MeSH 로 봤다. 그래서 저자 키워드에
+    `AI/machine learning`·`cost/benefit analysis` 가 10%만 섞여도 코퍼스 전체가
+    'MeSH 색인'으로 오인되고, `topic_source` 마저 'mesh' 로 보고돼 "이 입력에는 MeSH 가
+    없습니다" 경고가 사라졌다. 이제 **공식 부주제어 목록**으로만 판정한다.
     """
     if not all_kw:
         return False
-    marked = sum(1 for k in all_kw if _MESH_MARKER_RE.search(k))
+    marked = sum(1 for k in all_kw if _looks_mesh_indexed(k))
     return marked / len(all_kw) >= 0.1
 
 
@@ -537,20 +713,21 @@ def parse_ris(text: str) -> List[Article]:
                 if year is not None:
                     break
 
+        doi = normalize_doi(first.get("DO") or "") or normalize_doi(first.get("UR") or "")
         pmid = "?"
         for tag in _RIS_ID_TAGS:
             v = (first.get(tag) or "").strip()
             if _DIGITS_RE.match(v):
                 pmid = v
                 break
-        if pmid == "?" and first.get("DO"):
-            pmid = "doi:" + first["DO"].strip()
+        if pmid == "?" and doi:
+            pmid = "doi:" + doi
 
         if mesh_mode:
-            mesh, major = _nbib_mesh(kw)
+            mesh, major, quals = _nbib_mesh(kw)
             keywords = list(mesh)
         else:
-            mesh, major = [], []
+            mesh, major, quals = [], [], []
             keywords = _dedup_keep_order(kw)
 
         ty = (first.get("TY") or "").strip().upper()
@@ -563,6 +740,7 @@ def parse_ris(text: str) -> List[Article]:
             Article(
                 pmid=pmid, year=year, journal=journal, title=title,
                 mesh=mesh, mesh_major=major, keywords=keywords, pub_types=pub_types,
+                qualifiers=quals, doi=doi,
             )
         )
     return articles
@@ -763,26 +941,30 @@ def _article_from_csv_row(
     year = _year_from(year_raw) if year_raw else None
 
     # MeSH 열은 NBIB 규칙(qualifier '/', 대표 '*')을 그대로 적용.
-    mesh, major = _nbib_mesh(_split_multi(mesh_raw))
+    mesh, major, quals = _nbib_mesh(_split_multi(mesh_raw))
     kw_tokens = _split_multi(kw_raw)
     if kw_mesh_mode:
         # 'MeSH Terms' 전용 열이 없고 키워드 열에 MeSH 색인어가 들어온 내보내기
         # (PubMed 웹 CSV 변형 등) — 키워드도 주제로 승격한다.
-        kw_mesh, kw_major = _nbib_mesh(kw_tokens)
+        kw_mesh, kw_major, kw_quals = _nbib_mesh(kw_tokens)
         for t in kw_mesh:
             if t not in mesh:
                 mesh.append(t)
         for t in kw_major:
             if t not in major:
                 major.append(t)
+        for pair in kw_quals:
+            if pair not in quals:
+                quals.append(pair)
         keywords = kw_mesh
     else:
         keywords = _dedup_keep_order(kw_tokens)
     pub_types = _dedup_keep_order(_split_multi(pt_raw))
 
+    doi_norm = normalize_doi(doi)
     ident = pmid.strip()
     if not _DIGITS_RE.match(ident):
-        ident = ("doi:" + doi.strip()) if doi.strip() else "?"
+        ident = ("doi:" + doi_norm) if doi_norm else "?"
 
     return Article(
         pmid=ident or "?",
@@ -793,6 +975,8 @@ def _article_from_csv_row(
         mesh_major=major,
         keywords=keywords,
         pub_types=pub_types,
+        qualifiers=quals,
+        doi=doi_norm,
     )
 
 
@@ -971,18 +1155,207 @@ def parse_records(text: str, hint: Optional[str] = None) -> List[Article]:
     return articles
 
 
-def dedup_articles(articles: List[Article]) -> List[Article]:
-    """PMID 기준 중복 제거(첫 등장 유지). '?'(미상) PMID 는 각각 고유로 둔다."""
-    seen = set()
-    out: List[Article] = []
+@dataclass
+class DedupStats:
+    """중복 제거 결과 — 어떤 키로 몇 편이 합쳐졌는지."""
+
+    n_input: int = 0
+    n_unique: int = 0
+    by_pmid: int = 0
+    by_doi: int = 0
+    by_title: int = 0
+    n_enriched: int = 0  # 중복본에서 빈 필드를 채워 보강한 레코드 수
+
+    @property
+    def n_removed(self) -> int:
+        return self.n_input - self.n_unique
+
+
+# 제목 대조로 중복을 판정할 최소 길이(정규화 후). 짧은 제목("Editorial", "Erratum")은
+# 서로 다른 논문끼리도 흔히 일치해, 길이 제한 없이 합치면 **다른 논문을 지운다**.
+MIN_TITLE_KEY_LEN = 20
+_TITLE_KEY_RE = re.compile(r"[^0-9a-z가-힣一-鿿]+")
+
+
+def title_key(title: str) -> str:
+    """제목 대조용 정규화 키(소문자·영숫자/한글/한자만·공백 제거).
+
+    같은 논문이 출처마다 'Slow breathing and HRV: a randomized trial.' /
+    'Slow Breathing and HRV — A Randomized Trial' 로 온다. 구두점·대소문자·공백만
+    다른 경우를 하나로 본다. 너무 짧은 제목은 키로 쓰지 않는다(MIN_TITLE_KEY_LEN).
+    """
+    s = _TITLE_KEY_RE.sub("", clean_value(str(title or "")).lower())
+    return s if len(s) >= MIN_TITLE_KEY_LEN else ""
+
+
+_EMPTY_JOURNAL = "(unknown journal)"
+_EMPTY_TITLE = "(no title)"
+
+
+def _enrich(keep: Article, dup: Article) -> bool:
+    """중복본 `dup` 의 정보로 `keep` 의 **빈 필드만** 채운다(제자리 수정).
+
+    실제 워크플로에서 같은 논문이 여러 출처로 들어온다: Scopus CSV 에는 MeSH 가 없고
+    PubMed XML 에는 있다. 먼저 온 레코드만 남기고 버리면 합쳐 볼 이유가 사라진다.
+    **값이 있는 필드는 절대 덮어쓰지 않으므로** 편수가 부풀거나 통계가 이중계수되지
+    않는다. 반환값: 실제로 뭔가 채웠는지.
+    """
+    changed = False
+    if not keep.mesh and dup.mesh:
+        keep.mesh = list(dup.mesh)
+        changed = True
+    if not keep.mesh_major and dup.mesh_major:
+        keep.mesh_major = list(dup.mesh_major)
+        changed = True
+    if not keep.qualifiers and dup.qualifiers:
+        keep.qualifiers = list(dup.qualifiers)
+        changed = True
+    if not keep.keywords and dup.keywords:
+        keep.keywords = list(dup.keywords)
+        changed = True
+    if not keep.pub_types and dup.pub_types:
+        keep.pub_types = list(dup.pub_types)
+        changed = True
+    if keep.year is None and dup.year is not None:
+        keep.year = dup.year
+        changed = True
+    if not keep.doi and dup.doi:
+        keep.doi = dup.doi
+        changed = True
+    if keep.journal in ("", _EMPTY_JOURNAL) and dup.journal not in ("", _EMPTY_JOURNAL):
+        keep.journal = dup.journal
+        changed = True
+    if keep.title in ("", _EMPTY_TITLE) and dup.title not in ("", _EMPTY_TITLE):
+        keep.title = dup.title
+        changed = True
+    if (not _DIGITS_RE.match(keep.pmid or "")) and _DIGITS_RE.match(dup.pmid or ""):
+        keep.pmid = dup.pmid
+        changed = True
+    return changed
+
+
+def dedup_articles_detailed(
+    articles: Sequence[Article],
+    merge: bool = True,
+    by_title: bool = True,
+) -> Tuple[List[Article], DedupStats]:
+    """PMID → DOI → 제목+연도 순으로 중복을 제거하고, 무엇으로 합쳤는지 함께 반환.
+
+    PMID 만 보던 예전 구현은 **여러 출처를 합칠 때 무력**했다: PubMed XML(PMID 있음)과
+    Scopus CSV(PMID 없음, DOI 만)를 함께 넣으면 같은 논문이 두 편으로 세어져 편수·
+    기대값·lift 가 전부 부풀었다. 서지 관리 도구가 쓰는 것과 같은 3단 키를 쓴다.
+
+    - 제목 키는 연도가 **양립할 때만**(같거나 한쪽이 미상) 중복으로 본다. 학회 초록과
+      본논문처럼 제목이 같고 연도가 다른 레코드를 잘못 합치지 않기 위해서다.
+    - `merge=True` 면 살아남은 레코드의 빈 필드를 중복본에서 채운다(값 덮어쓰기 없음).
+    """
+    kept: List[Article] = []
+    by_pmid: Dict[str, int] = {}
+    by_doi: Dict[str, int] = {}
+    # 제목키 → {연도(또는 None): 대표 인덱스}. 예전에는 인덱스 **리스트**를 두고 O(n²)를
+    # 막으려 길이를 8로 잘랐는데, 그러면 같은 제목이 9종 이상 연도로 들어온 순간부터
+    # 이후 중복을 **조용히 놓치고** 결과가 입력 순서에 따라 달라졌다(연도 분포가 조작돼
+    # 추세검정까지 오염). 연도로 색인하면 상한 없이도 O(1) 이다.
+    title_idx: Dict[str, Dict[Optional[int], int]] = {}
+    stats = DedupStats(n_input=len(articles))
+
     for a in articles:
-        key = a.pmid
-        if key and key != "?":
-            if key in seen:
-                continue
-            seen.add(key)
-        out.append(a)
-    return out
+        hit: Optional[int] = None
+        how = ""
+        pmid = (a.pmid or "").strip()
+        doi = normalize_doi(a.doi) or (
+            normalize_doi(pmid[4:]) if pmid.lower().startswith("doi:") else ""
+        )
+        tkey = title_key(a.title) if by_title else ""
+
+        if _DIGITS_RE.match(pmid) and pmid in by_pmid:
+            hit, how = by_pmid[pmid], "pmid"
+        elif doi and doi in by_doi:
+            hit, how = by_doi[doi], "doi"
+        elif tkey:
+            bucket = title_idx.get(tkey)
+            if bucket:
+                if a.year is None:
+                    # 연도 미상은 어떤 연도와도 양립한다 — 결정론적으로 가장 먼저
+                    # 등장한 레코드에 합친다.
+                    hit, how = min(bucket.values()), "title"
+                else:
+                    idx = bucket.get(a.year, bucket.get(None))
+                    if idx is not None:
+                        hit, how = idx, "title"
+
+        if hit is not None:
+            setattr(stats, f"by_{how}", getattr(stats, f"by_{how}") + 1)
+            if merge and _enrich(kept[hit], a):
+                stats.n_enriched += 1
+            # 합쳐진 레코드가 새로 얻은 식별자도 색인해 둔다(다음 중복이 걸리도록).
+            keeper = kept[hit]
+            kpmid = (keeper.pmid or "").strip()
+            if _DIGITS_RE.match(kpmid):
+                by_pmid.setdefault(kpmid, hit)
+            if keeper.doi:
+                by_doi.setdefault(normalize_doi(keeper.doi), hit)
+            if doi:
+                by_doi.setdefault(doi, hit)
+            continue
+
+        idx = len(kept)
+        # 살아남는 레코드는 사본으로 둔다 — merge 가 입력 객체를 제자리에서 바꾸면
+        # 호출부가 들고 있는 원본 리스트가 조용히 오염된다.
+        kept.append(replace(a, mesh=list(a.mesh), mesh_major=list(a.mesh_major),
+                            keywords=list(a.keywords), pub_types=list(a.pub_types),
+                            qualifiers=list(a.qualifiers)))
+        if _DIGITS_RE.match(pmid):
+            by_pmid.setdefault(pmid, idx)
+        if doi:
+            by_doi.setdefault(doi, idx)
+        if tkey:
+            title_idx.setdefault(tkey, {}).setdefault(a.year, idx)
+
+    stats.n_unique = len(kept)
+    return kept, stats
+
+
+def dedup_articles(articles: Sequence[Article]) -> List[Article]:
+    """중복 제거된 Article 리스트(통계는 버림). 자세한 내역은 `dedup_articles_detailed`."""
+    return dedup_articles_detailed(articles)[0]
+
+
+def _read_limited(path: Path) -> bytes:
+    """상한을 **먼저** 걸고 읽는다 — 가드가 곧 DoS 가 되지 않도록.
+
+    예전에는 `read_bytes()` 로 통째로 읽은 **뒤에** 크기를 검사해서, 200MB 파일이
+    거부되기 전에 이미 400MB 를 썼고 `--from-file /dev/zero` 는 영원히 멈췄다
+    (문서에 적힌 64MB 상한은 무한 스트림에 대해 아무 의미가 없다).
+
+    일반 파일이면 st_size 로 먼저 거른 뒤 읽고, FIFO·프로세스치환
+    (`--from-file <(...)`, 지원 대상)처럼 크기를 알 수 없는 입력은 상한+1 바이트까지만
+    청크로 읽어 넘치면 거부한다.
+    """
+    try:
+        st = path.stat()
+        if stat.S_ISREG(st.st_mode) and st.st_size > MAX_INPUT_BYTES:
+            raise ValueError(
+                f"입력이 {MAX_INPUT_BYTES // (1024 * 1024)}MB 를 넘습니다 — 기간을 나눠 "
+                "여러 파일로 분석하세요."
+            )
+    except OSError:
+        pass  # stat 실패는 아래 open() 이 같은 오류로 다시 알린다
+    chunks: List[bytes] = []
+    size = 0
+    with path.open("rb") as fh:
+        while size <= MAX_INPUT_BYTES:
+            chunk = fh.read(1 << 20)
+            if not chunk:
+                break
+            size += len(chunk)
+            chunks.append(chunk)
+    if size > MAX_INPUT_BYTES:
+        raise ValueError(
+            f"입력이 {MAX_INPUT_BYTES // (1024 * 1024)}MB 를 넘습니다 — 기간을 나눠 "
+            "여러 파일로 분석하세요."
+        )
+    return b"".join(chunks)
 
 
 def read_source(path: Union[str, Path]) -> Tuple[bytes, str, Optional[str]]:
@@ -993,12 +1366,7 @@ def read_source(path: Union[str, Path]) -> Tuple[bytes, str, Optional[str]]:
     입력 상한이 실제 사용자 경로에는 걸리지 않았다.
     """
     p = Path(path)
-    raw = p.read_bytes()
-    if len(raw) > MAX_INPUT_BYTES:
-        raise ValueError(
-            f"입력이 {MAX_INPUT_BYTES // (1024 * 1024)}MB 를 넘습니다 — 기간을 나눠 "
-            "여러 파일로 분석하세요."
-        )
+    raw = _read_limited(p)
     text = decode_bytes(raw)
     suffixes = [s.lower() for s in p.suffixes if s.lower() != ".gz"]
     return raw, text, (_EXT_HINT.get(suffixes[-1]) if suffixes else None)

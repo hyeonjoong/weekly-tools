@@ -191,7 +191,7 @@ def test_evidence_gap_table_only_lists_actual_gaps():
     arts = [_mk(f"e{i}", mesh=["EEG"], pts=["Observational Study"]) for i in range(8)]
     arts += [_mk(f"h{i}", mesh=["HRV"], pts=["Randomized Controlled Trial"]) for i in range(8)]
     md = render_markdown(build_report(arts, "q"))
-    _head, _, rest = md.partition("### 개입연구가 비어 있는 주제")
+    _head, _, rest = md.partition("### 개입연구가 상대적으로 적은 주제")
     gap_table = rest.split("_참고:")[0]
     assert "EEG" in gap_table          # 개입연구 0% → 진짜 공백
     assert "| HRV |" not in gap_table  # 개입연구 100% → 표에 없어야 한다
@@ -603,14 +603,16 @@ def test_file_is_read_only_once(tmp_path, monkeypatch, capsys):
     p.write_bytes(src)
 
     reads = []
-    real = Path.read_bytes
+    real = Path.open
 
     def counting(self, *a, **k):
+        # read_source 는 상한을 먼저 걸기 위해 open() 으로 청크 읽기를 한다 —
+        # 세어야 할 것은 "파일을 몇 번 여는가"다.
         if self == p:
             reads.append(1)
         return real(self, *a, **k)
 
-    monkeypatch.setattr(Path, "read_bytes", counting)
+    monkeypatch.setattr(Path, "open", counting)
     assert main(["--from-file", str(p), "--format", "json"]) == 0
     assert len(reads) == 1
 
@@ -622,7 +624,7 @@ def test_save_xml_writes_the_fetched_payload(tmp_path, monkeypatch, capsys):
     payload = EXAMPLE.read_text(encoding="utf-8")
 
     def fake(*a, **k):
-        return fetch_mod.FetchResult(xml_text=payload, total_available=18, n_fetched=18)
+        return fetch_mod.FetchResult(xml_text=payload, total_available=28, n_fetched=28)
 
     monkeypatch.setattr(fetch_mod, "fetch_articles", fake)
     out = tmp_path / "raw.xml"
@@ -669,7 +671,7 @@ def test_meta_never_contains_credentials(monkeypatch, capsys):
 
     def fake(*a, **k):
         return fetch_mod.FetchResult(
-            xml_text=EXAMPLE.read_text(encoding="utf-8"), total_available=18, n_fetched=18
+            xml_text=EXAMPLE.read_text(encoding="utf-8"), total_available=28, n_fetched=28
         )
 
     monkeypatch.setattr(fetch_mod, "fetch_articles", fake)

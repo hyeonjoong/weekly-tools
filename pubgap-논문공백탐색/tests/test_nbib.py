@@ -147,7 +147,7 @@ def test_load_articles_gzip_xml(tmp_path):
     gz = tmp_path / "s.xml.gz"
     gz.write_bytes(gzip.compress(xml.read_bytes()))
     arts = load_articles(str(gz))
-    assert len(arts) == 18
+    assert len(arts) == 28
 
 
 def test_load_articles_nbib(tmp_path):
