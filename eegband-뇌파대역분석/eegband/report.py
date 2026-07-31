@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 
 from . import __version__
 from .analyze import AnalysisResult, Spectrum
+from . import linenoise as _ln
 from .stats import TrendResult
 
 __all__ = ["render_text", "to_dict", "render_csv", "render_csv_batch",
@@ -47,6 +48,32 @@ def _num(x: Optional[float], d: int = 3) -> str:
     if ax != 0.0 and (ax >= 1e7 or ax < 10.0 ** -(d + 1)):
         return f"{x:.{max(2, d)}e}"
     return f"{x:.{d}f}"
+
+
+def _ratio(x: Optional[float]) -> str:
+    """A peak/background ratio, kept short. Round-off can make it astronomically big."""
+    if x is None or not math.isfinite(x):
+        return "n/a"
+    if x >= 1e5:
+        return f"{x:.1e}×"
+    return f"{x:,.0f}×" if x >= 1000 else f"{x:.1f}×"
+
+
+def _pval(x: Optional[float]) -> str:
+    """Format a p/q value: 4 decimals normally, scientific below 1e-4.
+
+    ``_num(p, 4)`` prints a p of 3e-5 as "0.0000", which reads as an exact zero;
+    a p-value is never exactly zero and the reader needs its order of magnitude.
+    """
+    if x is None:
+        return "n/a"
+    if not math.isfinite(x):
+        return "NaN"
+    if x <= 0.0:
+        return "<1e-300"
+    if x < 1e-4:
+        return f"{x:.2e}"
+    return f"{x:.4f}"
 
 
 def _hz(x: Optional[float]) -> str:
@@ -165,6 +192,7 @@ def render_text(res: AnalysisResult) -> str:
     if res.epochs:
         _render_epoch_table(L, res)
         _render_epoch_summary(L, res)
+        _render_baseline(L, res)
 
     # Warnings
     if res.warnings:
@@ -196,6 +224,116 @@ def _render_quality(L, res: AnalysisResult) -> None:
           "across the range)")
     for f in q.flags:
         L(f"    ⚠ {f}")
+    _render_line_noise(L, res)
+
+
+def _render_line_noise(L, res: AnalysisResult) -> None:
+    """Mains 50/60 Hz assessment, inside the signal-quality section."""
+    lnr = res.overall.line_noise
+    if lnr is None:
+        if res.line_freq_mode is None:
+            return
+        # Either no candidate window fits below Nyquist, or the spectrum carries no
+        # measurable background at all (a constant/zero-power channel).
+        df_bin = res.fs / res.nfft if res.nfft else float("nan")
+        if not _ln.windows_fit(res.fs, res.line_bw):
+            why = (f"창(±{res.line_bw:g} Hz)이 (0, {res.fs / 2.0:g}) Hz 안에 들어가는 "
+                   f"고조파가 없음 / no mains harmonic window of ±{res.line_bw:g} Hz "
+                   f"fits below Nyquist ({res.fs / 2.0:g} Hz)")
+        elif res.line_bw < df_bin:
+            why = (f"창(±{res.line_bw:g} Hz)이 주파수 해상도({df_bin:.3g} Hz)보다 좁음 / "
+                   f"the ±{res.line_bw:g} Hz window is narrower than the "
+                   f"{df_bin:.3g} Hz bin spacing")
+        elif res.fs / 2.0 <= 51.0:
+            why = ("Nyquist 가 너무 낮아 50/60 Hz 창이 들어가지 않음 / no 50/60 Hz "
+                   f"window fits below this recording's Nyquist ({res.fs / 2.0:g} Hz)")
+        else:
+            why = ("스펙트럼에 측정 가능한 배경이 없음(파워 0/상수 신호) / no measurable "
+                   "background in this spectrum (zero-power or constant signal)")
+        L(f"    전원잡음 / mains line noise: 확인 불가 — {why}.")
+        return
+    how = "auto-detected" if lnr.source == "auto" else "specified"
+    suspects = lnr.suspect_aliases()
+    if not lnr.detected:
+        # "≤ max_ratio" would contradict itself when a loud but *aliased* harmonic was
+        # deliberately not flagged, so quote the ratio of the harmonics that were
+        # actually eligible and name the suspects separately.
+        eligible = [p.ratio for p in lnr.peaks
+                    if p.ratio is not None and not (p.aliased and lnr.source == "auto")]
+        if eligible:
+            how_much = (f"peak/background ≤ {_num(max(eligible), 1)}× "
+                        f"(threshold {lnr.threshold:g}×)")
+        elif all(p.aliased for p in lnr.peaks):
+            # Every harmonic is an alias — there is no in-band fundamental to quote a
+            # ratio for, and "≤ n/a×" would read as a measurement.
+            how_much = (f"이 fs 에서는 대역 내 기본파가 없습니다 / no in-band "
+                        f"fundamental at fs={2 * lnr.nyquist_hz:g} Hz")
+        else:
+            # In-band harmonics exist but none could be measured — the usual cause is
+            # a --line-bw narrower than the bin spacing, leaving too few shoulder bins.
+            df_bin = res.fs / res.nfft if res.nfft else float("nan")
+            how_much = (f"측정 불가 — 창(±{lnr.bandwidth:g} Hz)이 주파수 해상도"
+                        f"({df_bin:.3g} Hz)에 비해 좁아 배경을 추정할 수 없습니다 / "
+                        f"not measurable: the ±{lnr.bandwidth:g} Hz window is too "
+                        f"narrow at a {df_bin:.3g} Hz bin spacing")
+        L(f"    전원잡음 / mains line noise: none detected at {lnr.f0:g} Hz ({how}); "
+          + how_much)
+        _render_suspects(L, lnr, suspects)
+        return
+    state = ("제거됨 / REMOVED by spectral interpolation" if lnr.removed
+             else "검출됨 (제거 안 함) / detected, NOT removed — add --notch")
+    L(f"    전원잡음 / mains line noise @ {lnr.f0:g} Hz ({how}) — {state}")
+    L(f"      {'harmonic':<12}{'freq(Hz)':>10}{'peak/bg':>10}{'excess(µV²)':>14}"
+      f"   {'bands affected'}")
+    band_names = [(n, lo, hi) for n, lo, hi in res.bands]
+    for p in lnr.peaks:
+        tag = f"×{p.order}" + (" (aliased)" if p.aliased else "")
+        hit = [n for n, lo, hi in band_names
+               if min(hi, p.freq_hz + lnr.bandwidth) - max(lo, p.freq_hz -
+                                                           lnr.bandwidth) > 0]
+        if not p.detected:
+            note = "-"
+        elif hit:
+            note = "← " + ", ".join(hit)
+        else:
+            note = "← (모든 대역 밖 / outside every reported band)"
+        L(f"      {tag:<12}{p.freq_hz:>10.4g}{_num(p.ratio, 1):>10}"
+          f"{_num(p.excess_uv2, 3):>14}   {note}")
+    # How much of each band is electrical rather than neural.
+    contam = []
+    for name, lo, hi in band_names:
+        bp = next((b for b in res.overall.band_powers if b.name == name), None)
+        if bp is None:
+            continue
+        exc = lnr.excess_in(lo, hi)
+        if exc <= 0:
+            continue
+        # After removal the reported power no longer contains the excess, so express
+        # it against what the band WOULD have been.
+        base = bp.absolute + exc if lnr.removed else bp.absolute
+        if base > 0:
+            contam.append(f"{name} {min(exc / base, 1.0) * 100:.1f}%")
+    if contam:
+        verb = "제거된 비율 / share removed" if lnr.removed else \
+            "전기잡음 비율 / share that is electrical"
+        L(f"      {verb}: {', '.join(contam)}")
+    if any(p.aliased and p.detected for p in lnr.peaks):
+        L(f"      ⚠ {lnr.f0:g} Hz > Nyquist {lnr.nyquist_hz:g} Hz — the peak is an "
+          "ALIAS folded down from the mains. At that frequency an alias and a real "
+          "rhythm are the same measurement, so removing it also removes any genuine "
+          "activity there.")
+    _render_suspects(L, lnr, suspects)
+
+
+def _render_suspects(L, lnr, suspects) -> None:
+    """Loud aliased harmonics that auto-detection refused to flag (never notched)."""
+    if not suspects:
+        return
+    where = ", ".join(f"{p.freq_hz:.4g} Hz ({_ratio(p.ratio)}, {p.nominal_hz:g} Hz "
+                      "접힘)" for p in suspects)
+    L(f"      ⓘ 에일리어싱 의심 / suspected mains alias at {where} — 자동 판정에서 "
+      "제외했습니다(그 자리에서는 전원 접힘과 진짜 리듬이 같은 측정값). 제거하려면 "
+      f"--line-freq {lnr.f0:g} 를 명시하세요.")
 
 
 def render_comparison(results: List[AnalysisResult]) -> str:
@@ -464,6 +602,73 @@ def _render_epoch_summary(L, res: AnalysisResult) -> None:
     _render_trends(L, res)
 
 
+def _endpoint_meta(key: str):
+    """(label, display scale, unit) for any endpoint key, including per-band ones.
+
+    ``_ENDPOINT_META`` only names the core endpoints; the per-band ``alpha_relative`` /
+    ``alpha_absolute_uv2`` keys are generated from whatever ``--bands`` were used, so
+    their units are derived from the suffix rather than tabulated.
+    """
+    meta = _ENDPOINT_META.get(key)
+    if meta:
+        return meta[0], meta[1], meta[2]
+    if key.endswith("_relative"):
+        return f"{key[:-len('_relative')]} relative", 100.0, "%"
+    if key.endswith("_absolute_uv2"):
+        return f"{key[:-len('_absolute_uv2')]} absolute", 1.0, "µV²"
+    return key, 1.0, ""
+
+
+def _render_baseline(L, res: AnalysisResult) -> None:
+    """Section [7]: each endpoint's change from this recording's own baseline."""
+    if res.baseline_sec is None or not res.baseline_contrasts:
+        return
+    L("")
+    L(f"[7] 기저 대비 변화 / Change from baseline  (baseline = 0–"
+      f"{res.baseline_sec:g} s)")
+    L(f"    baseline epochs = {res.n_baseline},  post epochs = {res.n_post},  "
+      f"BH-FDR family m = {res.baseline_family_size}")
+    L(f"      {'endpoint':<20}{'baseline':>12}{'post':>12}{'Δ':>12}{'Δ%':>9}"
+      f"{'95% CI (Δ)':>26}{'g':>9}{'n_eff':>12}{'df':>7}{'p':>12}{'q(FDR)':>12}")
+    keys = [k for k in _TEXT_ENDPOINTS if k in res.baseline_contrasts]
+    keys += [k for k in res.baseline_contrasts if k not in keys]
+    any_adj = False
+    for key in keys:
+        cr = res.baseline_contrasts[key]
+        label, scale, unit = _endpoint_meta(key)
+        any_adj = any_adj or cr.adjusted
+        star = "*" if (math.isfinite(cr.q) and cr.q < 0.05) else " "
+        # Δ% is undefined (not zero, not NaN-worthy) when the baseline mean is not a
+        # positive quantity — an exponent that averages -0.01 has no meaningful
+        # "percent change".
+        pct = _num(cr.pct_change, 1) if math.isfinite(cr.pct_change) else "n/a"
+        L(f"      {label:<20}{_num(cr.mean_a * scale, 3):>12}"
+          f"{_num(cr.mean_b * scale, 3):>12}{_num(cr.diff * scale, 3):>12}"
+          f"{pct:>9}"
+          f"{_fmt_ci(cr.ci_lo * scale, cr.ci_hi * scale):>26}"
+          f"{_num(cr.hedges_g, 2):>9}"
+          f"{f'{cr.n_eff_a:.1f}/{cr.n_eff_b:.1f}':>12}{_num(cr.df, 1):>7}"
+          f"{_pval(cr.p):>12}{_pval(cr.q):>12}{star}"
+          + (f"  {unit}" if unit else ""))
+    L("      (Welch t-검정, Hedges' g 효과크기, BH-FDR 보정 q; * = q<0.05 / Welch "
+      "t-test, Hedges' g, Benjamini–Hochberg q over the m endpoints above)")
+    L("      (g 는 이 기록의 에폭간 변동으로 표준화한 값입니다 — 문헌의 피험자간 g 와 "
+      "직접 비교하지 마세요 / g is standardised against within-recording epoch "
+      "variability, NOT comparable to a between-subject g)")
+    L("      (n_eff = 자기상관 보정 유효표본수(기저/이후). n_eff = n 이면 보정이 "
+      "일어나지 않은 것입니다 — ρ̂≤0 이거나 창이 짧아 하한 2에 걸린 경우 / n_eff = n "
+      "means NO adjustment was applied)")
+    if any_adj:
+        L("      (연속 에폭은 독립이 아니므로 AR(1) 유효표본수로 각 군의 분산·SE·CI와 "
+          "자유도를 보정했습니다. 보정 폭은 ρ̂ 와 에폭 수에 따라 달라지며, 창이 짧으면 "
+          "거의 0일 수 있습니다 / the AR(1) effective n widens each group's SE and CI "
+          "and lowers the d.o.f.; the size of that adjustment depends on ρ̂ and can be "
+          "negligible for short windows)")
+    L("      (이는 한 기록 내 전·후 비교입니다. 위약 대조·피험자간 추론이 아닙니다 / "
+      "a within-recording before/after contrast, NOT a placebo-controlled or "
+      "between-subject inference)")
+
+
 def sp_rel(spec: Spectrum, name: str) -> float:
     for bp in spec.band_powers:
         if bp.name == name:
@@ -528,6 +733,47 @@ def _aperiodic_dict(spec: Spectrum) -> Optional[Dict[str, Any]]:
         "mode": fit.mode,
         "n_trim_iterations": fit.n_trim_iter,
         "model": "psd(f) = 10^offset * f^(-exponent)",
+    }
+
+
+def _line_noise_dict(spec: Spectrum, bands) -> Optional[Dict[str, Any]]:
+    lnr = spec.line_noise
+    if lnr is None:
+        return None
+    return {
+        "fundamental_hz": lnr.f0,
+        "source": lnr.source,
+        "bandwidth_hz": lnr.bandwidth,
+        "ratio_threshold": lnr.threshold,
+        "detected": lnr.detected,
+        "removed": lnr.removed,
+        "max_ratio": lnr.max_ratio,
+        "harmonics": [
+            {"order": p.order, "nominal_hz": p.nominal_hz, "freq_hz": p.freq_hz,
+             "aliased": p.aliased, "ratio": p.ratio, "background_uv2_per_hz":
+             p.background, "peak_uv2_per_hz": p.peak_psd,
+             "excess_uv2": p.excess_uv2, "detected": p.detected}
+            for p in lnr.peaks
+        ],
+        "excess_uv2_by_band": {n: lnr.excess_in(lo, hi) for n, lo, hi in bands},
+        "note": ("excess_uv2 is the power inside +-bandwidth of the harmonic above the "
+                 "local background; when removed=true it has already been subtracted "
+                 "from every band power reported here"),
+    }
+
+
+def _contrast_dict(cr) -> Dict[str, Any]:
+    return {
+        "n_baseline": cr.n_a, "n_post": cr.n_b,
+        "mean_baseline": cr.mean_a, "mean_post": cr.mean_b,
+        "sd_baseline": cr.sd_a, "sd_post": cr.sd_b,
+        "diff": cr.diff, "pct_change": cr.pct_change,
+        "se": cr.se, "df": cr.df, "t": cr.t, "p_two_sided": cr.p,
+        "ci_lo": cr.ci_lo, "ci_hi": cr.ci_hi,
+        "hedges_g": cr.hedges_g,
+        "n_eff_baseline": cr.n_eff_a, "n_eff_post": cr.n_eff_b,
+        "autocorr_adjusted": cr.adjusted,
+        "q_bh_fdr": cr.q,
     }
 
 
@@ -604,6 +850,7 @@ def to_dict(res: AnalysisResult) -> Dict[str, Any]:
                               if spec.band_hi >= spec.band_lo else None),
             "aperiodic_half_range_exponents": (
                 list(spec.aperiodic_halves) if spec.aperiodic_halves else None),
+            "line_noise": _line_noise_dict(spec, res.bands),
         }
 
     out: Dict[str, Any] = {
@@ -630,6 +877,9 @@ def to_dict(res: AnalysisResult) -> Dict[str, Any]:
             "aperiodic_fit_range_hz": (list(res.fit_range) if res.fit_range
                                        else None),
             "swa_band_hz": list(res.swa_band) if res.swa_band else None,
+            "line_freq_mode": res.line_freq_mode,
+            "line_bandwidth_hz": res.line_bw,
+            "notch_applied": res.notch,
             "analysis_start_sec": res.start_offset_sec,
             "analysed_duration_sec": res.duration_sec,
             "nyquist_hz": res.fs / 2.0,
@@ -687,6 +937,24 @@ def to_dict(res: AnalysisResult) -> Dict[str, Any]:
                     "normal approximation) with a Theil-Sen slope per second; x is "
                     "the epoch start time in seconds.")
             out["epoch_summary"] = summary
+        if res.baseline_sec is not None:
+            out["baseline_contrast"] = {
+                "baseline_sec": res.baseline_sec,
+                "n_baseline": res.n_baseline,
+                "n_post": res.n_post,
+                "bh_fdr_family_size": res.baseline_family_size,
+                "endpoints": {k: _contrast_dict(c)
+                              for k, c in res.baseline_contrasts.items()},
+                "note": ("post-baseline vs baseline epochs of the SAME recording: "
+                         "Welch t-test on AR(1) effective sample sizes (consecutive "
+                         "epochs are not independent), Hedges' g, and Benjamini-"
+                         "Hochberg q over bh_fdr_family_size endpoints (structural "
+                         "duplicates such as swa_* vs delta_* are counted once and "
+                         "share a q). Band-power endpoints are strongly correlated, "
+                         "so BH is approximate here. This is a "
+                         "within-recording before/after contrast, not a placebo-"
+                         "controlled or between-subject inference."),
+            }
     # Non-finite floats (a NaN rho for n<3, NaN ratios for a constant channel) are
     # converted to null here, so json.dumps(..., allow_nan=False) always succeeds and
     # strict readers (R jsonlite, jq, JS) can load the file.
@@ -768,12 +1036,21 @@ def _csv_provenance(res: AnalysisResult) -> str:
     grad = res.max_grad if (rej_on and res.max_grad is not None) else ""
     window = (f"{res.start_offset_sec:g}+{res.duration_sec:g}s"
               if res.start_offset_sec else f"0+{res.duration_sec:g}s")
+    # Every parameter that can change a number in the table must appear here, or two
+    # exports produced under different settings are indistinguishable in an audit.
+    epoch = f"{res.epoch_sec:g}s" if res.epoch_sec else "none"
+    line = (f"{res.line_freq_mode}" if res.line_freq_mode else "off")
+    notched = int(bool(res.overall.line_noise and res.overall.line_noise.removed))
+    baseline = f"{res.baseline_sec:g}s" if res.baseline_sec is not None else "none"
     return (f"# eegband v{__version__} | fs_hz={res.fs:g} ({res.fs_source}) | "
             f"nperseg={res.nperseg} noverlap={res.noverlap} nfft={res.nfft} "
             f"n_seg={res.n_seg} | "
             f"detrend={res.detrend} average={res.average} | "
             f"sef={res.sef_frac * 100:g}% | bands={bands_str} | swa={swa} | "
             f"aperiodic={res.aperiodic_mode or 'off'} fit_range={fit_range} | "
+            f"epoch={epoch} | "
+            f"line_freq={line} line_bw={res.line_bw:g} notch={int(res.notch)} "
+            f"notch_applied={notched} | baseline={baseline} | "
             f"max_amp={amp} max_grad={grad} qc_pass={int(res.qc_pass)} | "
             f"window={window} | n_interpolated={res.n_filled} | "
             f"rel_columns=fraction(0-1) | "
@@ -902,6 +1179,10 @@ _SUMMARY_STAT_KEYS = ("mean", "sd", "sem", "ci_lo", "ci_hi", "median", "q1", "q3
 _SUMMARY_TREND_KEYS = ("theil_sen_slope_per_sec", "slope_ci_lo_per_sec",
                        "slope_ci_hi_per_sec", "kendall_tau_b", "mann_kendall_p")
 
+# Per-endpoint baseline-vs-post columns (only emitted when --baseline was used).
+_BASELINE_KEYS = ("mean", "post_mean", "delta", "pct_change", "ci_lo", "ci_hi",
+                  "hedges_g", "p", "q_fdr")
+
 
 def render_csv_summary(results: List[AnalysisResult], comment: bool = True,
                        with_series_cols: bool = True) -> str:
@@ -926,6 +1207,11 @@ def render_csv_summary(results: List[AnalysisResult], comment: bool = True,
     for name in band_names:
         for suffix in ("absolute_uv2", "relative"):
             k = f"{name}_{suffix}"
+            # A band named like a core endpoint ('swa') would otherwise emit the same
+            # column name twice; analyze._epoch_endpoints already drops the collision,
+            # so keep this list in step with it.
+            if k in keys:
+                continue
             if any(k in r.epoch_summary for r in results):
                 keys.append(k)
 
@@ -941,12 +1227,23 @@ def render_csv_summary(results: List[AnalysisResult], comment: bool = True,
                # whole-recording (not per-epoch) values, for reference
                "overall_total_uv2", "overall_swa_uv2", "overall_swa_rel",
                "overall_sef_hz", "overall_entropy", "overall_ap_exponent",
-               "overall_ap_r2"]
+               "overall_ap_r2",
+               # mains line noise, so a row can never be pooled with one that was
+               # cleaned differently
+               "line_freq_hz", "line_detected", "line_notched", "line_max_ratio",
+               "line_excess_uv2"]
+    # Baseline-vs-post columns only exist when --baseline was used somewhere.
+    with_baseline = any(r.baseline_contrasts for r in results)
+    if with_baseline:
+        header += ["baseline_sec", "n_baseline_epochs", "n_post_epochs"]
     for k in keys:
         for stat in _SUMMARY_STAT_KEYS:
             header.append(f"{k}_{stat}")
         for stat in _SUMMARY_TREND_KEYS:
             header.append(f"{k}_{stat}")
+        if with_baseline:
+            for stat in _BASELINE_KEYS:
+                header.append(f"{k}_base_{stat}")
     header = [_text_cell(h) for h in header]
 
     buf = io.StringIO()
@@ -979,6 +1276,17 @@ def render_csv_summary(results: List[AnalysisResult], comment: bool = True,
             _cell(spec.sef), _cell(spec.entropy),
             _cell(fit.exponent if fit else None), _cell(fit.r2 if fit else None),
         ]
+        lnr = spec.line_noise
+        row += [
+            _cell(lnr.f0 if lnr else None),
+            ("" if lnr is None else ("1" if lnr.detected else "0")),
+            ("" if lnr is None else ("1" if lnr.removed else "0")),
+            _cell(lnr.max_ratio if lnr else None),
+            _cell(sum(lnr.excess_in(lo, hi) for _, lo, hi in res.bands)
+                  if lnr else None),
+        ]
+        if with_baseline:
+            row += [_cell(res.baseline_sec), str(res.n_baseline), str(res.n_post)]
         for k in keys:
             st = res.epoch_summary.get(k)
             for stat in _SUMMARY_STAT_KEYS:
@@ -989,6 +1297,14 @@ def render_csv_summary(results: List[AnalysisResult], comment: bool = True,
             else:
                 row += [_cell(tr.slope), _cell(tr.slope_lo), _cell(tr.slope_hi),
                         _cell(tr.tau), _cell(tr.p)]
+            if with_baseline:
+                cr = res.baseline_contrasts.get(k)
+                if cr is None:
+                    row += [""] * len(_BASELINE_KEYS)
+                else:
+                    row += [_cell(cr.mean_a), _cell(cr.mean_b), _cell(cr.diff),
+                            _cell(cr.pct_change), _cell(cr.ci_lo), _cell(cr.ci_hi),
+                            _cell(cr.hedges_g), _cell(cr.p), _cell(cr.q)]
         w.writerow(row)
     return buf.getvalue()
 

@@ -32,6 +32,11 @@ __all__ = [
     "theil_sen_slope",
     "trend",
     "MAX_EXACT_TREND_N",
+    "t_quantile",
+    "student_t_sf",
+    "ContrastResult",
+    "welch_ttest",
+    "bh_fdr",
 ]
 
 # Two-sided 97.5% Student-t critical values for df = 1..30; expansion beyond.
@@ -48,6 +53,21 @@ _Z975 = 1.959963984540054  # standard-normal 0.975 quantile
 # Mann–Kendall / Theil–Sen are O(n²); above this many epochs they are skipped rather
 # than making the tool hang (a whole night of 30 s epochs is ~1000).
 MAX_EXACT_TREND_N = 1500
+
+
+def _safe_fsum(terms) -> float:
+    """``math.fsum`` that returns NaN instead of raising on an overflowed series.
+
+    Squared deviations of a recording with amplitudes around 1e150 overflow to ``inf``;
+    ``math.fsum`` then raises ``ValueError: -inf + inf`` and the whole run dies with a
+    traceback. A variance that overflowed is simply undefined — return NaN and let the
+    caller report it as such (``analyze`` already warns that the spectrum overflowed).
+    """
+    try:
+        total = math.fsum(terms)
+    except (ValueError, OverflowError):
+        return float("nan")
+    return total
 
 
 def t_crit(df: int) -> float:
@@ -97,10 +117,12 @@ def lag1_autocorr(vals: Sequence[float]) -> Optional[float]:
     if n < 3:
         return None
     mean = math.fsum(vals) / n
-    denom = math.fsum((v - mean) ** 2 for v in vals)
-    if denom <= 0:
+    denom = _safe_fsum((v - mean) * (v - mean) for v in vals)
+    if not math.isfinite(denom) or denom <= 0:
         return None
-    num = math.fsum((vals[i] - mean) * (vals[i + 1] - mean) for i in range(n - 1))
+    num = _safe_fsum((vals[i] - mean) * (vals[i + 1] - mean) for i in range(n - 1))
+    if not math.isfinite(num):
+        return None
     return num / denom
 
 
@@ -142,7 +164,7 @@ def summary_stats(vals: Sequence[float]) -> Dict[str, float]:
     nan = float("nan")
     mean = math.fsum(vals) / n
     if n > 1:
-        var = math.fsum((v - mean) ** 2 for v in vals) / (n - 1)
+        var = _safe_fsum((v - mean) * (v - mean) for v in vals) / (n - 1)
         sd = math.sqrt(var)
         sem = sd / math.sqrt(n)
         half = t_crit(n - 1) * sem
@@ -306,3 +328,235 @@ def trend(vals: Sequence[float], xs: Optional[Sequence[float]] = None,
     return TrendResult(n=n, s=int(mk["s"]), var_s=mk["var_s"], z=mk["z"], p=mk["p"],
                        tau=mk["tau"], slope=ts["slope"], slope_lo=ts["slope_lo"],
                        slope_hi=ts["slope_hi"], x_unit=x_unit, exact=True)
+
+
+# ---------------------------------------------------------------------------
+# Two-group contrast (baseline vs post) — Welch's t with an AR(1) correction.
+# ---------------------------------------------------------------------------
+
+def _betacf(a: float, b: float, x: float) -> float:
+    """Continued fraction for the incomplete beta function (Lentz's algorithm)."""
+    tiny = 1e-300
+    qab, qap, qam = a + b, a + 1.0, a - 1.0
+    c = 1.0
+    d = 1.0 - qab * x / qap
+    if abs(d) < tiny:
+        d = tiny
+    d = 1.0 / d
+    h = d
+    for m in range(1, 300):
+        m2 = 2 * m
+        aa = m * (b - m) * x / ((qam + m2) * (a + m2))
+        d = 1.0 + aa * d
+        if abs(d) < tiny:
+            d = tiny
+        c = 1.0 + aa / c
+        if abs(c) < tiny:
+            c = tiny
+        d = 1.0 / d
+        h *= d * c
+        aa = -(a + m) * (qab + m) * x / ((a + m2) * (qap + m2))
+        d = 1.0 + aa * d
+        if abs(d) < tiny:
+            d = tiny
+        c = 1.0 + aa / c
+        if abs(c) < tiny:
+            c = tiny
+        d = 1.0 / d
+        delta = d * c
+        h *= delta
+        if abs(delta - 1.0) < 3e-16:
+            break
+    return h
+
+
+def _betainc(a: float, b: float, x: float) -> float:
+    """Regularised incomplete beta I_x(a, b)."""
+    if x <= 0.0:
+        return 0.0
+    if x >= 1.0:
+        return 1.0
+    lbeta = (math.lgamma(a + b) - math.lgamma(a) - math.lgamma(b)
+             + a * math.log(x) + b * math.log1p(-x))
+    front = math.exp(lbeta)
+    if x < (a + 1.0) / (a + b + 2.0):
+        return front * _betacf(a, b, x) / a
+    return 1.0 - math.exp(
+        math.lgamma(a + b) - math.lgamma(a) - math.lgamma(b)
+        + b * math.log1p(-x) + a * math.log(x)) * _betacf(b, a, 1.0 - x) / b
+
+
+def student_t_sf(t: float, df: float) -> float:
+    """Upper-tail probability P(T > t) of Student's t with ``df`` d.o.f.
+
+    Exact (to double precision) via the regularised incomplete beta function, so a
+    fractional ``df`` — which Welch's approximation and the AR(1) effective-sample-size
+    correction both produce — is handled properly instead of being rounded to a table
+    entry.
+    """
+    if df <= 0 or not math.isfinite(df):
+        return float("nan")
+    if not math.isfinite(t):
+        return 0.0 if t > 0 else 1.0
+    x = df / (df + t * t)
+    p_tail = 0.5 * _betainc(0.5 * df, 0.5, x)   # P(|T| > |t|) / 2
+    return p_tail if t > 0 else 1.0 - p_tail
+
+
+def t_quantile(p: float, df: float) -> float:
+    """Two-sided (1−p) critical value of Student's t, i.e. the ``1 − p/2`` quantile.
+
+    ``t_quantile(0.05, df)`` is the usual 95% CI multiplier. Solved by bisection on
+    :func:`student_t_sf`, which keeps fractional ``df`` exact (``t_crit`` is a 3-dp
+    table plus an asymptotic expansion, and is kept for the existing call sites).
+    """
+    if df <= 0 or not math.isfinite(df):
+        return float("nan")
+    if not (0.0 < p < 1.0):
+        raise ValueError(f"p must be in (0, 1), got {p!r}")
+    target = p / 2.0
+    lo, hi = 0.0, 1.0
+    # Grow the bracket until it actually contains the quantile. A fixed cap would
+    # silently return the cap itself for heavy tails (df<1) or tiny p, where the true
+    # quantile is astronomically large -- a wrong number with no error.
+    for _ in range(4000):
+        if student_t_sf(hi, df) <= target:
+            break
+        hi *= 2.0
+    else:
+        return float("inf")
+    for _ in range(200):
+        mid = 0.5 * (lo + hi)
+        if student_t_sf(mid, df) > target:
+            lo = mid
+        else:
+            hi = mid
+        if hi - lo < 1e-12 * max(1.0, hi):
+            break
+    return 0.5 * (lo + hi)
+
+
+@dataclass
+class ContrastResult:
+    """Welch two-sample contrast between a baseline and a post-baseline series."""
+    n_a: int                 # baseline epochs
+    n_b: int                 # post epochs
+    mean_a: float
+    mean_b: float
+    sd_a: float
+    sd_b: float
+    diff: float              # mean_b − mean_a
+    pct_change: float        # 100·diff/mean_a (NaN when mean_a <= 0)
+    se: float                # SE of the difference
+    df: float                # Welch–Satterthwaite d.o.f. (fractional)
+    t: float
+    p: float                 # two-sided
+    ci_lo: float
+    ci_hi: float
+    hedges_g: float          # bias-corrected standardised mean difference
+    n_eff_a: float           # AR(1) effective n actually used
+    n_eff_b: float
+    adjusted: bool           # True when an autocorrelation correction was applied
+    q: float = float("nan")  # Benjamini–Hochberg FDR q-value (filled by the caller)
+
+
+def welch_ttest(a: Sequence[float], b: Sequence[float],
+                adjust_autocorr: bool = True) -> Optional[ContrastResult]:
+    """Welch's unequal-variance t-test of ``b`` against ``a`` (b − a).
+
+    Consecutive EEG epochs are strongly serially correlated, so with
+    ``adjust_autocorr=True`` (the default) each group's variance of the mean uses its
+    **AR(1) effective sample size** ``n_eff = n(1−ρ̂)/(1+ρ̂)`` instead of ``n``. Without
+    that, a 30 s-epoch contrast over a few minutes of EEG returns p-values that are
+    wrong by orders of magnitude — the epochs are not independent observations.
+
+    Hedges' g uses the pooled SD of the *raw* epoch values with the small-sample
+    correction ``1 − 3/(4·df_pool − 1)``; it describes the size of the shift in SD
+    units and is deliberately **not** autocorrelation-adjusted (an effect size is a
+    property of the distributions, not of how many independent draws were taken).
+
+    Returns None when either group has fewer than 2 values or both are constant.
+    """
+    xs, ys = [float(v) for v in a], [float(v) for v in b]
+    na, nb = len(xs), len(ys)
+    if na < 2 or nb < 2:
+        return None
+    mean_a = math.fsum(xs) / na
+    mean_b = math.fsum(ys) / nb
+    var_a = _safe_fsum((v - mean_a) * (v - mean_a) for v in xs) / (na - 1)
+    var_b = _safe_fsum((v - mean_b) * (v - mean_b) for v in ys) / (nb - 1)
+    if not (math.isfinite(var_a) and math.isfinite(var_b)):
+        return None            # variance overflowed: the contrast is undefined
+    if var_a <= 0 and var_b <= 0:
+        return None            # two constant series: no variance to test against
+    rho_a = lag1_autocorr(xs) if adjust_autocorr else None
+    rho_b = lag1_autocorr(ys) if adjust_autocorr else None
+    eff_a = effective_n(na, rho_a) if adjust_autocorr else float(na)
+    eff_b = effective_n(nb, rho_b) if adjust_autocorr else float(nb)
+    adjusted = bool(adjust_autocorr and (eff_a < na or eff_b < nb))
+
+    sa2 = var_a / eff_a
+    sb2 = var_b / eff_b
+    se = math.sqrt(sa2 + sb2)
+    denom = ((sa2 * sa2) / max(eff_a - 1.0, 1e-12)
+             + (sb2 * sb2) / max(eff_b - 1.0, 1e-12))
+    df = (((sa2 + sb2) * (sa2 + sb2)) / denom) if denom > 0 else float("nan")
+    diff = mean_b - mean_a
+    if se > 0 and math.isfinite(df) and df > 0:
+        t = diff / se
+        p = 2.0 * student_t_sf(abs(t), df)
+        half = t_quantile(0.05, df) * se
+        ci_lo, ci_hi = diff - half, diff + half
+    else:
+        t = p = ci_lo = ci_hi = float("nan")
+
+    df_pool = na + nb - 2
+    pooled_var = (((na - 1) * var_a + (nb - 1) * var_b) / df_pool
+                  if df_pool > 0 else float("nan"))
+    if pooled_var and pooled_var > 0:
+        d = diff / math.sqrt(pooled_var)
+        g = d * (1.0 - 3.0 / (4.0 * df_pool - 1.0)) if df_pool > 1 else d
+    else:
+        g = float("nan")
+
+    pct = (100.0 * diff / mean_a) if mean_a > 0 else float("nan")
+    return ContrastResult(
+        n_a=na, n_b=nb, mean_a=mean_a, mean_b=mean_b,
+        sd_a=math.sqrt(var_a), sd_b=math.sqrt(var_b), diff=diff, pct_change=pct,
+        se=se, df=df, t=t, p=p, ci_lo=ci_lo, ci_hi=ci_hi, hedges_g=g,
+        n_eff_a=eff_a, n_eff_b=eff_b, adjusted=adjusted)
+
+
+def bh_fdr(pvals: Sequence[float]) -> List[float]:
+    """Benjamini–Hochberg q-values for a family of p-values.
+
+    Every band and every derived endpoint is tested against baseline in one run, so
+    the raw p-values are a multiple-comparison family; reporting them unadjusted would
+    manufacture a "significant" band out of five. Non-finite p-values pass through as
+    NaN and are excluded from the family size, since a test that could not be computed
+    is not a test that was performed.
+    """
+    def _finite(v) -> bool:
+        # Accept any real number, not just `float`: an integer 1 or a numpy float is a
+        # perfectly good p-value and dropping it would shrink the family silently.
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            return False
+        try:
+            return math.isfinite(float(v))
+        except (TypeError, ValueError):
+            return False
+
+    pvals = [float(v) if _finite(v) else v for v in pvals]
+    idx = [i for i, p in enumerate(pvals) if _finite(p)]
+    out = [float("nan")] * len(pvals)
+    m = len(idx)
+    if m == 0:
+        return out
+    order = sorted(idx, key=lambda i: pvals[i])
+    prev = 1.0
+    for rank in range(m, 0, -1):
+        i = order[rank - 1]
+        q = min(prev, pvals[i] * m / rank)
+        out[i] = min(max(q, 0.0), 1.0)
+        prev = out[i]
+    return out

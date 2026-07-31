@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from . import aperiodic as ap
+from . import linenoise as ln
 from . import spectral, stats
 from .dataio import infer_fs
 
@@ -73,6 +74,8 @@ class Spectrum:
     osc_total: Optional[float] = None  # total oscillatory power over the fit range, µV²
     # exponents of the lower/upper half of the fit range — a knee makes them differ
     aperiodic_halves: Optional[Tuple[float, float]] = None
+    # Mains line-noise assessment of this spectrum (None = not checked).
+    line_noise: Optional[ln.LineNoiseReport] = None
 
     def power_by_name(self) -> Dict[str, float]:
         return {bp.name: bp.absolute for bp in self.band_powers}
@@ -152,6 +155,17 @@ class AnalysisResult:
     epoch_trends: Dict[str, "stats.TrendResult"] = field(default_factory=dict)
     n_summary: int = 0                    # epochs behind epoch_summary/epoch_trends
     label: Optional[str] = None           # channel/series label (multi-channel input)
+    # Mains line noise: what was asked for, and what was done about it.
+    line_freq_mode: Optional[str] = None  # "auto" / "50" / "60" / None (=off)
+    line_bw: float = ln.DEFAULT_BW
+    notch: bool = False                   # --notch requested
+    # Baseline-vs-post contrast (pharmacodynamics): per-endpoint Welch contrasts of
+    # the epochs after ``baseline_sec`` against the epochs before it.
+    baseline_sec: Optional[float] = None
+    baseline_contrasts: Dict[str, "stats.ContrastResult"] = field(default_factory=dict)
+    n_baseline: int = 0                   # kept epochs in the baseline window
+    n_post: int = 0                       # kept epochs after it
+    baseline_family_size: int = 0         # m used for the BH-FDR correction
 
     def summary_epochs(self) -> List[EpochResult]:
         """Epochs behind the summary: kept ones, or all if every epoch was rejected."""
@@ -306,10 +320,36 @@ def _spectrum(values: Sequence[float], fs: float,
               aperiodic_mode: Optional[str] = "robust",
               fit_range: Optional[Tuple[float, float]] = None,
               swa_band: Optional[Tuple[float, float]] = None,
+              line_freq: Optional[object] = "auto",
+              line_bw: float = ln.DEFAULT_BW,
+              notch: bool = False,
+              line_targets: Optional[List[float]] = None,
+              line_source: Optional[str] = None,
               ) -> Tuple[Spectrum, Dict[str, int]]:
     freqs, psd, meta = spectral.welch_psd(values, fs, nperseg=nperseg,
                                           noverlap=noverlap, detrend=detrend,
                                           average=average)
+
+    # ---- mains line noise ------------------------------------------------------
+    # Measured on the RAW spectrum, then (with --notch) removed from it before any
+    # band power, SEF, entropy or 1/f fit is derived, so every downstream endpoint
+    # reflects the same, single cleaning decision.
+    lnr: Optional[ln.LineNoiseReport] = None
+    if line_freq is not None and all(math.isfinite(p) for p in psd):
+        f0 = None if line_freq == "auto" else float(line_freq)  # type: ignore[arg-type]
+        lnr = ln.analyse_line_noise(freqs, psd, fs, f0=f0, bw=line_bw,
+                                    source=line_source)
+        # Which frequencies to remove is decided ONCE for the recording (see analyze);
+        # an epoch must not re-decide. A 10 s epoch averages only a handful of Welch
+        # segments, so a peak/background ratio of 3 is crossed by chance in ~20% of
+        # clean epochs — re-deciding per epoch would notch a random subset of them and
+        # make epochs incomparable with each other and with the overall spectrum.
+        targets = lnr.targets() if (lnr is not None and line_targets is None) \
+            else (line_targets or [])
+        if lnr is not None and notch and targets:
+            psd, n_rep = ln.notch_psd(freqs, psd, targets, line_bw)
+            lnr.removed = n_rep > 0
+
     band_lo = min(b[1] for b in bands)
     band_hi = min(max(b[2] for b in bands), freqs[-1])
     total = spectral.total_power(freqs, psd, band_lo, band_hi)
@@ -398,7 +438,7 @@ def _spectrum(values: Sequence[float], fs: float,
                     swa_abs=swa_abs, swa_rel=swa_rel, band_lo=band_lo,
                     band_hi=band_hi, rel_sum=rel_sum, dominant_tie=dominant_tie,
                     entropy=entropy, aperiodic=fit, osc_total=osc_total,
-                    aperiodic_halves=halves,
+                    aperiodic_halves=halves, line_noise=lnr,
                     swa_lo=swa_lo, swa_hi=swa_hi, swa_source=swa_source)
     return spec, meta
 
@@ -416,6 +456,10 @@ def analyze(values: Sequence[float], fs: float = 128.0,
             fit_range: Optional[Tuple[float, float]] = None,
             swa_band: Optional[Tuple[float, float]] = None,
             label: Optional[str] = None,
+            line_freq: Optional[object] = "auto",
+            line_bw: float = ln.DEFAULT_BW,
+            notch: bool = False,
+            baseline_sec: Optional[float] = None,
             ) -> AnalysisResult:
     """Run the full band-power analysis. See module docstring for what it computes.
 
@@ -425,6 +469,14 @@ def analyze(values: Sequence[float], fs: float = 128.0,
     swa_band : (lo, hi) Hz defining slow-wave activity explicitly. By default SWA is
         the band named ``delta``; with custom ``bands`` that have no such band the
         endpoint is reported as undefined rather than as 0.
+    line_freq : ``"auto"`` (default) detects 50 vs 60 Hz mains and *reports* it;
+        a number forces that fundamental; ``None`` skips the check entirely.
+    line_bw : half-width (Hz) of each line-noise window. Default 1.0.
+    notch : also *remove* the detected harmonics from the PSD by spectral
+        interpolation, before any band power is derived.
+    baseline_sec : with ``epoch_sec``, treat epochs ending at or before this many
+        seconds as the baseline and contrast every endpoint's later epochs against
+        them (Welch t on AR(1)-effective n, Hedges' g, BH-FDR across endpoints).
     """
     vals = [float(v) for v in values]
     n = len(vals)
@@ -462,6 +514,19 @@ def analyze(values: Sequence[float], fs: float = 128.0,
         if s_lo < 0 or s_hi <= s_lo:
             raise ValueError("swa_band must be 0 <= lo < hi")
         swa_band = (s_lo, s_hi)
+    if not (math.isfinite(line_bw) and line_bw > 0):
+        raise ValueError("line_bw must be a positive finite number of Hz")
+    if line_freq is not None and line_freq != "auto":
+        lf = float(line_freq)  # type: ignore[arg-type]
+        if not math.isfinite(lf) or lf <= 0:
+            raise ValueError("line_freq must be 'auto', None, or a positive Hz value")
+        line_freq = lf
+    if notch and line_freq is None:
+        raise ValueError("notch=True needs a line frequency (line_freq='auto' or a "
+                         "number); it cannot remove what it was told not to look for.")
+    if baseline_sec is not None:
+        if not math.isfinite(baseline_sec) or baseline_sec <= 0:
+            raise ValueError("baseline_sec must be a positive finite number of seconds")
     band_list = list(bands) if bands else list(spectral.DEFAULT_BANDS)
     for name, lo, hi in band_list:
         if not (math.isfinite(lo) and math.isfinite(hi)):
@@ -523,7 +588,52 @@ def analyze(values: Sequence[float], fs: float = 128.0,
 
     overall, meta = _spectrum(vals, fs, band_list, resolved_nperseg, noverlap,
                               sef_frac, detrend, average, aperiodic_mode, fit_range,
-                              swa_band)
+                              swa_band, line_freq, line_bw, notch)
+
+    # The mains fundamental is a property of the RECORDING, not of an epoch: resolving
+    # 'auto' once on the whole-recording spectrum and reusing that number for every
+    # epoch stops a quiet epoch from silently switching 60 Hz -> 50 Hz and notching a
+    # different frequency than the one the report names.
+    epoch_line_freq: Optional[object] = line_freq
+    if line_freq == "auto":
+        epoch_line_freq = (overall.line_noise.f0
+                           if overall.line_noise is not None else None)
+    # The set of frequencies a notch removes is likewise a property of the RECORDING.
+    epoch_targets = (overall.line_noise.targets()
+                     if overall.line_noise is not None else [])
+    # Epochs inherit the recording's f0 as a NUMBER; without this they would be
+    # labelled source="user", which switches off the aliased-harmonic guard and makes
+    # each epoch claim to have removed an alias that was never touched.
+    epoch_source = (overall.line_noise.source
+                    if overall.line_noise is not None else None)
+    _line_warnings(overall.line_noise, band_list, notch, warns)
+
+    # --notch that removed nothing must say so. Silence here reads as "cleaned".
+    if notch and line_freq is not None:
+        lnr0 = overall.line_noise
+        if lnr0 is None or not lnr0.removed:
+            df_bin = fs / meta["nfft"]
+            why = []
+            if not ln.windows_fit(fs, line_bw):
+                why.append(
+                    f"no mains fundamental window of ±{line_bw:g} Hz fits inside "
+                    f"(0, {fs / 2.0:g}) Hz at fs={fs:g} Hz — narrow --line-bw, or the "
+                    "recording's bandwidth simply does not reach the mains frequency")
+            elif line_bw < df_bin:
+                why.append(
+                    f"--line-bw {line_bw:g} Hz is below the frequency resolution "
+                    f"({df_bin:.3g} Hz), so no window contains enough bins to measure "
+                    "a peak against its background")
+
+            if lnr0 is not None and lnr0.suspect_aliases():
+                why.append(
+                    "the only strong peak is an ALIAS of the mains, which is never "
+                    "removed automatically (pass --line-freq explicitly to remove it)")
+            if not why:
+                why.append("no harmonic exceeded the detection threshold")
+            warns.append(
+                "--notch removed NOTHING from this spectrum: " + "; ".join(why)
+                + ". The band powers below are unchanged.")
 
     # A PSD that overflowed to inf/NaN (input amplitudes ≳1e155) would otherwise print
     # a confident "NaN µV²" with an empty warning list.
@@ -619,7 +729,10 @@ def analyze(values: Sequence[float], fs: float = 128.0,
         quality=signal_quality(vals, n_interpolated=n_filled, fs=fs),
         max_amp=max_amp, max_grad=max_grad, aperiodic_mode=aperiodic_mode,
         fit_range=fit_range, swa_band=swa_band, label=label,
-        n_seg=meta["n_seg"], samples=vals)
+        n_seg=meta["n_seg"], samples=vals,
+        line_freq_mode=(None if line_freq is None
+                        else ("auto" if line_freq == "auto" else f"{line_freq:g}")),
+        line_bw=line_bw, notch=notch, baseline_sec=baseline_sec)
 
     if epoch_sec is not None:
         if not math.isfinite(epoch_sec) or epoch_sec <= 0:
@@ -637,7 +750,8 @@ def analyze(values: Sequence[float], fs: float = 128.0,
             spec, _ = _spectrum(vals, fs, band_list,
                                 min(resolved_nperseg, n), noverlap, sef_frac,
                                 detrend, average, aperiodic_mode, fit_range,
-                                swa_band)
+                                swa_band, epoch_line_freq, line_bw, notch,
+                                epoch_targets, epoch_source)
             ep = EpochResult(0, 0.0, n / fs, spec)
             _apply_reject(ep, vals, max_amp, max_grad)
             result.epochs = [ep]
@@ -663,7 +777,8 @@ def analyze(values: Sequence[float], fs: float = 128.0,
                 seg = vals[e * epoch_len:(e + 1) * epoch_len]
                 spec, _ = _spectrum(seg, fs, band_list, ep_nperseg, noverlap,
                                     sef_frac, detrend, average, aperiodic_mode,
-                                    fit_range, swa_band)
+                                    fit_range, swa_band, epoch_line_freq,
+                                    line_bw, notch, epoch_targets, epoch_source)
                 ep = EpochResult(
                     e, e * epoch_len / fs, (e + 1) * epoch_len / fs, spec)
                 _apply_reject(ep, seg, max_amp, max_grad)
@@ -701,9 +816,159 @@ def analyze(values: Sequence[float], fs: float = 128.0,
                                 if ep.spectrum.dominant == "delta")
                 result.swa_density = delta_dom / len(kept)
                 _summarize_epochs(result, kept, warns)
+                if baseline_sec is not None:
+                    _baseline_contrast(result, kept, baseline_sec, warns)
+    elif baseline_sec is not None:
+        warns.append(
+            "--baseline needs --epoch: the baseline/post contrast is computed across "
+            "epochs, and without epoching there is nothing to contrast. No baseline "
+            "comparison was made.")
 
     result.warnings = warns
     return result
+
+
+def _line_warnings(lnr: Optional[ln.LineNoiseReport],
+                   bands: Sequence[Tuple[str, float, float]], notch: bool,
+                   warns: List[str]) -> None:
+    """Warn when mains noise contaminates a reported band (and say by how much)."""
+    if lnr is None:
+        return
+    # Loud aliased harmonics that auto-detection deliberately refused to flag: the
+    # user must be told they exist, because the alternative reading of that peak is a
+    # genuine rhythm and only they can tell the two apart.
+    for p in lnr.suspect_aliases():
+        band = next((n for n, lo, hi in bands
+                     if lo <= p.freq_hz <= hi), None)
+        warns.append(
+            f"a strong peak at {p.freq_hz:.4g} Hz (ratio {p.ratio:.3g}x the local "
+            f"background{', in band ' + band if band else ''}) coincides with where "
+            f"{p.nominal_hz:g} Hz mains would ALIAS at fs={2 * lnr.nyquist_hz:g} Hz. "
+            "It was NOT treated as line noise, because at that frequency an alias and "
+            "a real rhythm are the same measurement. If your mains is "
+            f"{lnr.f0:g} Hz, pass --line-freq {lnr.f0:g} (and --notch) to remove it — "
+            "but note that this also removes any genuine activity there.")
+    if not lnr.detected:
+        return
+    hit = []
+    for name, lo, hi in bands:
+        if lnr.excess_in(lo, hi) > 0:
+            hit.append(name)
+    where = ", ".join(f"{p.freq_hz:g} Hz" + (" (aliased)" if p.aliased else "")
+                      for p in lnr.detected_peaks())
+    if lnr.removed:
+        msg = (f"mains line noise at {where} ({lnr.f0:g} Hz, {lnr.source}) was REMOVED "
+               f"from the spectrum by ±{lnr.bandwidth:g} Hz spectral interpolation")
+        if hit:
+            msg += (f"; band(s) {', '.join(hit)} overlap those windows, so that part "
+                    "of their power is interpolated background, not measured signal.")
+        else:
+            msg += ("; no reported band overlaps those windows, so the band powers "
+                    "below are unchanged by the notch.")
+        warns.append(msg)
+        return
+    # Quote the ratio of a peak that was actually FLAGGED. lnr.max_ratio spans every
+    # harmonic including aliased ones that were deliberately not flagged, which reads
+    # as a contradiction next to "falls outside every reported band".
+    top = max((p.ratio for p in lnr.detected_peaks() if p.ratio is not None),
+              default=None)
+    ratio_txt = f"{top:.3g}×" if top is not None else "n/a"
+    msg = (f"mains line noise detected at {where} (peak/background ratio up to "
+           f"{ratio_txt}, {lnr.f0:g} Hz {lnr.source}).")
+    if hit:
+        msg += (f" It falls inside the reported band(s) {', '.join(hit)}, whose power "
+                "is therefore partly electrical, not neural — rerun with --notch to "
+                "remove it.")
+    else:
+        msg += (" It falls outside every reported band, so band powers are unaffected;"
+                " it is still a sign of a noisy recording environment.")
+    if any(p.aliased for p in lnr.detected_peaks()):
+        msg += (f" NOTE: {lnr.f0:g} Hz is above this recording's Nyquist "
+                f"({lnr.nyquist_hz:g} Hz), so it appears ALIASED at a lower frequency;"
+                " the true source is mains, not brain activity at that frequency.")
+    warns.append(msg)
+
+
+# Endpoints that are NOT on a ratio scale, so "percent change" is meaningless for
+# them: a log10 value (a % change of a log is not a % change of the quantity), the 1/f
+# exponent and the entropy (both signed/bounded, not proportional). Reporting -534%
+# for an exponent that moved from 0.005 to -0.022 is noise dressed as an effect.
+_NON_RATIO_ENDPOINTS = ("aperiodic_exponent", "spectral_entropy")
+
+
+def _is_ratio_scale(key: str) -> bool:
+    return not (key in _NON_RATIO_ENDPOINTS or key.endswith("_log10"))
+
+
+def _baseline_contrast(result: AnalysisResult, kept: Sequence[EpochResult],
+                       baseline_sec: float, warns: List[str]) -> None:
+    """Contrast post-baseline epochs against baseline epochs, per endpoint.
+
+    The pharmacodynamic question is not "what is SWA?" but "how did SWA change from
+    this subject's own baseline?" — each recording is its own control, which removes
+    the between-subject variance that swamps absolute band power. Epochs whose end
+    time is at or before ``baseline_sec`` form the baseline; the rest form the post
+    window. Every endpoint that has a finite value in *every* kept epoch is tested
+    with Welch's t on AR(1) effective sample sizes (consecutive epochs are not
+    independent), and the family of p-values is BH-FDR corrected across endpoints.
+    """
+    base = [ep for ep in kept if ep.end_sec <= baseline_sec + 1e-9]
+    post = [ep for ep in kept if ep.end_sec > baseline_sec + 1e-9]
+    result.n_baseline = len(base)
+    result.n_post = len(post)
+    if len(base) < 2 or len(post) < 2:
+        warns.append(
+            f"--baseline {baseline_sec:g}s splits the {len(kept)} analysed epochs into "
+            f"{len(base)} baseline / {len(post)} post, and a contrast needs at least 2 "
+            "of each; no baseline comparison was computed. Move --baseline, shorten "
+            "--epoch, or analyse a longer window.")
+        return
+    swa_defined = result.overall.swa_source != "undefined"
+    contrasts: Dict[str, stats.ContrastResult] = {}
+    for key, attr in _epoch_endpoints(result.bands, swa_defined):
+        a, miss_a = _endpoint_series(base, attr)
+        b, miss_b = _endpoint_series(post, attr)
+        if a is None or b is None:
+            continue
+        cr = stats.welch_ttest(a, b)
+        if cr is not None:
+            if not _is_ratio_scale(key):
+                cr.pct_change = float("nan")
+            contrasts[key] = cr
+    if not contrasts:
+        warns.append(
+            "no endpoint could be contrasted against baseline (every candidate is "
+            "constant or missing in one of the two windows).")
+        return
+
+    # The endpoint list contains structural DUPLICATES: with the default bands, SWA is
+    # the delta band, so 'swa_relative' and 'delta_relative' are the same measurement
+    # under two names and produce bit-identical contrasts. That is not a cosmetic
+    # problem. BH's q = p·m/rank resolves ties to the highest rank, so a copy of the
+    # most significant endpoint promoted it from rank 1 to rank 2 and roughly HALVED
+    # its q — an anti-conservative error produced by counting one test twice. The FDR
+    # family therefore keeps ONE representative per set of identical contrasts, and
+    # each duplicate inherits its representative's q.
+    groups: Dict[Tuple[float, ...], List[str]] = {}
+    for key, cr in contrasts.items():
+        sig = (cr.n_a, cr.n_b, cr.mean_a, cr.mean_b, cr.sd_a, cr.sd_b, cr.p)
+        groups.setdefault(sig, []).append(key)
+    reps = [members[0] for members in groups.values()]
+    qs = stats.bh_fdr([contrasts[k].p for k in reps])
+    q_by_rep = dict(zip(reps, qs))
+    for members in groups.values():
+        q = q_by_rep[members[0]]
+        for k in members:
+            contrasts[k].q = q
+    result.baseline_family_size = len(reps)
+    dupes = sum(len(m) - 1 for m in groups.values())
+    if dupes:
+        warns.append(
+            f"{dupes} baseline endpoint(s) are duplicates of another endpoint (e.g. "
+            "SWA is the delta band, so swa_* and delta_* are the same measurement); "
+            f"the BH-FDR family size is {len(reps)}, not {len(contrasts)}, and the "
+            "duplicates share their twin's q.")
+    result.baseline_contrasts = contrasts
 
 
 # Endpoints always summarised (and trend-tested) across epochs, in report order.
@@ -725,9 +990,18 @@ def _epoch_endpoints(bands: Sequence[Tuple[str, float, float]],
     """The endpoint list for these bands: the core set plus per-band abs/rel power."""
     out = [(k, a) for k, a in _CORE_ENDPOINTS
            if swa_defined or not k.startswith("swa_")]
+    # A band may be NAMED like a core endpoint ('swa:0.5-4' is plausible in a sleep
+    # study), which would generate a duplicate key: the dicts would silently overwrite
+    # each other and --csv-summary would emit two identical column names that pandas/R
+    # then mangle. Keep the core endpoint and skip the colliding band-derived key.
+    taken = {k for k, _ in out}
     for name, _, _ in bands:
-        out.append((f"{name}_absolute_uv2", f"_band_abs:{name}"))
-        out.append((f"{name}_relative", f"_band_rel:{name}"))
+        for key, attr in ((f"{name}_absolute_uv2", f"_band_abs:{name}"),
+                          (f"{name}_relative", f"_band_rel:{name}")):
+            if key in taken:
+                continue
+            taken.add(key)
+            out.append((key, attr))
     return out
 
 

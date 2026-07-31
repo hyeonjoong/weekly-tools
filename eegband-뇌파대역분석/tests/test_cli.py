@@ -335,5 +335,149 @@ class TestEpochConstantPeakNa(unittest.TestCase):
             self.assertTrue(any("n/a" in l for l in ep_lines))
 
 
+
+
+def _pd_csv(fs=128.0, seconds=240.0, switch=120.0, mains=0.0, mains_f=60.0,
+            seed=3):
+    """CSV of a recording whose slow-wave amplitude doubles at ``switch`` seconds."""
+    import random
+    rng = random.Random(seed)
+    rows = ["eeg_uv"]
+    for i in range(int(seconds * fs)):
+        t = i / fs
+        amp = 15.0 if t < switch else 30.0
+        v = (amp * math.sin(2 * math.pi * 1.5 * t + 0.7)
+             + 10.0 * math.sin(2 * math.pi * 10.0 * t)
+             + 5.0 * rng.gauss(0.0, 1.0))
+        if mains:
+            v += mains * math.sin(2 * math.pi * mains_f * t + 0.3)
+        rows.append(f"{v:.5f}")
+    return "\n".join(rows) + "\n"
+
+
+class TestLineNoiseCLI(unittest.TestCase):
+    def test_default_run_reports_the_line_noise_check(self):
+        with _TmpCSV(_pd_csv(mains=20.0)) as path:
+            code, out, _ = _run([path, "--fs", "128"])
+        self.assertEqual(code, 0)
+        self.assertIn("mains line noise", out)
+
+    def test_notch_removes_it_and_says_so(self):
+        with _TmpCSV(_pd_csv(mains=20.0)) as path:
+            code, out, _ = _run([path, "--fs", "128", "--notch",
+                                 "--bands", "delta:0.5-4,gamma:30-63"])
+            self.assertEqual(code, 0)
+            self.assertIn("REMOVED", out)
+            code2, out2, _ = _run([path, "--fs", "128",
+                                   "--bands", "delta:0.5-4,gamma:30-63"])
+        # Gamma must be much smaller once the 60 Hz peak is gone.
+        def gamma(text):
+            for line in text.splitlines():
+                if line.strip().startswith("gamma"):
+                    return float(line.split()[2])
+            raise AssertionError("no gamma row")
+        self.assertLess(gamma(out), 0.5 * gamma(out2))
+
+    def test_line_freq_off_disables_the_section(self):
+        with _TmpCSV(_pd_csv(mains=20.0)) as path:
+            code, out, _ = _run([path, "--fs", "128", "--line-freq", "off"])
+        self.assertEqual(code, 0)
+        self.assertNotIn("mains line noise", out)
+
+    def test_explicit_line_freq_is_used(self):
+        with _TmpCSV(_pd_csv(mains=20.0, mains_f=50.0)) as path:
+            code, out, _ = _run([path, "--fs", "128", "--line-freq", "50",
+                                 "--json"])
+        self.assertEqual(code, 0)
+        blk = json.loads(out)["overall"]["line_noise"]
+        self.assertEqual(blk["fundamental_hz"], 50.0)
+        self.assertEqual(blk["source"], "user")
+        self.assertTrue(blk["detected"])
+
+    def test_bad_line_freq_is_a_usage_error(self):
+        with _TmpCSV(_pd_csv(seconds=20.0)) as path:
+            code, _, err = _run([path, "--fs", "128", "--line-freq", "sixty"])
+        self.assertEqual(code, 2)
+        self.assertIn("--line-freq", err)
+
+    def test_notch_with_line_freq_off_is_rejected(self):
+        with _TmpCSV(_pd_csv(seconds=20.0)) as path:
+            code, _, err = _run([path, "--fs", "128", "--line-freq", "off",
+                                 "--notch"])
+        self.assertEqual(code, 2)
+        self.assertIn("--notch", err)
+
+    def test_bad_line_bw_is_a_usage_error(self):
+        with _TmpCSV(_pd_csv(seconds=20.0)) as path:
+            code, _, err = _run([path, "--fs", "128", "--line-bw", "0"])
+            self.assertEqual(code, 2)
+            code2, _, err2 = _run([path, "--fs", "128", "--line-bw", "nan"])
+        self.assertEqual(code2, 2)
+        self.assertIn("--line-bw", err + err2)
+
+    def test_psd_csv_export_matches_the_notched_report(self):
+        with _TmpCSV(_pd_csv(mains=20.0, seconds=60.0)) as path:
+            code, out, _ = _run([path, "--fs", "128", "--notch", "--psd-csv",
+                                 "--no-comment"])
+        self.assertEqual(code, 0)
+        rows = [r.split(",") for r in out.strip().splitlines()[1:]]
+        at60 = [float(r[3]) for r in rows if abs(float(r[2]) - 60.0) < 0.4]
+        near56 = [float(r[3]) for r in rows if 55.0 <= float(r[2]) <= 56.5]
+        self.assertTrue(at60 and near56)
+        # After notching, the 60 Hz bins are interpolated background, not a spike.
+        self.assertLess(max(at60), 10.0 * max(near56))
+
+
+class TestBaselineCLI(unittest.TestCase):
+    def test_baseline_section_appears(self):
+        with _TmpCSV(_pd_csv()) as path:
+            code, out, _ = _run([path, "--fs", "128", "--epoch", "30",
+                                 "--baseline", "120"])
+        self.assertEqual(code, 0)
+        self.assertIn("기저 대비 변화", out)
+        self.assertIn("q(FDR)", out)
+
+    def test_baseline_json_block(self):
+        with _TmpCSV(_pd_csv()) as path:
+            code, out, _ = _run([path, "--fs", "128", "--epoch", "30",
+                                 "--baseline", "120", "--json"])
+        self.assertEqual(code, 0)
+        blk = json.loads(out)["baseline_contrast"]
+        self.assertEqual(blk["n_baseline"], 4)
+        self.assertLess(blk["endpoints"]["swa_absolute_uv2"]["q_bh_fdr"], 0.05)
+
+    def test_baseline_without_epoch_is_a_usage_error(self):
+        with _TmpCSV(_pd_csv(seconds=60.0)) as path:
+            code, _, err = _run([path, "--fs", "128", "--baseline", "20"])
+        self.assertEqual(code, 2)
+        self.assertIn("--baseline", err)
+
+    def test_non_positive_baseline_is_a_usage_error(self):
+        with _TmpCSV(_pd_csv(seconds=60.0)) as path:
+            code, _, err = _run([path, "--fs", "128", "--epoch", "10",
+                                 "--baseline", "0"])
+        self.assertEqual(code, 2)
+        self.assertIn("--baseline", err)
+
+    def test_non_finite_baseline_is_a_usage_error(self):
+        with _TmpCSV(_pd_csv(seconds=60.0)) as path:
+            code, _, err = _run([path, "--fs", "128", "--epoch", "10",
+                                 "--baseline", "inf"])
+        self.assertEqual(code, 2)
+        self.assertIn("baseline", err)
+
+    def test_csv_summary_carries_the_contrast(self):
+        with _TmpCSV(_pd_csv()) as path:
+            code, out, _ = _run([path, "--fs", "128", "--epoch", "30",
+                                 "--baseline", "120", "--csv-summary",
+                                 "--no-comment"])
+        self.assertEqual(code, 0)
+        head = out.splitlines()[0].split(",")
+        row = out.splitlines()[1].split(",")
+        self.assertEqual(len(head), len(row))
+        i = head.index("swa_absolute_uv2_base_pct_change")
+        self.assertGreater(float(row[i]), 100.0)
+
+
 if __name__ == "__main__":
     unittest.main()

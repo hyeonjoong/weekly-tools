@@ -71,6 +71,38 @@ def write_multichannel_csv(path: str, fs: float = 128.0, dur: float = 20.0) -> N
     print(f"wrote {path} ({n} rows, fs={fs:g} Hz)")
 
 
+def write_dose_session_csv(path: str, fs: float = 200.0, dur: float = 240.0,
+                           dose_at: float = 120.0) -> None:
+    """A 'dosing session': 2 min of baseline, then slow-wave power steps up ~4x.
+
+    Also carries a 60 Hz mains component so the line-noise diagnostics (and
+    ``--notch``) have something to find. The background here uses a fixed 0.25 Hz
+    component spacing rather than 1/dur: at 4 minutes the latter would need 20k+
+    sinusoids per sample and take minutes to generate. Everything is synthetic.
+    """
+    rng = random.Random(51)
+    n = int(round(fs * dur))
+    df = 0.25
+    comps = [(k * df, (k * df) ** (-1.4 / 2.0), rng.uniform(0, 2 * math.pi))
+             for k in range(1, int(90.0 / df) + 1)]
+    norm = math.sqrt(math.fsum(a * a for _, a, _ in comps) / 2.0)
+    slow = rhythm(fs, dur, 1.5, 40.0, 52)
+    alpha = rhythm(fs, dur, 10.0, 14.0, 53)
+    with open(path, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write("time_s,eeg_uv\n")
+        for k in range(n):
+            t = k / fs
+            bg = 10.0 * math.fsum(a * math.cos(2 * math.pi * f * t + ph)
+                                  for f, a, ph in comps) / norm
+            # Amplitude doubles after the dose -> power (amplitude^2) quadruples.
+            gain = 1.0 if t < dose_at else 2.0
+            v = (bg + gain * slow[k] + alpha[k]
+                 + 9.0 * math.sin(2 * math.pi * 60.0 * t + 0.4)
+                 + rng.gauss(0.0, 4.0))   # measurement noise
+            fh.write(f"{t:.6f},{v:.4f}\n")
+    print(f"wrote {path} ({n} rows, fs={fs:g} Hz, dose at {dose_at:g} s)")
+
+
 def write_sleep_edf(path: str, fs: float = 100.0, dur: float = 60.0) -> None:
     """Two-channel EDF: a delta-dominant and an alpha-dominant derivation."""
     fpz = add(pink(fs, dur, 1.8, 22.0, 21), rhythm(fs, dur, 1.2, 60.0, 31),
@@ -84,4 +116,5 @@ def write_sleep_edf(path: str, fs: float = 100.0, dur: float = 60.0) -> None:
 
 if __name__ == "__main__":
     write_multichannel_csv(os.path.join(HERE, "multichannel_wide.csv"))
+    write_dose_session_csv(os.path.join(HERE, "dose_session.csv"))
     write_sleep_edf(os.path.join(HERE, "sleep_2ch.edf"))

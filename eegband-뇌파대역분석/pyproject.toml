@@ -4,15 +4,16 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "eegband"
-version = "0.2.0"
-description = "EEG 대역파워 분석기 — Welch PSD로 delta/theta/alpha/beta/gamma 절대·상대 파워, 슬로우파(SWA), SEF95, 피크주파수, 대역비, 1/f 비주기 성분(지수·배경보정 파워)을 계산. 다채널·여러 파일 일괄 분석, CSV/TSV·EDF/EDF+/BDF 입력 (FFT·EDF 파서까지 표준 라이브러리만 자체 구현)"
+version = "0.3.0"
+description = "EEG 대역파워 분석기 — Welch PSD로 delta/theta/alpha/beta/gamma 절대·상대 파워, 슬로우파(SWA), SEF95, 피크주파수, 대역비, 1/f 비주기 성분(지수·배경보정 파워), 전원(50/60 Hz) 잡음 진단·제거, 기저 대비 변화 검정(Welch t·Hedges' g·BH-FDR)을 계산. 다채널·여러 파일 일괄 분석, CSV/TSV·EDF/EDF+/BDF 입력 (FFT·EDF 파서까지 표준 라이브러리만 자체 구현)"
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
 authors = [{ name = "hyeonjoong", email = "hyeonjoongk@gmail.com" }]
 keywords = ["eeg", "psd", "welch", "band-power", "slow-wave-activity", "swa",
             "spectral-edge-frequency", "fft", "sleep", "delta", "alpha",
-            "aperiodic", "1/f", "edf", "polysomnography", "mann-kendall"]
+            "aperiodic", "1/f", "edf", "polysomnography", "mann-kendall",
+            "line-noise", "notch", "pharmaco-eeg", "baseline-change", "fdr"]
 
 # No third-party dependencies — the FFT (radix-2 Cooley–Tukey), Hann window,
 # Welch PSD, aperiodic 1/f fit, trend statistics and the EDF/BDF parser are all
