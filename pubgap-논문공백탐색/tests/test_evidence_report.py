@@ -119,11 +119,11 @@ def test_topic_evidence_qvalues_are_monotone_in_p():
 # --------------------------------------------------------------------------- #
 def test_report_includes_evidence_sections():
     rep = build_report(load_articles(EXAMPLE), "example")
-    assert rep["evidence"]["n_typed"] == 18
+    assert rep["evidence"]["n_typed"] == 28
     assert rep["topic_evidence"], "주제별 근거 공백 행이 있어야 한다"
     md = render_markdown(rep)
     assert "근거 지형" in md
-    assert "개입연구가 비어 있는 주제" in md
+    assert "개입연구가 상대적으로 적은 주제" in md
     assert "무작위배정 임상시험(RCT)" in md
 
 

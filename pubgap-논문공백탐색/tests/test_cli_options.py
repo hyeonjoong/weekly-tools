@@ -104,6 +104,7 @@ _CSV_EXPECTED_HEADER = {
     "declining": "term,early_count,recent_count",
     "evidence": "tier,label,count,share",
     "topic-evidence": "term,n_articles,n_interventional",
+    "angles": "term,qualifier,n_term",
 }
 
 

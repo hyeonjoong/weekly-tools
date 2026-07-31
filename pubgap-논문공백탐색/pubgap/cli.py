@@ -16,7 +16,7 @@ import re
 import sys
 import urllib.parse
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Sequence
 
 from . import __version__
 from .analyze import GAP_SORTS
@@ -25,6 +25,7 @@ from .records import (
     apply_include_keywords,
     apply_major_only,
     dedup_articles,
+    dedup_articles_detailed,
     clean_value,
     detect_format,
     read_source,
@@ -36,16 +37,41 @@ from .records import (
 from .report import CSV_SECTIONS, build_report, json_safe, render_csv, render_markdown
 
 
-def _load_articles(args: argparse.Namespace, state: dict) -> List[Article]:
+def _load_articles(
+    args: argparse.Namespace, state: dict, exclude_terms: Sequence[str] = ()
+) -> List[Article]:
     if args.from_file:
         # 파일은 **한 번만** 읽는다. 예전엔 여기서 한 번, 실행정보(sha256)에서 또 한 번
         # 읽어 큰 파일의 I/O 가 두 배였고, FIFO·프로세스치환(`--from-file <(...)`)은
         # 두 번째 읽기에서 영원히 멈췄다.
-        raw, text, hint = read_source(args.from_file)
-        state["input_bytes"] = len(raw)
-        state["input_sha256"] = hashlib.sha256(raw).hexdigest()
-        state["input_format"] = detect_format(text, hint=hint)
-        articles = dedup_articles(parse_records(text, hint=hint))
+        #
+        # --from-file 은 여러 번 줄 수 있다: PubMed XML + Scopus CSV + WoS 내보내기를
+        # 한 코퍼스로 합쳐 분석하는 것이 실제 문헌고찰의 표준 절차이기 때문이다.
+        # 합칠 때 중복 제거(PMID→DOI→제목+연도)를 하지 않으면 모든 통계가 부풀려진다.
+        merged: List[Article] = []
+        sources: List[dict] = []
+        for path in args.from_file:
+            state["current_file"] = path
+            raw, text, hint = read_source(path)
+            arts = parse_records(text, hint=hint)
+            merged.extend(arts)
+            sources.append({
+                "path": clean_value(str(Path(path))),
+                "bytes": len(raw),
+                "sha256": hashlib.sha256(raw).hexdigest(),
+                "format": detect_format(text, hint=hint),
+                "records": len(arts),
+            })
+        state["sources"] = sources
+        articles, stats = dedup_articles_detailed(
+            merged, by_title=not args.no_fuzzy_dedup
+        )
+        state["dedup"] = {
+            "n_input": stats.n_input, "n_unique": stats.n_unique,
+            "n_removed": stats.n_removed, "by_pmid": stats.by_pmid,
+            "by_doi": stats.by_doi, "by_title": stats.by_title,
+            "n_enriched": stats.n_enriched, "n_files": len(sources),
+        }
         if args.save_xml:
             print(
                 "안내: --save-xml 은 네트워크 조회에만 적용됩니다(--from-file 에서는 무시).",
@@ -108,7 +134,25 @@ def _load_articles(args: argparse.Namespace, state: dict) -> List[Article]:
             )
     if args.min_year is not None or args.max_year is not None:
         articles = filter_years(articles, args.min_year, args.max_year)
+    if exclude_terms and articles and not any(
+        [t for t in a.mesh if t.strip().lower() not in {e.strip().lower() for e in exclude_terms}]
+        for a in articles
+    ):
+        print(
+            "경고: --exclude-term/--exclude-terms-file 로 지정한 주제어를 빼고 나니 "
+            "분석할 주제가 하나도 남지 않았습니다 — 제외 목록을 줄여 보세요.",
+            file=sys.stderr,
+        )
     return articles
+
+
+def _current_input(args: argparse.Namespace, state: dict) -> str:
+    """오류 메시지에 쓸 '지금 읽던 파일' — --from-file 이 여러 개일 수 있다."""
+    cur = state.get("current_file")
+    if cur:
+        return str(cur)
+    files = args.from_file or []
+    return " + ".join(str(f) for f in files) if files else "(입력 없음)"
 
 
 def _write_text(path: str, text: str, what: str = "--out") -> None:
@@ -120,6 +164,9 @@ def _write_text(path: str, text: str, what: str = "--out") -> None:
     try:
         Path(path).write_text(text, encoding="utf-8")
     except IsADirectoryError:
+        raise OutputError(f"{what}: 파일이 아니라 디렉터리입니다 — {path}")
+    except FileExistsError:
+        # macOS 에서 `--out /` 는 IsADirectoryError 가 아니라 FileExistsError 를 낸다.
         raise OutputError(f"{what}: 파일이 아니라 디렉터리입니다 — {path}")
     except FileNotFoundError:
         raise OutputError(f"{what}: 상위 폴더가 없습니다 — {path}")
@@ -142,11 +189,20 @@ def _build_meta(args: argparse.Namespace, state: dict, exclude_terms: List[str])
     """
     src: dict = {}
     if args.from_file:
-        src["path"] = clean_value(str(Path(args.from_file)))
-        for key, name in (("input_bytes", "bytes"), ("input_sha256", "sha256"),
-                          ("input_format", "format")):
-            if state.get(key) is not None:
-                src[name] = state[key]
+        sources = state.get("sources") or []
+        if sources:
+            # 파일이 하나면 예전과 같은 평평한 모양(path/bytes/sha256/format)을 유지해
+            # 기존 소비자를 깨지 않고, 여러 개면 `sources` 목록을 함께 싣는다.
+            first = sources[0]
+            src["path"] = first["path"]
+            src["bytes"] = first["bytes"]
+            src["sha256"] = first["sha256"]
+            src["format"] = first["format"]
+            if len(sources) > 1:
+                src["sources"] = sources
+                src["path"] = " + ".join(s["path"] for s in sources)
+        if state.get("dedup"):
+            src["dedup"] = state["dedup"]
     else:
         src["path"] = clean_value(f"PubMed:{args.query}")
         src["format"] = "efetch-xml"
@@ -175,6 +231,13 @@ def _build_meta(args: argparse.Namespace, state: dict, exclude_terms: List[str])
             "bridges": not args.no_bridges,
             "evidence": not args.no_evidence,
             "top_evidence": args.top_evidence,
+            "angles": not args.no_angles,
+            "angle_top_k": args.angle_top_k,
+            "angle_top_qualifiers": args.angle_top_qualifiers,
+            "angle_min_expected": args.angle_min_expected,
+            "angle_max_lift": args.angle_max_lift,
+            "angle_hide_implausible": args.angle_hide_implausible,
+            "fuzzy_dedup": not args.no_fuzzy_dedup,
             "top_mesh": args.top_mesh,
             "top_journals": args.top_journals,
             "major_topics_only": args.major_topics_only,
@@ -376,6 +439,19 @@ def _gap_top_k(value: str) -> int:
     return iv
 
 
+MAX_ANGLE_QUALIFIERS = 100
+
+
+def _angle_top_qualifiers(value: str) -> int:
+    """--angle-top-qualifiers — 검정 칸이 K×M 로 늘어 실행시간이 폭발하지 않도록 상한."""
+    iv = _nonneg_int(value)
+    if iv > MAX_ANGLE_QUALIFIERS:
+        raise argparse.ArgumentTypeError(
+            f"{MAX_ANGLE_QUALIFIERS} 이하여야 합니다(검정 칸이 K×M 로 늘어납니다): {iv}"
+        )
+    return iv
+
+
 def _unit_float(value: str) -> float:
     """0 이상 1 이하의 확률값(q 임계 등). NaN/무한대는 비교가 조용히 어긋나 거부한다."""
     try:
@@ -413,12 +489,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--max-records", type=_positive_int, default=300,
-        help="가져올 최대 논문 수 (기본 300). 검색 결과가 이보다 많으면 최신순으로 잘리며, "
-             "그때는 추세 관련 출력이 생략됩니다",
+        help="가져올 최대 논문 수 (기본 300). 검색 결과가 이보다 많으면 표본이 잘리며"
+             "(기본은 연도 층화 표집), 그때는 추세 관련 출력이 생략됩니다",
     )
     p.add_argument(
-        "--from-file",
-        help="네트워크 대신 파일 분석 — efetch XML / MEDLINE·NBIB / RIS / CSV·TSV (.gz 가능, 자동 판별)",
+        "--from-file", action="append", metavar="PATH",
+        help="네트워크 대신 파일 분석 — efetch XML / MEDLINE·NBIB / RIS / CSV·TSV "
+             "(.gz 가능, 자동 판별). **여러 번 지정하면 합쳐서** 분석하고 중복(PMID→DOI→"
+             "제목+연도)을 제거합니다",
+    )
+    p.add_argument(
+        "--no-fuzzy-dedup", action="store_true",
+        help="중복 제거에서 '제목+연도' 대조를 끔(PMID·DOI 가 같을 때만 중복으로 봄)",
     )
     p.add_argument("--save-xml", help="네트워크 조회 결과 XML 을 이 경로에 저장")
     p.add_argument(
@@ -482,6 +564,31 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--no-evidence", action="store_true",
         help="연구 설계(PublicationType) 기반 근거 지형·근거 공백 분석을 끔",
+    )
+    p.add_argument(
+        "--no-angles", action="store_true",
+        help="MeSH 부주제어(qualifier) 기반 '연구 각도 공백' 분석을 끔",
+    )
+    p.add_argument(
+        "--angle-top-k", type=_gap_top_k, default=12,
+        help="각도 공백을 볼 빈출 주제 상위 K (기본 12)",
+    )
+    p.add_argument(
+        "--angle-top-qualifiers", type=_angle_top_qualifiers, default=10,
+        help=f"각도 공백에 쓸 빈출 부주제어 상위 M (기본 10, 최대 {MAX_ANGLE_QUALIFIERS})",
+    )
+    p.add_argument(
+        "--angle-min-expected", type=_nonneg_float, default=1.0,
+        help="각도 공백 기준: 최소 기대 동시색인 수 (기본 1.0)",
+    )
+    p.add_argument(
+        "--angle-max-lift", type=_nonneg_float, default=0.5,
+        help="각도 공백 기준: 최대 lift(관측/기대) (기본 0.5)",
+    )
+    p.add_argument(
+        "--angle-hide-implausible", action="store_true",
+        help="MeSH 색인 규칙상 불가능해 보이는 주제×각도 칸을 표에서 감춤"
+             "(기본은 `⚠ 규칙상 불가?` 로 표시하고 순위만 뒤로 미룸)",
     )
     p.add_argument(
         "--csv-section", choices=CSV_SECTIONS, default="gaps",
@@ -578,7 +685,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     state: dict = {}
     try:
-        articles = _load_articles(args, state)
+        articles = _load_articles(args, state, exclude_terms)
     except OutputError as exc:
         print(f"오류: {exc}", file=sys.stderr)
         return 2
@@ -586,18 +693,25 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"오류: 파일을 찾을 수 없습니다 — {exc.filename}", file=sys.stderr)
         return 2
     except IsADirectoryError:
-        print(f"오류: 파일이 아니라 디렉터리입니다 — {args.from_file}", file=sys.stderr)
+        print(f"오류: 파일이 아니라 디렉터리입니다 — {_current_input(args, state)}",
+              file=sys.stderr)
         return 2
     except PermissionError:
-        print(f"오류: 파일을 읽을 권한이 없습니다 — {args.from_file}", file=sys.stderr)
+        print(f"오류: 파일을 읽을 권한이 없습니다 — {_current_input(args, state)}",
+              file=sys.stderr)
         return 2
     except OSError as exc:
         # 심볼릭 링크 루프, 너무 긴 경로, 경로 중간이 파일 등 — 전부 입력 문제다.
-        print(f"오류: 파일을 읽지 못했습니다 — {args.from_file} ({exc.strerror or exc})",
-              file=sys.stderr)
+        print(
+            f"오류: 파일을 읽지 못했습니다 — {_current_input(args, state)} "
+            f"({exc.strerror or exc})",
+            file=sys.stderr,
+        )
         return 2
     except ValueError as exc:
-        print(f"오류: {_scrub(exc, args)}", file=sys.stderr)
+        where = state.get("current_file")
+        prefix = f"오류: {where} — " if where and len(args.from_file or []) > 1 else "오류: "
+        print(f"{prefix}{_scrub(exc, args)}", file=sys.stderr)
         return 2
     except Exception as exc:  # 네트워크/PubMed 오류 등 — 빈 결과(rc 1)와 구분해 rc 3
         print(f"오류: 데이터를 가져오지 못했습니다 — {_scrub(exc, args)}", file=sys.stderr)
@@ -607,7 +721,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("검색 결과가 없습니다. 검색어/기간을 바꿔 보세요.", file=sys.stderr)
         return 1
 
-    query_label = clean_value(args.query or (args.from_file or "(file)"))
+    query_label = clean_value(
+        args.query or (" + ".join(args.from_file) if args.from_file else "(file)")
+    )
     try:
         rep = build_report(
             articles,
@@ -624,10 +740,17 @@ def main(argv: Optional[List[str]] = None) -> int:
             bridge_top_n=0 if args.no_bridges else 3,
             evidence=not args.no_evidence,
             top_evidence_n=args.top_evidence,
+            angles=not args.no_angles,
+            angle_top_k=args.angle_top_k,
+            angle_top_qualifiers=args.angle_top_qualifiers,
+            angle_min_expected=args.angle_min_expected,
+            angle_max_lift=args.angle_max_lift,
+            angle_hide_implausible=args.angle_hide_implausible,
             meta=None if args.no_meta else _build_meta(args, state, exclude_terms),
             topic_source=state.get("topic_source", "mesh"),
             total_available=state.get("total_available"),
             n_fetched=state.get("n_fetched"),
+            dedup=state.get("dedup"),
         )
 
         # 표시할 공백쌍을 PubMed 전수로 다시 세어 검증(네트워크). 계층/프레이밍
@@ -636,6 +759,18 @@ def main(argv: Optional[List[str]] = None) -> int:
             _verify_gaps(rep, args)
 
         fmt = args.format or ("json" if args.json else "md")
+        if fmt == "csv":
+            off = {
+                "angles": (args.no_angles, "--no-angles"),
+                "evidence": (args.no_evidence, "--no-evidence"),
+                "topic-evidence": (args.no_evidence, "--no-evidence"),
+            }.get(args.csv_section)
+            if off and off[0]:
+                print(
+                    f"안내: {off[1]} 로 해당 분석을 껐기 때문에 "
+                    f"`--csv-section {args.csv_section}` 은 헤더만 출력됩니다.",
+                    file=sys.stderr,
+                )
         if fmt == "json":
             # allow_nan=False + 사전 정화로 항상 표준 JSON 을 보장.
             output = json.dumps(json_safe(rep), ensure_ascii=False, indent=2, allow_nan=False)
@@ -657,11 +792,22 @@ def main(argv: Optional[List[str]] = None) -> int:
         except OutputError as exc:
             print(f"오류: {exc}", file=sys.stderr)
             return 2
-        _print_safely(f"저장 완료: {args.out}  (논문 {rep['n_articles']}편 분석)")
+        try:
+            _print_safely(f"저장 완료: {args.out}  (논문 {rep['n_articles']}편 분석)")
+        except EncodingError:
+            pass  # 파일은 이미 저장됐다 — 확인 문구를 못 찍는 것뿐이다.
     else:
-        if not _print_safely(output):
-            return 0
+        try:
+            if not _print_safely(output):
+                return 0
+        except EncodingError as exc:
+            print(f"오류: {exc}", file=sys.stderr)
+            return 3
     return 0
+
+
+class EncodingError(Exception):
+    """터미널 인코딩으로 리포트를 출력할 수 없음 — rc 3 으로 매핑된다."""
 
 
 def _print_safely(text: str) -> bool:
@@ -669,6 +815,12 @@ def _print_safely(text: str) -> bool:
 
     `pubgap ... | head` 는 평범한 사용법인데, 예전에는 BrokenPipeError 트레이스백이
     그대로 노출되고 종료코드가 1('결과 없음')이 되어 래퍼 스크립트를 오도했다.
+
+    **인코딩 실패는 여기서 삼키면 안 된다.** `UnicodeEncodeError` 는 `ValueError` 의
+    하위 클래스라 예전에는 아래 broad except 에 걸려, 한국어 콘솔(cp949)이나
+    `PYTHONIOENCODING=ascii` 환경에서 **rc 0 + 출력 0바이트 + 오류 메시지 0바이트**로
+    끝났다(래퍼 스크립트는 성공으로 읽는다). UTF-8 바이트로 직접 쓰는 것을 먼저
+    시도하고, 그것도 실패하면 EncodingError 로 올린다.
     """
     try:
         if sys.stdout is None:
@@ -676,6 +828,22 @@ def _print_safely(text: str) -> bool:
         print(text)
         sys.stdout.flush()
         return True
+    except UnicodeEncodeError:
+        try:
+            buf = getattr(sys.stdout, "buffer", None)
+            if buf is None:
+                raise EncodingError(
+                    "현재 터미널 인코딩으로는 한국어 리포트를 출력할 수 없습니다."
+                )
+            buf.write(text.encode("utf-8") + b"\n")
+            buf.flush()
+            return True
+        except (UnicodeEncodeError, OSError, ValueError, AttributeError) as exc:
+            raise EncodingError(
+                "현재 터미널 인코딩으로는 리포트를 출력할 수 없습니다 "
+                f"({exc}). `--out 결과.md` 로 파일에 저장하거나 "
+                "PYTHONIOENCODING=utf-8 을 설정하세요."
+            )
     except (BrokenPipeError, OSError, AttributeError, ValueError):
         # 인터프리터 종료 시 stdout 을 다시 flush 하다 같은 오류가 나지 않도록 교체.
         try:

@@ -468,7 +468,7 @@ def test_verification_failure_is_non_fatal(monkeypatch, capsys):
     assert main(["--from-file", str(EXAMPLE), "--verify-gaps"]) == 0
     cap = capsys.readouterr()
     assert "공백 검증" in cap.err and "건너뜁니다" in cap.err
-    assert "덜 연구된 각도" in cap.out
+    assert "덜 연구된 주제 조합" in cap.out
     assert "판정" not in cap.out          # 검증 열은 아예 안 나온다
 
 

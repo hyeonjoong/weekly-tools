@@ -43,6 +43,17 @@ combinations across its own modalities (sleep, respiration, HRV, EEG).
   그 공백이 진짜인지 **색인 artifact** 인지 클릭 한 번으로 가릴 수 있습니다.
   더해서 **대표 논문 ID**(A만/B만/함께 다룬 논문)와 **Swanson ABC 가교 주제 C**
   (A·B 각각과는 자주 엮이지만 A–B 자체는 드문 제3의 주제)를 제시합니다.
+- **연구 각도 공백(angle gap) — MeSH 부주제어 축**: 색인자가 주제어에 붙인 부주제어
+  (`Insomnia/therapy`, `Heart Rate/drug effects`, `Melatonin/adverse effects`)를 세로축으로
+  삼아, **"이 주제는 논문이 많은데 *약물치료·이상반응·치료* 각도로는 거의 안 봤다"** 를
+  주제쌍 공백과 **같은 통계**(초기하 하단꼬리 + BH-FDR + lift 정확구간)로 찾아냅니다.
+  임상·제약 연구자에게 이 축은 곧바로 프로토콜 아이디어가 됩니다.
+  분석 단위는 논문이 아니라 **색인 표목**((논문, 주제어) 한 칸 중 부주제어가 붙은 것)
+  입니다 — 주변확률과 관측이 같은 모집단이어야 검정이 성립하기 때문입니다.
+  NLM 색인 규칙상 불가능해 보이는 조합(해부 용어 × `/drug therapy` 등)은 어휘 가족
+  휴리스틱으로 `⚠ 규칙상 불가?` 라고 **표시하고 순위를 뒤로 미룰 뿐, 검정에서 빼지는
+  않습니다**(빼면 FDR 의 분모가 결과에 의존해 q 가 정직하지 않게 됩니다).
+  `--angle-hide-implausible` 로 표에서 감출 수 있습니다.
 - **근거 공백(evidence gap) — 연구 설계 축**: PubMed `PublicationType`(+ 보조로 연구설계
   MeSH)으로 각 논문의 근거 수준(메타분석/RCT/임상시험/관찰/증례/종설)을 판정해 **분야의
   근거 지형**을 그리고, 주제별 **개입연구(RCT·임상시험) 밀도**를 *그 주제를 달지 않은
@@ -50,6 +61,17 @@ combinations across its own modalities (sleep, respiration, HRV, EEG).
   **"논문은 많은데 개입연구는 유의하게 적은 주제" = 시험을 설계할 자리.**
   설계를 알 수 없는 논문은 분모에서 빼고 **커버리지를 함께 보고**해, '색인이 안 됨'과
   '시험이 없음'을 섞지 않습니다.
+- **불확실성(정확 신뢰구간)**: **주제별 개입비율**(및 코퍼스 전체 개입비율)에는
+  **Clopper–Pearson**, **lift**(주제쌍·각도 양쪽)에는 관측 편수의 **포아송
+  정확구간(Garwood)** 을 붙입니다(다른 지표에는 구간이 없습니다).
+  `0/8편 = 0%` 는 "시험이 없다"가 아니라 "상한이 37% 다"라는 뜻이고, `lift 0.00
+  (95% CI 0.00–1.64)` 는 편수가 적어 단정할 수 없다는 뜻입니다. 점추정만 적으면
+  독자가 작은 표본을 과신합니다.
+- **여러 출처 합치기**: `--from-file` 을 여러 번 주면 PubMed XML + Scopus CSV +
+  EndNote RIS 를 **하나의 코퍼스로 병합**합니다. 중복은 **PMID → DOI(정규화) →
+  제목+연도** 3단으로 제거하고, 살아남은 레코드의 **빈 필드만** 다른 출처에서 채웁니다
+  (Scopus 레코드에 없는 MeSH 를 PubMed 레코드에서 가져오는 식). 무엇으로 몇 건을
+  합쳤는지 리포트 첫머리에 밝힙니다(`--no-fuzzy-dedup` 으로 제목 대조 해제).
 - **잡음 제거**: 연구 주제가 아닌 **체크 태그**(Humans/Male/Female/Adult/Aged/Animals…)와
   **방법론 표제어**(Treatment Outcome, Risk Factors, Surveys and Questionnaires,
   `… as Topic` …)를 **기본 제외**합니다(`--include-check-tags` 로 해제). 검색어 자체처럼
@@ -80,14 +102,19 @@ combinations across its own modalities (sleep, respiration, HRV, EEG).
   - **CSV/TSV** — Scopus·Web of Science·Covidence·Rayyan·엑셀 편집본. 헤더 이름 차이
     (`Source title` / `Journal/Book` / `Publication Year` …), 구분자 자동 추정,
     헤더 앞 안내문 줄, 열 수가 들쭉날쭉한 행, `2019.0`·`Mar-2019` 같은 연도 표기를 흡수합니다.
-  - 위 모두의 **.gz** 압축본. UTF-8/latin-1 관대 디코드, 같은 PMID(또는 DOI) 자동 중복 제거.
+  - 위 모두의 **.gz** 압축본. UTF-8/latin-1 관대 디코드.
+  - 위 형식들을 **여러 개 동시에**(`--from-file` 반복) — 중복은 PMID→DOI→제목+연도로 제거.
+  - MeSH **부주제어**(qualifier)는 네 형식 모두에서 읽습니다: XML `<QualifierName>`,
+    NBIB/RIS/CSV 의 `Descriptor/*qualifier` 표기. DOI 도 함께 읽어 출처 간 병합에 씁니다.
   - MeSH 가 한 편도 없는 입력(RIS/CSV 내보내기)이면 **저자 키워드를 주제로 자동 승격**하고
     그 사실을 stderr 로 알립니다 — 조용히 빈 리포트가 나오지 않도록.
-- 출력: **Markdown**(기본, ~120줄), **JSON**(`--format json`), **CSV**(`--format csv` —
+- 출력: **Markdown**(기본, ~165줄), **JSON**(`--format json`), **CSV**(`--format csv` —
   엑셀 한글 대비 UTF-8 BOM 포함). Markdown 은 읽는 흐름을 위해 일부 표(쇠퇴 주제,
-  개입연구 과밀 주제)를 한 줄 요약으로만 싣습니다 — 전체는 JSON/CSV 에 있습니다.
+  개입연구 과밀 주제)를 한 줄 요약으로만 싣습니다 — JSON/CSV 에는 더 많이 들어 있습니다
+  (쇠퇴 주제는 Markdown 5개 / JSON·CSV 8개까지이며, 그 이상은 어디에도 싣지 않습니다).
   CSV 는 `--csv-section` 으로 표를 고릅니다:
-  `gaps`(기본)·`yearly`·`journals`·`mesh`·`emerging`·`declining`·`evidence`·`topic-evidence`.
+  `gaps`(기본)·`yearly`·`journals`·`mesh`·`emerging`·`declining`·`evidence`·`topic-evidence`·
+  `angles`(연구 각도 공백).
 
 ## Install
 
@@ -102,7 +129,7 @@ python3 -m pip install -e .        # 순수 표준 라이브러리 — 외부 �
 ## Usage
 
 ```bash
-# 1) 오프라인 데모 — 번들 예시(수면/호흡/HRV/EEG 18편)로 즉시 확인
+# 1) 오프라인 데모 — 번들 예시(수면/호흡/HRV/EEG/수면제 24편)로 즉시 확인
 pubgap --from-file examples/sleep_pubmed.xml
 
 # 2) 실제 PubMed 조회 (네트워크) — 최근 10년, 최대 300편
@@ -121,6 +148,10 @@ pubgap --from-file endnote_export.ris
 pubgap --from-file scopus.csv
 pubgap --from-file pubmed_result.xml.gz
 
+# 5-1) 여러 출처를 하나의 코퍼스로 합치기 (중복은 PMID→DOI→제목+연도로 자동 제거,
+#      빈 항목은 다른 출처 레코드로 보강 — 예: Scopus CSV 에 없는 MeSH 를 PubMed XML 에서)
+pubgap --from-file pubmed.xml --from-file scopus.csv --from-file wos.ris
+
 # 6) 통계적으로 유의한 공백만 / 연도 범위 / 대표(별표) 주제만
 pubgap --from-file examples/sleep_pubmed.xml --gap-max-q 0.05
 pubgap --from-file examples/sleep_pubmed.xml --min-year 2019 --max-year 2024
@@ -137,10 +168,16 @@ pubgap "slow breathing AND sleep" --max-records 1500 --email you@lab.org
 
 # 8) 근거 공백(설계 축) 표만 스프레드시트로
 pubgap --from-file examples/sleep_pubmed.xml --format csv --csv-section topic-evidence
+
+# 9) 연구 각도(MeSH 부주제어) 공백 — "이 주제를 약물치료 관점에서 본 논문이 없다"
+pubgap --from-file examples/sleep_pubmed.xml --format csv --csv-section angles
+pubgap --from-file examples/sleep_pubmed.xml --angle-top-k 20 --angle-max-lift 0.7
 ```
 
 주요 옵션:
-- 입력: `--from-file`(XML/NBIB/RIS/CSV/.gz 자동판별), `--years N`, `--max-records M`,
+- 입력: `--from-file`(XML/NBIB/RIS/CSV/.gz 자동판별; **여러 번 지정하면 합쳐서 분석**),
+  `--no-fuzzy-dedup`(제목+연도 대조 끄기 → PMID·DOI 가 같을 때만 중복 처리),
+  `--years N`, `--max-records M`,
   `--min-year/--max-year`(연도 범위, 미상 제외), `--save-xml`, `--email/--api-key`.
 - 주제 처리: `--major-topics-only`(MeSH 대표주제만), `--include-keywords`(저자 키워드 보강 —
   MeSH 미부여 최신 논문 대비), `--include-check-tags`(체크 태그도 포함, 기본은 제외),
@@ -151,88 +188,119 @@ pubgap --from-file examples/sleep_pubmed.xml --format csv --csv-section topic-ev
   `--gap-sort {deficit,lift,q,expected,npmi}` — **기본 `deficit`**.
 - 근거 공백: `--top-evidence K`(기본 12; 3편 미만 주제는 통계가 무의미해 제외),
   `--no-evidence`(끄기).
+- 각도 공백(MeSH 부주제어 축): `--angle-top-k K`(기본 12; **표목 3개 미만 주제는 제외**),
+  `--angle-top-qualifiers M`(기본 10, 최대 100), `--angle-min-expected`(기본 1.0),
+  `--angle-max-lift`(기본 0.5), `--angle-hide-implausible`(색인 규칙상 불가능해 보이는 칸을
+  표에서 감춤), `--no-angles`(끄기).
 - 네트워크: `--sample {stratified,recent}`(기본 stratified — 연도별 균등 표집),
   `--count-only`(편수만 1초 만에 확인), `--verify-gaps`/`--no-verify-gaps`
   (공백쌍을 PubMed **전수**로 재계산해 색인 artifact 를 걸러냄; 조회 경로 기본 켜짐).
-- 표시/출력: `--top-mesh`(기본 15)/`--top-journals`(기본 5), `--format {md,json,csv}`(`--json` 은 구버전 별칭),
+- 표시/출력: `--top-mesh`(기본 15)/`--top-journals`(기본 8), `--format {md,json,csv}`(`--json` 은 구버전 별칭),
   `--csv-section`, `--out`, `--no-meta`(실행 정보 블록 끄기 → 바이트 단위 재현), `--version`.
 
-### 출력 예시 (번들 **합성** 예시: 수면·호흡·HRV·EEG 18편)
+### 출력 예시 (번들 **합성** 예시: 수면·호흡·HRV·EEG·수면제 28편)
 
 > ⚠️ `examples/sleep_pubmed.xml` 는 **실제 논문이 아니라 합성 데이터**입니다(PMID·제목 가짜).
 > 오프라인에서 도구 동작을 보여주기 위한 것이며, 아래 숫자는 실제 문헌 통계가 아닙니다.
 > 또한 아래는 **발췌**입니다 — 실제 출력에는 `## 연도별 발행량`, `## 주요 저널`,
-> 각 표의 설명 각주, `### 실행 정보` 가 더 있습니다(전체 약 120줄).
+> 각 표의 설명 각주, `### 실행 정보` 가 더 있습니다(전체 약 165줄).
 
 ```
 # 연구 동향·공백 리포트 — `examples/sleep_pubmed.xml`
 
-- 분석 논문: **18편** (MeSH 주제어 보유 18편) · 발행연도 2015–2024
-- 발행량: **2020년 이후** 연 1.8편 (그 이전 연 1.8편 대비 1.00배) · 추세 기울기 +0.0편/년(Theil–Sen)
-- 추세 검정(Mann–Kendall): **뚜렷한 추세 없음** (τ=+0.00, p=1.000, n=10년)
-- ⚠️ **표본 주의**: 분석 논문이 18편으로 적습니다(권장 ≥30편). …
+- 분석 논문: **28편** (MeSH 주제어 보유 28편) · 발행연도 2015–2024
+- 발행량: **2020년 이후** 연 3.6편 (그 이전 연 2.0편 대비 1.80배) · 추세 기울기 +0.3편/년(Theil–Sen)
+- 추세 검정(Mann–Kendall): **유의한 증가 추세 ↗︎** (τ=+0.60, p=0.034, n=10년)
+- ⚠️ **표본 주의**: 분석 논문이 28편으로 적습니다(권장 ≥30편). 아래 공백 통계(기대·lift·p·q)는 한두 편의 색인 차이로 크게 흔들립니다 — `--max-records` 를 늘리거나 검색어를 넓혀 보세요.
+
+## 요약 (결론부터)
+
+- **주제 조합 1순위**: Sleep × Heart Rate — 함께 2편(기대 5.5, lift 0.37, q=0.076)
+- **연구 각도 1순위**: Heart Rate × drug effects — 함께 0개 표목(기대 1.1, q=0.496)
+- 통계적 견고성: 주제쌍 11개를 검정해 **달성한 최소 q=0.076** — **q≤0.05 인 후보가 없어, 아래는 모두 탐색적 후보입니다.**
+- ⚠️ 표본이 작아(30편 미만) 아래 통계는 한두 편의 색인 차이로 흔들립니다.
 
 ## 주요 주제 (MeSH 주제어, 논문 수)
-- Sleep — 9
-- Heart Rate — 8
-- Respiration — 8
-- Electroencephalography — 6
-- Autonomic Nervous System — 5
-...
-- Respiratory Rate — 1  ·(공백 탐색 제외)
 
-## ↗︎ 최근 부상 주제 (비중 상승)
-| 주제 | 초기 | 최근 | 비중변화 | p | q(FDR) |
-|---|---:|---:|---:|---:|---:|
-| Acoustic Stimulation | 0 | 2 | +22%p | 0.471 | 1.000 |
-| Sleep | 4 | 5 | +11%p | 1.000 | 1.000 |
+- Sleep — 17
+- Respiration — 11
+- Heart Rate — 9
+- Electroencephalography — 7
+- Autonomic Nervous System — 6
+- Hypnotics and Sedatives — 5
 ...
+- Memory — 1  ·(공백 탐색 제외)
 
 ## 🧪 근거 지형 (연구 설계 구성)
-- 연구 설계가 확인된 논문 **18편** (전체 18편의 100%) 기준입니다. 설계를 알 수 없는 0편은 분모에서 제외했습니다.
+
+- 연구 설계가 확인된 논문 **28편** (전체 28편의 100%) 기준입니다. 설계를 알 수 없는 0편은 분모에서 제외했습니다 — '색인이 안 됨'과 '시험이 없음'을 섞지 않기 위해서입니다.
 
 | 근거 수준 | 편수 | 비중 |
 |---|---:|---:|
-| 무작위배정 임상시험(RCT) | 5 | 28% |
-| 기타 임상시험(비무작위·초기상) | 2 | 11% |
-| 관찰연구 | 9 | 50% |
-| 증례보고 | 1 | 6% |
-| 종설/지침(비1차연구) | 1 | 6% |
+| 무작위배정 임상시험(RCT) | 10 | 36% |
+| 기타 임상시험(비무작위·초기상) | 2 | 7% |
+| 관찰연구 | 13 | 46% |
+| 증례보고 | 1 | 4% |
+| 종설/지침(비1차연구) | 2 | 7% |
 
-- **개입연구(RCT·임상시험) 7편 = 설계 확인된 논문의 39%**
+- **개입연구(RCT·임상시험) 12편 = 설계 확인된 논문의 43%** (95% CI 24–63%)
 
-### 개입연구가 비어 있는 주제 (= 시험을 설계할 자리)
-| 주제 | 논문 | 개입연구 | 개입비율 | 그 외 논문 | p | q(FDR) |
-|---|---:|---:|---:|---:|---:|---:|
-| Electroencephalography | 6 | 0 | 0% | 58% | 0.038 | 0.112 |
-| Monitoring, Physiologic | 3 | 0 | 0% | 47% | 0.245 | 0.315 |
-| Sleep | 9 | 1 | 11% | 67% | 0.050 | 0.112 |
+### 개입연구가 상대적으로 적은 주제 (= 시험을 설계할 자리 후보)
+
+| 주제 | 논문 | 개입연구 | 개입비율 | 95% CI | 그 외 논문 | p | q(FDR) |
+|---|---:|---:|---:|:--:|---:|---:|---:|
+| Monitoring, Physiologic | 3 | 0 | 0% | 0–71% | 48% | 0.238 | 0.524 |
+| Electroencephalography | 7 | 1 | 14% | 0–58% | 52% | 0.184 | 0.507 |
+| Hypnotics and Sedatives | 5 | 1 | 20% | 1–72% | 48% | 0.355 | 0.539 |
+| Sleep | 17 | 6 | 35% | 14–62% | 55% | 0.441 | 0.539 |
 ...
-(개입연구가 오히려 *많은* 주제는 접힘 블록으로 따로 표시됩니다 — 표 제목이 실제 내용과
-어긋나지 않도록.)
 
-## 🔍 덜 연구된 각도 (저조 조합 = 연구공백 후보)
-| 주제 A | 주제 B | 함께(관측) | 기대 | 부족 | lift | p | q(FDR) | 추이 |
-|---|---|---:|---:|---:|---:|---:|---:|:--:|
-| Sleep | Heart Rate | 1 | 4.0 | +3.0 | 0.25 | 0.008 | 0.034 | – |
-| Heart Rate | Electroencephalography | 0 | 2.7 | +2.7 | 0.00 | 0.011 | 0.034 | ⬜ 완전공백 |
-| Respiration | Electroencephalography | 0 | 2.7 | +2.7 | 0.00 | 0.011 | 0.034 | ⬜ 완전공백 |
-| Sleep | Autonomic Nervous System | 1 | 2.5 | +1.5 | 0.40 | 0.147 | 0.331 | – |
+## 🎯 연구 각도 공백 (MeSH 부주제어 축)
 
-_검정한 주제쌍 m=9개 · 달성한 최소 q=0.034 (q≤0.05 를 만족하는 후보가 있습니다)._
+- 부주제어가 색인된 논문 **28편** (전체 28편의 100%) · 서로 다른 각도 10종 기준입니다.
+- 이 분야가 주로 보는 각도: physiology(17), methods(13), drug effects(9), adverse effects(4), pharmacology(4), drug therapy(2)
 
-> 제안: **Sleep × Heart Rate** 를 결합한 분석/논문을 검토하세요.
-> 관련 논문 각각 9·8편이 있으나 둘을 함께 다룬 논문은 1편뿐입니다(기대 4.0편, p=0.008, q=0.034).
+| 주제 | 연구 각도 | 주제 표목 | 함께(관측) | 기대 | 부족 | lift | 95% CI | q(FDR) | 색인 가능성 | 이 주제의 주요 각도 |
+|---|---|---:|---:|---:|---:|---:|:--:|---:|:--:|---|
+| Heart Rate | drug effects | 8 | 0 | 1.1 | +1.1 | 0.00 | 0.00–3.23 | 0.496 |  | physiology 8 |
+| Electroencephalography | physiology | 7 | 0 | 3.3 | +3.3 | 0.00 | 0.00–1.13 | 0.187 | ⚠ 규칙상 불가? | methods 7 |
+...(이하 생략)
 
-> 검증: [MeSH 색인 기준으로 이 조합 검색](…) · [제목/초록(자유어) 기준](…) —
-> 자유어 검색에서는 논문이 많이 나온다면, 이 '공백'은 연구 공백이 아니라 **색인 방식의
-> 차이(artifact)** 일 가능성이 큽니다.
+## 🔍 덜 연구된 주제 조합 (저조 조합 = 연구공백 후보)
 
-> 가교(Swanson ABC): Sleep 와 Heart Rate 를 잇는 제3 주제
-> → **Monitoring, Physiologic**(A&C 2·C&B 2), **Respiration**(A&C 3·C&B 4) …
+각각 개별적으로는 자주 다뤄지지만 **함께는 기대보다 훨씬 드물게** 연구된 주제쌍입니다. lift(관측/기대)가 낮을수록 미개척 조합입니다.
 
-> 대표 논문 ID(확인용, PMID 또는 DOI) — Sleep: 30000002, 30000003, 30000005 ·
-> Heart Rate: 30000001, 30000004, 30000006 · 함께: 30000014
+| 주제 A | 주제 B | 함께(관측) | 기대 | 부족 | lift | 95% CI | p | q(FDR) | 추이 |
+|---|---|---:|---:|---:|---:|:--:|---:|---:|:--:|
+| Sleep | Heart Rate | 2 | 5.5 | +3.5 | 0.37 | 0.04–1.32 | 0.007 | 0.076 | – 0/10→2/18 |
+| Respiration | Electroencephalography | 0 | 2.8 | +2.8 | 0.00 | 0.00–1.34 | 0.016 | 0.090 | ⬜ 완전공백 0/10→0/18 |
+| Heart Rate | Electroencephalography | 0 | 2.2 | +2.2 | 0.00 | 0.00–1.64 | 0.043 | 0.156 | ⬜ 완전공백 0/10→0/18 |
+
+_정렬: **부족 편수 내림차순(기대−관측)** (`--gap-sort`). `부족`=기대−관측(**독립 가정 대비** 부족분, '있었어야 할 논문 수'가 아니다) · `lift`=관측/기대 · `95% CI`=lift 의 포아송 정확구간(상한이 1 을 넘으면 '덜 엮였다'고 단정할 수 없다는 뜻) · `p`=초기하 하단꼬리 · `q`=BH-FDR 보정 · `추이`: ⬜완전공백(양쪽 구간 모두 0편) / ↗메워짐 / ↘벌어짐 / –판단불가. 자세한 읽는 법은 사용법.md 참고._
+_검정한 주제쌍 m=11개 · 달성한 최소 q=0.076 — **q≤0.05 인 후보가 없습니다.** 검정 수가 많을수록 q 는 나빠지므로, `--gap-top-k` 를 낮춰 검정 수를 줄이거나 `--max-records` 를 올려 표본을 키우세요. (`--gap-min-expected` 를 낮추면 검정 수가 오히려 늘어 q 는 더 나빠집니다.)_
+
+> 제안: **Sleep × Heart Rate** 를 결합한 분석/논문을 검토하세요. 관련 논문 각각 17·9편이 있으나 둘을 함께 다룬 논문은 2편뿐입니다(기대 5.5편, lift 0.37, 95% CI 0.04–1.32, p=0.007, q=0.076).
+
+> ⚠️ 이 후보의 q=0.076 는 다중검정 보정 기준(0.05)을 넘습니다 — **탐색적 후보**로만 쓰고, 아래 검증 링크로 실제 문헌을 확인하세요.
+
+> 검증: [MeSH 색인 기준으로 이 조합 검색](https://pubmed.ncbi.nlm.nih.gov/?term=%22Sleep%22%5BMeSH+Terms%5D+AND+%22Heart+Rate%22%5BMeSH+Terms%5D) · [제목/초록(자유어) 기준](https://pubmed.ncbi.nlm.nih.gov/?term=%22Sleep%22%5BTitle%2FAbstract%5D+AND+%22Heart+Rate%22%5BTitle%2FAbstract%5D) — 자유어 검색에서는 논문이 많이 나온다면, 이 '공백'은 연구 공백이 아니라 **색인 방식의 차이(artifact)** 일 가능성이 큽니다.
+
+> 가교(Swanson ABC): Sleep 와 Heart Rate 를 잇는 제3 주제 → **Monitoring, Physiologic**(A&C 2·C&B 2), **Autonomic Nervous System**(A&C 2·C&B 3), **Respiration**(A&C 5·C&B 4). 두 주제가 각각 C 와는 자주 엮이므로, C 를 매개로 한 연결 가설을 세울 수 있습니다.
+
+> 함께 다룬 2편의 설계 구성: 관찰연구 2. 개입연구가 0편이면 **시험을 설계할 자리**, 전부 0편이면 색인/개념 문제일 수 있습니다.
+
+> 대표 논문(확인용 ID = PMID 또는 DOI):
+> - Sleep — `30000002` (2016, J Sleep Res) EEG slow-wave activity in patients with insomnia
+> - Sleep — `30000003` (2016, Chest) Respiratory rate monitoring during sleep
+> - Sleep — `30000005` (2017, Sleep) Cortical arousal and EEG markers of fragmented sleep
+> - Heart Rate — `30000001` (2015, Sleep Med) Slow breathing and heart rate variability in healthy adults
+> - Heart Rate — `30000004` (2017, Psychophysiology) Parasympathetic activation via paced breathing
+> - Heart Rate — `30000006` (2018, Front Neurosci) Heart rate variability biofeedback for stress
+> - 함께 — `30000014` (2022, Sleep Med) Wearable HRV monitoring across the night
+> - 함께 — `30000021` (2021, Front Physiol) Beta-blockers and heart rate variability during the night
+
+---
+_주의: 이 리포트는 MeSH 주제어 공동출현 기반 휴리스틱입니다. '공백'은 문헌 부재의 신호일 뿐 인과/타당성을 보장하지 않으며, 실제 착수 전 위 검증 링크와 대표 논문을 직접 확인하세요._
 ```
 
 > 같은 코퍼스를 지저분한 CSV 내보내기로 담은 `examples/sleep_export.csv` 도 함께 있습니다.
@@ -265,6 +333,7 @@ PubMed에서는 이 조합들이 함께 색인되는 경우가 많으므로, 이
 | nPMI | `log₂(p(A,B)/(p(A)p(B))) / −log₂ p(A,B)` ∈ [−1, 1]. 관측 0 이면 정의상 −1(완전 배타), 독립이면 0 |
 | p-value | 초기하분포 하단꼬리 `P(X ≤ 관측)` — 우연히 이만큼 덜 엮일 확률(작을수록 유의) |
 | q-value | 검정한 **모든** 후보쌍(기대≥min_expected)에 **Benjamini–Hochberg FDR** 적용 — 다중검정 보정 |
+| lift 95% CI | 관측 편수의 **포아송 정확구간(Garwood)** 을 기대값으로 나눈 값 = 역학의 SIR/SMR 구간과 같은 방식. 상한이 1 을 넘으면 "덜 엮였다"고 단정할 수 없다는 뜻 |
 | 공백 필터 | `기대 ≥ --gap-min-expected` 이고 `lift ≤ --gap-max-lift`(옵션 `q ≤ --gap-max-q`) 인 조합만 |
 | 공백 추이 | 동시등장을 초기/최근으로 나눠 **구간 논문 수로 정규화한 비율**을 비교. 양쪽 0편이면 `⬜ 완전공백`, 비율이 오르면 `↗ 메워짐`, 내리면 `↘ 벌어짐`, 같으면 `→ 유지`, 동시등장 3편 미만·연도 미상 혼입·한쪽 구간 0편이면 `–`(판단불가). 판정 가능한 행이 하나도 없으면 열 자체를 생략한다 |
 | 가교(ABC) | 각 공백 A–B 에 대해, 제3 주제 C 를 **`lift(A,C)×lift(C,B)`** 로 순위(빈도 순이 아님 — 그러면 검색어 자체가 늘 1위). 코퍼스의 80% 초과에 붙는 C, 지지도 2편 미만은 제외 |
@@ -273,13 +342,23 @@ PubMed에서는 이 조합들이 함께 색인되는 경우가 많으므로, 이
 | 설계 커버리지 | 위 tier 로 **판정 가능한** 논문 비율. `Journal Article` 은 설계 정보가 아니므로 커버리지에 포함되지 않음 |
 | 개입연구 판정 | RCT·임상시험 **태그의 존재 여부**(대표 tier 가 아님) — `Meta-Analysis + RCT` 인 논문도 개입연구로 센다 |
 | 근거 공백 p/q | 주제 × 개입여부의 2×2 **Fisher 정확검정**(양측, *그 주제를 달지 않은 나머지* 대비) + BH-FDR |
+| 개입비율 95% CI | **Clopper–Pearson 정확구간**. `0/8편 = 0%` 를 구간 없이 적으면 "시험이 없다"로 읽히지만 실제 상한은 37% 다 |
+| 연구 각도(부주제어) | MeSH descriptor 에 붙은 qualifier 를 소문자로 정규화해 **주제 × 각도** 격자를 만든다. `/` 뒤가 **NLM 공식 부주제어 76종**일 때만 부주제어로 인정한다(저자 키워드의 `AI/machine learning` 을 주제×각도로 오해하지 않도록) |
+| 각도 분석 단위 | **색인 표목** = (논문, 주제어) 한 칸 중 부주제어가 붙은 것. `N`=전체 표목 수, `n(주제)`=그 주제의 표목 수, `n(각도)`=그 각도가 붙은 표목 수. 주변확률과 관측이 같은 단위여야 검정이 성립한다(논문 단위 주변확률 + 표목 단위 관측을 섞으면 논문당 주제어 d개일 때 lift 가 1/d 로 눌려 **모든 칸이 공백으로** 보인다) |
+| 각도 공백 | 기대 `n(주제)·n(각도)/N`, 관측 = 그 주제에 그 각도가 붙은 표목 수. 주제쌍 공백과 **같은** 초기하 하단꼬리 + BH-FDR + lift 정확구간. 표목 3개 미만 주제는 제외 |
+| 각도 구조 표시 | NLM 은 주제 범주별로 붙일 수 있는 부주제어를 제한한다(해부 용어에 `/drug therapy` 불가). MeSH 규칙 파일 없이, "그 각도를 쓰는 **다른** 주제들이 함께 쓰는 각도 어휘"를 후보 주제가 하나도 공유하지 않으면 `⚠ 규칙상 불가?` 로 **표시하고 순위를 내린다**(검정에서 빼지는 않는다 — 빼면 m 이 결과에 의존해 q 가 왜곡된다). 판정은 후보 주제 자신의 기여를 뺀 leave-one-out 이라 그 칸의 관측값과 무관하다 |
+| 상하위어 의심 | 한쪽 주제어의 단어 집합이 다른 쪽에 **완전히 포함**되면(`Sleep` ⊂ `Sleep, REM`) `⚠상하위어?` 로 표시한다. 정의상 함께 색인되지 않아 lift 가 낮게 나오지만 연구 공백이 아니다 |
+| 대표 논문 | 각 공백의 A만/B만/함께 다룬 논문을 **제목·연도·저널과 함께** 최대 3편씩. 함께 다룬 논문의 **연구 설계 구성**(관찰 n편 / RCT n편)도 함께 — '관찰만 있고 RCT 0편'과 '아무것도 0편'은 결론이 다르다 |
+| 중복 제거 | **PMID → DOI(정규화) → 제목+연도** 3단. 제목 키는 소문자·영숫자/한글/한자만 남긴 문자열(20자 이상; 공백·구두점·그 외 문자는 **삭제**)이고, 연도가 같거나 한쪽이 미상일 때만 같은 논문으로 본다. 살아남은 레코드의 **빈 필드만** 중복본에서 채운다(값 덮어쓰기 없음) |
 | 체크 태그 | Humans/Male/Female/Adult/Aged/Animals… 등 색인용 태그 **및** Treatment Outcome·Risk Factors·Surveys and Questionnaires·`… as Topic` 같은 **방법론 표제어**를 주제 분석에서 기본 제외(`--include-check-tags` 로 해제) |
 | 표본 절단 | PubMed 가 보고한 전체 편수 > **실제로 받아온 편수**이면 `truncated`(연도 필터로 줄인 것은 절단이 아니다) — 연도 분포가 절단의 흔적이므로 **추세·부상/쇠퇴 출력을 생략**한다 |
 
 > 통계 구현은 순수 표준 라이브러리입니다. 기본 테스트는 scipy 없이 **독립 손계산/브루트포스**로
-> 검증하며(`tests/test_stats.py`), scipy 가 설치돼 있으면 `tests/test_scipy_crosscheck.py` 가
-> `benjamini_hochberg`·`mann_kendall`·`hypergeom_lower_tail` 을 각각 `scipy.stats` 의
-> `false_discovery_control`·`kendalltau`·`hypergeom` 과 대조합니다(없으면 자동 skip).
+> 검증하며(`tests/test_stats.py`, `tests/test_exact_ci.py`), scipy 가 설치돼 있으면
+> `tests/test_scipy_crosscheck.py` 가 `benjamini_hochberg`·`mann_kendall`·`hypergeom_lower_tail`·
+> `fisher_exact_two_sided`·`clopper_pearson`·`poisson_count_ci`·`reg_inc_beta` 를 각각
+> `scipy.stats` 의 `false_discovery_control`·`kendalltau`·`hypergeom`·`fisher_exact`·`beta.ppf`·
+> `chi2.ppf`·`special.betainc` 와 대조합니다(없으면 자동 skip).
 
 ## 한계 / Limitations
 - **MeSH 의존**: 공동출현 분석은 PubMed가 색인한 MeSH 주제어에 기반합니다. 아주 최신
@@ -325,7 +404,29 @@ PubMed에서는 이 조합들이 함께 색인되는 경우가 많으므로, 이
   `Heart Rate/*physiology`)를 쓰면 **코퍼스 전체를 한 번에** MeSH 로 해석합니다
   (레코드마다 다르게 해석하면 통계가 깨지므로).
 - **PMID 가 없는 레코드**: RIS/CSV 는 PMID 대신 DOI(`doi:…`)나 `?` 로 식별됩니다.
-  `?` 는 각각 고유한 것으로 취급해 중복 제거하지 않습니다.
+  `?` 이고 제목도 짧으면(정규화 후 20자 미만) 각각 고유한 것으로 취급합니다.
+- **여러 파일 합치기의 한계**: `--from-file` 을 여러 번 주면 PMID → DOI → 제목+연도 순으로
+  중복을 제거하고, 리포트 첫머리에 **무엇으로 몇 건을 합쳤는지** 밝힙니다. 제목 대조는
+  휴리스틱이라(구두점·대소문자만 무시) 오탈자가 있는 레코드는 못 잡고, 반대로 제목과
+  연도가 모두 같은 **서로 다른** 논문(같은 학회의 유사 초록 등)은 합쳐질 수 있습니다 —
+  그게 걱정되면 `--no-fuzzy-dedup` 으로 PMID·DOI 만 쓰세요. 살아남은 레코드의 **빈
+  필드만** 다른 출처에서 채우므로(값 덮어쓰기 없음) 편수가 이중계수되지는 않습니다.
+- **연구 각도(부주제어) 축의 한계**: NLM 은 주제 범주별로 붙일 수 있는 부주제어를
+  제한합니다(해부 용어에 `/drug therapy` 는 애초에 불가능). 도구는 어휘 가족 휴리스틱으로
+  그런 칸에 `⚠ 규칙상 불가?` 를 붙이고 순위를 내리지만 **완벽하지 않습니다** — 표시가
+  없는 행에도 규칙상 불가능한 조합이 남을 수 있고, 반대로 정당한 공백에 표시가 붙을 수도
+  있습니다(특히 그 각도를 쓰는 주제가 코퍼스에 하나뿐일 때). 각 행의 PubMed 확인 링크를
+  착수 전 반드시 클릭하세요. 또한 RIS/CSV 내보내기에는 부주제어가 대개 없습니다 —
+  그 경우 절 전체를 "각도 분석을 낼 수 없습니다" 안내로 대체합니다(커버리지 수치는
+  JSON 의 `qualifier_coverage` 에만 남습니다).
+- **`p` 와 `95% CI` 는 서로 다른 모형입니다**: `p` 는 초기하(양쪽 주변합을 고정),
+  `95% CI` 는 관측 편수의 포아송 구간으로 **기대값을 오차 없는 상수로 봅니다**. 그래서
+  `p<0.05` 인데 CI 상한이 1 을 넘는 행이 정상적으로 나옵니다(특히 주변합이 코퍼스의
+  큰 비중을 차지할 때 CI 는 보수적으로 넓어집니다) — 그럴 땐 **보수적인 CI 쪽**을
+  따르세요.
+- **`--min-year/--max-year` 를 쓰면 층화 표집이 꺼집니다**: 그 창 안에서 최신순으로
+  받습니다. 창 안 결과가 `--max-records` 보다 많으면 최신 쪽으로 치우친 표본이 되므로,
+  `--count-only` 로 창 안 편수를 확인해 `--max-records` 를 그 이상으로 두세요.
 - **`--from-file` 에서 무시되는 옵션**: `--years`·`--save-xml` 은 네트워크 조회 전용이며,
   파일 분석에서 지정하면 무시된다고 알려 줍니다(기간 제한은 `--min-year/--max-year`).
 - NCBI E-utilities 예절을 위해 `--email`(가능하면 `--api-key`) 지정을 권장합니다.

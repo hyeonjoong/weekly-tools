@@ -30,12 +30,15 @@
       <MeshHeadingList>
         <MeshHeading>
           <DescriptorName UI="D00010" MajorTopicYN="N">Respiration</DescriptorName>
+          <QualifierName UI="Q000502" MajorTopicYN="N">physiology</QualifierName>
         </MeshHeading>
         <MeshHeading>
           <DescriptorName UI="D00011" MajorTopicYN="N">Heart Rate</DescriptorName>
+          <QualifierName UI="Q000502" MajorTopicYN="N">physiology</QualifierName>
         </MeshHeading>
         <MeshHeading>
           <DescriptorName UI="D00012" MajorTopicYN="N">Autonomic Nervous System</DescriptorName>
+          <QualifierName UI="Q000502" MajorTopicYN="N">physiology</QualifierName>
         </MeshHeading>
       </MeshHeadingList>
     </MedlineCitation>
@@ -66,12 +69,15 @@
       <MeshHeadingList>
         <MeshHeading>
           <DescriptorName UI="D00020" MajorTopicYN="N">Electroencephalography</DescriptorName>
+          <QualifierName UI="Q000379" MajorTopicYN="N">methods</QualifierName>
         </MeshHeading>
         <MeshHeading>
           <DescriptorName UI="D00021" MajorTopicYN="N">Sleep</DescriptorName>
+          <QualifierName UI="Q000502" MajorTopicYN="N">physiology</QualifierName>
         </MeshHeading>
         <MeshHeading>
           <DescriptorName UI="D00022" MajorTopicYN="N">Sleep Initiation and Maintenance Disorders</DescriptorName>
+          <QualifierName UI="Q000503" MajorTopicYN="N">physiopathology</QualifierName>
         </MeshHeading>
       </MeshHeadingList>
     </MedlineCitation>
@@ -102,12 +108,15 @@
       <MeshHeadingList>
         <MeshHeading>
           <DescriptorName UI="D00030" MajorTopicYN="N">Respiration</DescriptorName>
+          <QualifierName UI="Q000502" MajorTopicYN="N">physiology</QualifierName>
         </MeshHeading>
         <MeshHeading>
           <DescriptorName UI="D00031" MajorTopicYN="N">Sleep</DescriptorName>
+          <QualifierName UI="Q000502" MajorTopicYN="N">physiology</QualifierName>
         </MeshHeading>
         <MeshHeading>
           <DescriptorName UI="D00032" MajorTopicYN="N">Respiratory Rate</DescriptorName>
+          <QualifierName UI="Q000502" MajorTopicYN="N">physiology</QualifierName>
         </MeshHeading>
       </MeshHeadingList>
     </MedlineCitation>
@@ -139,12 +148,15 @@
       <MeshHeadingList>
         <MeshHeading>
           <DescriptorName UI="D00040" MajorTopicYN="N">Respiration</DescriptorName>
+          <QualifierName UI="Q000502" MajorTopicYN="N">physiology</QualifierName>
         </MeshHeading>
         <MeshHeading>
           <DescriptorName UI="D00041" MajorTopicYN="N">Parasympathetic Nervous System</DescriptorName>
+          <QualifierName UI="Q000502" MajorTopicYN="N">physiology</QualifierName>
         </MeshHeading>
         <MeshHeading>
           <DescriptorName UI="D00042" MajorTopicYN="N">Heart Rate</DescriptorName>
+          <QualifierName UI="Q000502" MajorTopicYN="N">physiology</QualifierName>
         </MeshHeading>
       </MeshHeadingList>
     </MedlineCitation>
@@ -175,12 +187,15 @@
       <MeshHeadingList>
         <MeshHeading>
           <DescriptorName UI="D00050" MajorTopicYN="N">Electroencephalography</DescriptorName>
+          <QualifierName UI="Q000379" MajorTopicYN="N">methods</QualifierName>
         </MeshHeading>
         <MeshHeading>
           <DescriptorName UI="D00051" MajorTopicYN="N">Sleep</DescriptorName>
+          <QualifierName UI="Q000502" MajorTopicYN="N">physiology</QualifierName>
         </MeshHeading>
         <MeshHeading>
           <DescriptorName UI="D00052" MajorTopicYN="N">Arousal</DescriptorName>
+          <QualifierName UI="Q000502" MajorTopicYN="N">physiology</QualifierName>
         </MeshHeading>
       </MeshHeadingList>
     </MedlineCitation>
@@ -211,12 +226,15 @@
       <MeshHeadingList>
         <MeshHeading>
           <DescriptorName UI="D00060" MajorTopicYN="N">Heart Rate</DescriptorName>
+          <QualifierName UI="Q000502" MajorTopicYN="N">physiology</QualifierName>
         </MeshHeading>
         <MeshHeading>
           <DescriptorName UI="D00061" MajorTopicYN="N">Biofeedback, Psychology</DescriptorName>
+          <QualifierName UI="Q000379" MajorTopicYN="N">methods</QualifierName>
         </MeshHeading>
         <MeshHeading>
           <DescriptorName UI="D00062" MajorTopicYN="N">Autonomic Nervous System</DescriptorName>
+          <QualifierName UI="Q000502" MajorTopicYN="N">physiology</QualifierName>
         </MeshHeading>
       </MeshHeadingList>
     </MedlineCitation>
@@ -247,12 +265,15 @@
       <MeshHeadingList>
         <MeshHeading>
           <DescriptorName UI="D00070" MajorTopicYN="N">Sleep Initiation and Maintenance Disorders</DescriptorName>
+          <QualifierName UI="Q000503" MajorTopicYN="N">physiopathology</QualifierName>
         </MeshHeading>
         <MeshHeading>
           <DescriptorName UI="D00071" MajorTopicYN="N">Autonomic Nervous System</DescriptorName>
+          <QualifierName UI="Q000502" MajorTopicYN="N">physiology</QualifierName>
         </MeshHeading>
         <MeshHeading>
           <DescriptorName UI="D00072" MajorTopicYN="N">Heart Rate</DescriptorName>
+          <QualifierName UI="Q000502" MajorTopicYN="N">physiology</QualifierName>
         </MeshHeading>
       </MeshHeadingList>
     </MedlineCitation>
@@ -283,12 +304,15 @@
       <MeshHeadingList>
         <MeshHeading>
           <DescriptorName UI="D00080" MajorTopicYN="N">Respiration</DescriptorName>
+          <QualifierName UI="Q000502" MajorTopicYN="N">physiology</QualifierName>
         </MeshHeading>
         <MeshHeading>
           <DescriptorName UI="D00081" MajorTopicYN="N">Monitoring, Physiologic</DescriptorName>
+          <QualifierName UI="Q000379" MajorTopicYN="N">methods</QualifierName>
         </MeshHeading>
         <MeshHeading>
           <DescriptorName UI="D00082" MajorTopicYN="N">Sleep</DescriptorName>
+          <QualifierName UI="Q000502" MajorTopicYN="N">physiology</QualifierName>
         </MeshHeading>
       </MeshHeadingList>
     </MedlineCitation>
@@ -319,6 +343,7 @@
       <MeshHeadingList>
         <MeshHeading>
           <DescriptorName UI="D00090" MajorTopicYN="N">Electroencephalography</DescriptorName>
+          <QualifierName UI="Q000379" MajorTopicYN="N">methods</QualifierName>
         </MeshHeading>
         <MeshHeading>
           <DescriptorName UI="D00091" MajorTopicYN="N">Relaxation</DescriptorName>
@@ -353,12 +378,15 @@
       <MeshHeadingList>
         <MeshHeading>
           <DescriptorName UI="D00100" MajorTopicYN="N">Respiration</DescriptorName>
+          <QualifierName UI="Q000502" MajorTopicYN="N">physiology</QualifierName>
         </MeshHeading>
         <MeshHeading>
           <DescriptorName UI="D00101" MajorTopicYN="N">Heart Rate</DescriptorName>
+          <QualifierName UI="Q000502" MajorTopicYN="N">physiology</QualifierName>
         </MeshHeading>
         <MeshHeading>
           <DescriptorName UI="D00102" MajorTopicYN="N">Parasympathetic Nervous System</DescriptorName>
+          <QualifierName UI="Q000502" MajorTopicYN="N">physiology</QualifierName>
         </MeshHeading>
       </MeshHeadingList>
     </MedlineCitation>
@@ -389,12 +417,15 @@
       <MeshHeadingList>
         <MeshHeading>
           <DescriptorName UI="D00110" MajorTopicYN="N">Sleep</DescriptorName>
+          <QualifierName UI="Q000502" MajorTopicYN="N">physiology</QualifierName>
         </MeshHeading>
         <MeshHeading>
           <DescriptorName UI="D00111" MajorTopicYN="N">Electroencephalography</DescriptorName>
+          <QualifierName UI="Q000379" MajorTopicYN="N">methods</QualifierName>
         </MeshHeading>
         <MeshHeading>
           <DescriptorName UI="D00112" MajorTopicYN="N">Memory</DescriptorName>
+          <QualifierName UI="Q000502" MajorTopicYN="N">physiology</QualifierName>
         </MeshHeading>
       </MeshHeadingList>
     </MedlineCitation>
@@ -425,12 +456,15 @@
       <MeshHeadingList>
         <MeshHeading>
           <DescriptorName UI="D00120" MajorTopicYN="N">Electroencephalography</DescriptorName>
+          <QualifierName UI="Q000379" MajorTopicYN="N">methods</QualifierName>
         </MeshHeading>
         <MeshHeading>
           <DescriptorName UI="D00121" MajorTopicYN="N">Sleep</DescriptorName>
+          <QualifierName UI="Q000502" MajorTopicYN="N">physiology</QualifierName>
         </MeshHeading>
         <MeshHeading>
           <DescriptorName UI="D00122" MajorTopicYN="N">Acoustic Stimulation</DescriptorName>
+          <QualifierName UI="Q000379" MajorTopicYN="N">methods</QualifierName>
         </MeshHeading>
       </MeshHeadingList>
     </MedlineCitation>
@@ -462,12 +496,15 @@
       <MeshHeadingList>
         <MeshHeading>
           <DescriptorName UI="D00130" MajorTopicYN="N">Biofeedback, Psychology</DescriptorName>
+          <QualifierName UI="Q000379" MajorTopicYN="N">methods</QualifierName>
         </MeshHeading>
         <MeshHeading>
           <DescriptorName UI="D00131" MajorTopicYN="N">Sleep Initiation and Maintenance Disorders</DescriptorName>
+          <QualifierName UI="Q000628" MajorTopicYN="N">therapy</QualifierName>
         </MeshHeading>
         <MeshHeading>
           <DescriptorName UI="D00132" MajorTopicYN="N">Heart Rate</DescriptorName>
+          <QualifierName UI="Q000502" MajorTopicYN="N">physiology</QualifierName>
         </MeshHeading>
       </MeshHeadingList>
     </MedlineCitation>
@@ -498,12 +535,15 @@
       <MeshHeadingList>
         <MeshHeading>
           <DescriptorName UI="D00140" MajorTopicYN="N">Heart Rate</DescriptorName>
+          <QualifierName UI="Q000502" MajorTopicYN="N">physiology</QualifierName>
         </MeshHeading>
         <MeshHeading>
           <DescriptorName UI="D00141" MajorTopicYN="N">Sleep</DescriptorName>
+          <QualifierName UI="Q000502" MajorTopicYN="N">physiology</QualifierName>
         </MeshHeading>
         <MeshHeading>
           <DescriptorName UI="D00142" MajorTopicYN="N">Monitoring, Physiologic</DescriptorName>
+          <QualifierName UI="Q000379" MajorTopicYN="N">methods</QualifierName>
         </MeshHeading>
       </MeshHeadingList>
     </MedlineCitation>
@@ -534,12 +574,15 @@
       <MeshHeadingList>
         <MeshHeading>
           <DescriptorName UI="D00150" MajorTopicYN="N">Respiration</DescriptorName>
+          <QualifierName UI="Q000502" MajorTopicYN="N">physiology</QualifierName>
         </MeshHeading>
         <MeshHeading>
           <DescriptorName UI="D00151" MajorTopicYN="N">Parasympathetic Nervous System</DescriptorName>
+          <QualifierName UI="Q000502" MajorTopicYN="N">physiology</QualifierName>
         </MeshHeading>
         <MeshHeading>
           <DescriptorName UI="D00152" MajorTopicYN="N">Autonomic Nervous System</DescriptorName>
+          <QualifierName UI="Q000502" MajorTopicYN="N">physiology</QualifierName>
         </MeshHeading>
       </MeshHeadingList>
     </MedlineCitation>
@@ -570,12 +613,15 @@
       <MeshHeadingList>
         <MeshHeading>
           <DescriptorName UI="D00160" MajorTopicYN="N">Respiration</DescriptorName>
+          <QualifierName UI="Q000502" MajorTopicYN="N">physiology</QualifierName>
         </MeshHeading>
         <MeshHeading>
           <DescriptorName UI="D00161" MajorTopicYN="N">Heart Rate</DescriptorName>
+          <QualifierName UI="Q000502" MajorTopicYN="N">physiology</QualifierName>
         </MeshHeading>
         <MeshHeading>
           <DescriptorName UI="D00162" MajorTopicYN="N">Monitoring, Physiologic</DescriptorName>
+          <QualifierName UI="Q000379" MajorTopicYN="N">methods</QualifierName>
         </MeshHeading>
       </MeshHeadingList>
     </MedlineCitation>
@@ -607,12 +653,15 @@
       <MeshHeadingList>
         <MeshHeading>
           <DescriptorName UI="D00170" MajorTopicYN="N">Biofeedback, Psychology</DescriptorName>
+          <QualifierName UI="Q000379" MajorTopicYN="N">methods</QualifierName>
         </MeshHeading>
         <MeshHeading>
           <DescriptorName UI="D00171" MajorTopicYN="N">Respiration</DescriptorName>
+          <QualifierName UI="Q000502" MajorTopicYN="N">physiology</QualifierName>
         </MeshHeading>
         <MeshHeading>
           <DescriptorName UI="D00172" MajorTopicYN="N">Sleep</DescriptorName>
+          <QualifierName UI="Q000502" MajorTopicYN="N">physiology</QualifierName>
         </MeshHeading>
       </MeshHeadingList>
     </MedlineCitation>
@@ -643,15 +692,406 @@
       <MeshHeadingList>
         <MeshHeading>
           <DescriptorName UI="D00180" MajorTopicYN="N">Electroencephalography</DescriptorName>
+          <QualifierName UI="Q000379" MajorTopicYN="N">methods</QualifierName>
         </MeshHeading>
         <MeshHeading>
           <DescriptorName UI="D00181" MajorTopicYN="N">Sleep</DescriptorName>
+          <QualifierName UI="Q000502" MajorTopicYN="N">physiology</QualifierName>
         </MeshHeading>
         <MeshHeading>
           <DescriptorName UI="D00182" MajorTopicYN="N">Acoustic Stimulation</DescriptorName>
+          <QualifierName UI="Q000379" MajorTopicYN="N">methods</QualifierName>
         </MeshHeading>
         <MeshHeading>
           <DescriptorName UI="D00183" MajorTopicYN="N">Autonomic Nervous System</DescriptorName>
+          <QualifierName UI="Q000502" MajorTopicYN="N">physiology</QualifierName>
+        </MeshHeading>
+      </MeshHeadingList>
+    </MedlineCitation>
+  </PubmedArticle>
+  <PubmedArticle>
+    <MedlineCitation>
+      <PMID Version="1">30000019</PMID>
+      <Article>
+        <Journal>
+          <JournalIssue>
+            <PubDate>
+              <Year>2019</Year>
+              <Month>Jun</Month>
+            </PubDate>
+          </JournalIssue>
+          <Title>Sleep Med (full title)</Title>
+          <ISOAbbreviation>Sleep Med</ISOAbbreviation>
+        </Journal>
+        <ArticleTitle>Melatonin for chronic insomnia: a randomized trial</ArticleTitle>
+        <ELocationID EIdType="doi" ValidYN="Y">10.1016/j.pubgap.2019.19001</ELocationID>
+        <Abstract>
+          <AbstractText>Synthetic abstract for the bundled pubgap example.</AbstractText>
+        </Abstract>
+        <PublicationTypeList>
+          <PublicationType UI="D00000">Journal Article</PublicationType>
+          <PublicationType UI="D00001">Randomized Controlled Trial</PublicationType>
+          <PublicationType UI="D00002">Clinical Trial</PublicationType>
+        </PublicationTypeList>
+      </Article>
+      <MeshHeadingList>
+        <MeshHeading>
+          <DescriptorName UI="D00200" MajorTopicYN="N">Melatonin</DescriptorName>
+          <QualifierName UI="Q000627" MajorTopicYN="N">therapeutic use</QualifierName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D00201" MajorTopicYN="N">Sleep Initiation and Maintenance Disorders</DescriptorName>
+          <QualifierName UI="Q000188" MajorTopicYN="N">drug therapy</QualifierName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D00202" MajorTopicYN="N">Sleep</DescriptorName>
+          <QualifierName UI="Q000187" MajorTopicYN="N">drug effects</QualifierName>
+        </MeshHeading>
+      </MeshHeadingList>
+    </MedlineCitation>
+  </PubmedArticle>
+  <PubmedArticle>
+    <MedlineCitation>
+      <PMID Version="1">30000020</PMID>
+      <Article>
+        <Journal>
+          <JournalIssue>
+            <PubDate>
+              <Year>2020</Year>
+              <Month>Jun</Month>
+            </PubDate>
+          </JournalIssue>
+          <Title>J Clin Sleep Med (full title)</Title>
+          <ISOAbbreviation>J Clin Sleep Med</ISOAbbreviation>
+        </Journal>
+        <ArticleTitle>Zolpidem and next-day psychomotor performance</ArticleTitle>
+        <ELocationID EIdType="doi" ValidYN="Y">10.1016/j.pubgap.2020.20001</ELocationID>
+        <Abstract>
+          <AbstractText>Synthetic abstract for the bundled pubgap example.</AbstractText>
+        </Abstract>
+        <PublicationTypeList>
+          <PublicationType UI="D00000">Journal Article</PublicationType>
+          <PublicationType UI="D00001">Randomized Controlled Trial</PublicationType>
+          <PublicationType UI="D00002">Clinical Trial</PublicationType>
+        </PublicationTypeList>
+      </Article>
+      <MeshHeadingList>
+        <MeshHeading>
+          <DescriptorName UI="D00200" MajorTopicYN="N">Hypnotics and Sedatives</DescriptorName>
+          <QualifierName UI="Q000009" MajorTopicYN="N">adverse effects</QualifierName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D00201" MajorTopicYN="N">Sleep</DescriptorName>
+          <QualifierName UI="Q000187" MajorTopicYN="N">drug effects</QualifierName>
+        </MeshHeading>
+      </MeshHeadingList>
+    </MedlineCitation>
+  </PubmedArticle>
+  <PubmedArticle>
+    <MedlineCitation>
+      <PMID Version="1">30000021</PMID>
+      <Article>
+        <Journal>
+          <JournalIssue>
+            <PubDate>
+              <Year>2021</Year>
+              <Month>Jun</Month>
+            </PubDate>
+          </JournalIssue>
+          <Title>Front Physiol (full title)</Title>
+          <ISOAbbreviation>Front Physiol</ISOAbbreviation>
+        </Journal>
+        <ArticleTitle>Beta-blockers and heart rate variability during the night</ArticleTitle>
+        <ELocationID EIdType="doi" ValidYN="Y">10.1016/j.pubgap.2021.21001</ELocationID>
+        <Abstract>
+          <AbstractText>Synthetic abstract for the bundled pubgap example.</AbstractText>
+        </Abstract>
+        <PublicationTypeList>
+          <PublicationType UI="D00000">Journal Article</PublicationType>
+          <PublicationType UI="D00001">Observational Study</PublicationType>
+        </PublicationTypeList>
+      </Article>
+      <MeshHeadingList>
+        <MeshHeading>
+          <DescriptorName UI="D00200" MajorTopicYN="N">Adrenergic beta-Antagonists</DescriptorName>
+          <QualifierName UI="Q000494" MajorTopicYN="N">pharmacology</QualifierName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D00201" MajorTopicYN="N">Heart Rate</DescriptorName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D00202" MajorTopicYN="N">Sleep</DescriptorName>
+          <QualifierName UI="Q000187" MajorTopicYN="N">drug effects</QualifierName>
+        </MeshHeading>
+      </MeshHeadingList>
+    </MedlineCitation>
+  </PubmedArticle>
+  <PubmedArticle>
+    <MedlineCitation>
+      <PMID Version="1">30000022</PMID>
+      <Article>
+        <Journal>
+          <JournalIssue>
+            <PubDate>
+              <Year>2022</Year>
+              <Month>Jun</Month>
+            </PubDate>
+          </JournalIssue>
+          <Title>Sleep (full title)</Title>
+          <ISOAbbreviation>Sleep</ISOAbbreviation>
+        </Journal>
+        <ArticleTitle>Melatonin dose-response on sleep onset latency</ArticleTitle>
+        <ELocationID EIdType="doi" ValidYN="Y">10.1016/j.pubgap.2022.22001</ELocationID>
+        <Abstract>
+          <AbstractText>Synthetic abstract for the bundled pubgap example.</AbstractText>
+        </Abstract>
+        <PublicationTypeList>
+          <PublicationType UI="D00000">Journal Article</PublicationType>
+          <PublicationType UI="D00001">Randomized Controlled Trial</PublicationType>
+          <PublicationType UI="D00002">Clinical Trial</PublicationType>
+        </PublicationTypeList>
+      </Article>
+      <MeshHeadingList>
+        <MeshHeading>
+          <DescriptorName UI="D00200" MajorTopicYN="N">Melatonin</DescriptorName>
+          <QualifierName UI="Q000008" MajorTopicYN="N">administration &amp; dosage</QualifierName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D00201" MajorTopicYN="N">Sleep</DescriptorName>
+          <QualifierName UI="Q000187" MajorTopicYN="N">drug effects</QualifierName>
+        </MeshHeading>
+      </MeshHeadingList>
+    </MedlineCitation>
+  </PubmedArticle>
+  <PubmedArticle>
+    <MedlineCitation>
+      <PMID Version="1">30000023</PMID>
+      <Article>
+        <Journal>
+          <JournalIssue>
+            <PubDate>
+              <Year>2023</Year>
+              <Month>Jun</Month>
+            </PubDate>
+          </JournalIssue>
+          <Title>Chest (full title)</Title>
+          <ISOAbbreviation>Chest</ISOAbbreviation>
+        </Journal>
+        <ArticleTitle>Hypnotic drug use and nocturnal respiration</ArticleTitle>
+        <ELocationID EIdType="doi" ValidYN="Y">10.1016/j.pubgap.2023.23001</ELocationID>
+        <Abstract>
+          <AbstractText>Synthetic abstract for the bundled pubgap example.</AbstractText>
+        </Abstract>
+        <PublicationTypeList>
+          <PublicationType UI="D00000">Journal Article</PublicationType>
+          <PublicationType UI="D00001">Observational Study</PublicationType>
+        </PublicationTypeList>
+      </Article>
+      <MeshHeadingList>
+        <MeshHeading>
+          <DescriptorName UI="D00200" MajorTopicYN="N">Hypnotics and Sedatives</DescriptorName>
+          <QualifierName UI="Q000009" MajorTopicYN="N">adverse effects</QualifierName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D00201" MajorTopicYN="N">Respiration</DescriptorName>
+          <QualifierName UI="Q000187" MajorTopicYN="N">drug effects</QualifierName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D00202" MajorTopicYN="N">Sleep</DescriptorName>
+        </MeshHeading>
+      </MeshHeadingList>
+    </MedlineCitation>
+  </PubmedArticle>
+  <PubmedArticle>
+    <MedlineCitation>
+      <PMID Version="1">30000024</PMID>
+      <Article>
+        <Journal>
+          <JournalIssue>
+            <PubDate>
+              <Year>2024</Year>
+              <Month>Jun</Month>
+            </PubDate>
+          </JournalIssue>
+          <Title>Sleep Med (full title)</Title>
+          <ISOAbbreviation>Sleep Med</ISOAbbreviation>
+        </Journal>
+        <ArticleTitle>Adverse events of long-term hypnotic therapy: a review</ArticleTitle>
+        <ELocationID EIdType="doi" ValidYN="Y">10.1016/j.pubgap.2024.24001</ELocationID>
+        <Abstract>
+          <AbstractText>Synthetic abstract for the bundled pubgap example.</AbstractText>
+        </Abstract>
+        <PublicationTypeList>
+          <PublicationType UI="D00000">Journal Article</PublicationType>
+          <PublicationType UI="D00001">Review</PublicationType>
+        </PublicationTypeList>
+      </Article>
+      <MeshHeadingList>
+        <MeshHeading>
+          <DescriptorName UI="D00200" MajorTopicYN="N">Hypnotics and Sedatives</DescriptorName>
+          <QualifierName UI="Q000009" MajorTopicYN="N">adverse effects</QualifierName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D00201" MajorTopicYN="N">Sleep Initiation and Maintenance Disorders</DescriptorName>
+          <QualifierName UI="Q000188" MajorTopicYN="N">drug therapy</QualifierName>
+        </MeshHeading>
+      </MeshHeadingList>
+    </MedlineCitation>
+  </PubmedArticle>
+  <PubmedArticle>
+    <MedlineCitation>
+      <PMID Version="1">30000025</PMID>
+      <Article>
+        <Journal>
+          <JournalIssue>
+            <PubDate>
+              <Year>2020</Year>
+              <Month>Sep</Month>
+            </PubDate>
+          </JournalIssue>
+          <Title>Chest (full title)</Title>
+          <ISOAbbreviation>Chest</ISOAbbreviation>
+        </Journal>
+        <ArticleTitle>Melatonin and nocturnal respiratory rate</ArticleTitle>
+        <ELocationID EIdType="doi" ValidYN="Y">10.1016/j.pubgap.2020.25001</ELocationID>
+        <Abstract>
+          <AbstractText>Synthetic abstract for the bundled pubgap example.</AbstractText>
+        </Abstract>
+        <PublicationTypeList>
+          <PublicationType UI="D00000">Journal Article</PublicationType>
+          <PublicationType UI="D00001">Randomized Controlled Trial</PublicationType>
+          <PublicationType UI="D00002">Clinical Trial</PublicationType>
+        </PublicationTypeList>
+      </Article>
+      <MeshHeadingList>
+        <MeshHeading>
+          <DescriptorName UI="D00300" MajorTopicYN="N">Melatonin</DescriptorName>
+          <QualifierName UI="Q000494" MajorTopicYN="N">pharmacology</QualifierName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D00301" MajorTopicYN="N">Respiration</DescriptorName>
+          <QualifierName UI="Q000187" MajorTopicYN="N">drug effects</QualifierName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D00302" MajorTopicYN="N">Sleep</DescriptorName>
+          <QualifierName UI="Q000187" MajorTopicYN="N">drug effects</QualifierName>
+        </MeshHeading>
+      </MeshHeadingList>
+    </MedlineCitation>
+  </PubmedArticle>
+  <PubmedArticle>
+    <MedlineCitation>
+      <PMID Version="1">30000026</PMID>
+      <Article>
+        <Journal>
+          <JournalIssue>
+            <PubDate>
+              <Year>2021</Year>
+              <Month>Sep</Month>
+            </PubDate>
+          </JournalIssue>
+          <Title>Front Physiol (full title)</Title>
+          <ISOAbbreviation>Front Physiol</ISOAbbreviation>
+        </Journal>
+        <ArticleTitle>Zolpidem effects on autonomic tone during sleep</ArticleTitle>
+        <ELocationID EIdType="doi" ValidYN="Y">10.1016/j.pubgap.2021.26001</ELocationID>
+        <Abstract>
+          <AbstractText>Synthetic abstract for the bundled pubgap example.</AbstractText>
+        </Abstract>
+        <PublicationTypeList>
+          <PublicationType UI="D00000">Journal Article</PublicationType>
+          <PublicationType UI="D00001">Observational Study</PublicationType>
+        </PublicationTypeList>
+      </Article>
+      <MeshHeadingList>
+        <MeshHeading>
+          <DescriptorName UI="D00300" MajorTopicYN="N">Hypnotics and Sedatives</DescriptorName>
+          <QualifierName UI="Q000494" MajorTopicYN="N">pharmacology</QualifierName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D00301" MajorTopicYN="N">Autonomic Nervous System</DescriptorName>
+          <QualifierName UI="Q000187" MajorTopicYN="N">drug effects</QualifierName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D00302" MajorTopicYN="N">Sleep</DescriptorName>
+          <QualifierName UI="Q000187" MajorTopicYN="N">drug effects</QualifierName>
+        </MeshHeading>
+      </MeshHeadingList>
+    </MedlineCitation>
+  </PubmedArticle>
+  <PubmedArticle>
+    <MedlineCitation>
+      <PMID Version="1">30000027</PMID>
+      <Article>
+        <Journal>
+          <JournalIssue>
+            <PubDate>
+              <Year>2022</Year>
+              <Month>Sep</Month>
+            </PubDate>
+          </JournalIssue>
+          <Title>Sleep Med (full title)</Title>
+          <ISOAbbreviation>Sleep Med</ISOAbbreviation>
+        </Journal>
+        <ArticleTitle>Effect of hypnotics on respiratory drive</ArticleTitle>
+        <ELocationID EIdType="doi" ValidYN="Y">10.1016/j.pubgap.2022.27001</ELocationID>
+        <Abstract>
+          <AbstractText>Synthetic abstract for the bundled pubgap example.</AbstractText>
+        </Abstract>
+        <PublicationTypeList>
+          <PublicationType UI="D00000">Journal Article</PublicationType>
+          <PublicationType UI="D00001">Observational Study</PublicationType>
+        </PublicationTypeList>
+      </Article>
+      <MeshHeadingList>
+        <MeshHeading>
+          <DescriptorName UI="D00300" MajorTopicYN="N">Hypnotics and Sedatives</DescriptorName>
+          <QualifierName UI="Q000009" MajorTopicYN="N">adverse effects</QualifierName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D00301" MajorTopicYN="N">Respiration</DescriptorName>
+          <QualifierName UI="Q000187" MajorTopicYN="N">drug effects</QualifierName>
+        </MeshHeading>
+      </MeshHeadingList>
+    </MedlineCitation>
+  </PubmedArticle>
+  <PubmedArticle>
+    <MedlineCitation>
+      <PMID Version="1">30000028</PMID>
+      <Article>
+        <Journal>
+          <JournalIssue>
+            <PubDate>
+              <Year>2023</Year>
+              <Month>Sep</Month>
+            </PubDate>
+          </JournalIssue>
+          <Title>Sleep (full title)</Title>
+          <ISOAbbreviation>Sleep</ISOAbbreviation>
+        </Journal>
+        <ArticleTitle>Melatonin and slow-wave sleep architecture</ArticleTitle>
+        <ELocationID EIdType="doi" ValidYN="Y">10.1016/j.pubgap.2023.28001</ELocationID>
+        <Abstract>
+          <AbstractText>Synthetic abstract for the bundled pubgap example.</AbstractText>
+        </Abstract>
+        <PublicationTypeList>
+          <PublicationType UI="D00000">Journal Article</PublicationType>
+          <PublicationType UI="D00001">Randomized Controlled Trial</PublicationType>
+          <PublicationType UI="D00002">Clinical Trial</PublicationType>
+        </PublicationTypeList>
+      </Article>
+      <MeshHeadingList>
+        <MeshHeading>
+          <DescriptorName UI="D00300" MajorTopicYN="N">Melatonin</DescriptorName>
+          <QualifierName UI="Q000494" MajorTopicYN="N">pharmacology</QualifierName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D00301" MajorTopicYN="N">Sleep</DescriptorName>
+          <QualifierName UI="Q000187" MajorTopicYN="N">drug effects</QualifierName>
+        </MeshHeading>
+        <MeshHeading>
+          <DescriptorName UI="D00302" MajorTopicYN="N">Electroencephalography</DescriptorName>
+          <QualifierName UI="Q000379" MajorTopicYN="N">methods</QualifierName>
         </MeshHeading>
       </MeshHeadingList>
     </MedlineCitation>
