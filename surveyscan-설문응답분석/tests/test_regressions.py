@@ -167,15 +167,17 @@ def test_all_known_config_keys_accepted():
         "scale_max": 4,
         "min_valid_ratio": 0.75,
         "score_method": "sum",
+        "severity_bands": {"S": [[0, 3, "낮음"], [4, 8, "높음"]]},
     })
     assert set(KNOWN_KEYS) == {
         "subscales", "reverse_items", "scale_min", "scale_max",
-        "min_valid_ratio", "score_method",
+        "min_valid_ratio", "score_method", "severity_bands",
     }
     assert cfg.reverse_items == ["B"]
     assert cfg.scale_min == 0.0 and cfg.scale_max == 4.0
     assert cfg.min_valid_ratio == 0.75
     assert cfg.score_method == "sum"
+    assert cfg.severity_bands == {"S": [(0.0, 3.0, "낮음"), (4.0, 8.0, "높음")]}
 
 
 def test_blank_row_does_not_shift_scores_out_rows(tmp_path):

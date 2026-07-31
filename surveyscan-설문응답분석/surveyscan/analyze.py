@@ -8,8 +8,8 @@ from __future__ import annotations
 import math
 from typing import Dict, List, Optional
 
-from . import factor, quality, stats
-from .config import SurveyConfig
+from . import compare, factor, quality, stats
+from .config import SurveyConfig, band_index, band_label
 from .dataio import SurveyData
 
 
@@ -191,6 +191,60 @@ def analyze_subscale(
             floor = {"n": n_floor, "pct": round(100.0 * n_floor / ns, 1)}
             ceiling = {"n": n_ceil, "pct": round(100.0 * n_ceil / ns, 1)}
 
+    # 임상 심각도 구간(config 의 severity_bands). 점수 단위(mean/sum)에 그대로 적용한다.
+    bands_spec = cfg.severity_bands.get(name) or []
+    band_scores: List[Optional[str]] = []
+    bands_table: List[Dict[str, object]] = []
+    n_unbanded = 0
+    bands_out_of_range = False
+    bands_range_unknown = False
+    # 점수는 났지만 문항 일부만 답해 '비례배분(prorate)'된 응답자 수. 임상 구간 기준값은
+    # 보통 전 문항 응답을 전제로 만들어졌으므로, 분포표에 몇 명이 추정치인지 밝힌다.
+    n_prorated = sum(
+        1
+        for row, sc in zip(_recoded_matrix(data, items, cfg), scores)
+        if sc is not None and any(v is None for v in row)
+    )
+    if bands_spec:
+        band_scores = [band_label(s, bands_spec) for s in scores]
+        n_scored_b = len(valid_scores)
+        # 구간 **인덱스** 로 센다. 라벨로 세면 서로 다른 두 구간이 같은 라벨을 쓸 때
+        # (예: [0,2,"낮음"], [6,8,"낮음"]) 두 행이 합산값을 각각 찍어 합계가 100%를 넘는다.
+        counts = [0] * len(bands_spec)
+        idx_of = band_index(scores, bands_spec)
+        for s, bi in zip(scores, idx_of):
+            if s is None:
+                continue
+            if bi is None:
+                n_unbanded += 1
+            else:
+                counts[bi] += 1
+        for (lo, hi, lab), cnt in zip(bands_spec, counts):
+            bands_table.append(
+                {
+                    "label": lab,
+                    "min": lo,
+                    "max": hi,
+                    "n": cnt,
+                    "pct": round(100.0 * cnt / n_scored_b, 1) if n_scored_b else 0.0,
+                }
+            )
+        # 구간이 '가능한 점수 범위' 밖까지 뻗어 있으면 score_method 불일치가 거의 확실하다
+        # (예: ISI 총점 기준 0~28 구간을 mean 점수 0~4 에 적용). 조용히 오분류되면
+        # 심각도 표 전체가 틀리므로 플래그로 노출한다.
+        if possible_min is not None and possible_max is not None:
+            tol = 1e-9
+            lo_min = min(b[0] for b in bands_spec)
+            hi_max = max(b[1] for b in bands_spec)
+            bands_out_of_range = (
+                lo_min < possible_min - tol or hi_max > possible_max + tol
+            )
+        else:
+            # scale_min/scale_max 가 없으면 '가능한 점수 범위'를 몰라 위 점검을 할 수 없다.
+            # 이때 mean/sum 단위를 잘못 적어도 전원이 최하위 구간에 몰릴 뿐 아무 신호가
+            # 없으므로, 점검 불가 자체를 표면화한다.
+            bands_range_unknown = True
+
     # 응답이 하나도 없는(전부 결측) 문항 — 이런 문항은 점수에 기여하지 못하므로
     # 하위척도 점수가 사실상 더 적은 문항으로 계산된다(오해 방지용 경고).
     items_no_data = [it for it in items if len(data.present_values(it)) == 0]
@@ -224,9 +278,45 @@ def analyze_subscale(
         "possible_max": possible_max,
         "floor": floor,
         "ceiling": ceiling,
+        "bands": bands_table,
+        "n_unbanded": n_unbanded,
+        "n_prorated": n_prorated,
+        "bands_out_of_range": bands_out_of_range,
+        "bands_range_unknown": bands_range_unknown,
         "n_scored": len(valid_scores),
         "scores": scores,
+        "band_scores": band_scores,
     }
+
+
+def _group_alphas(
+    data: SurveyData, cfg: SurveyConfig, items: List[str], group_values: List[str],
+) -> Dict[str, Optional[float]]:
+    """집단별 Cronbach α(그 집단의 완전응답자만).
+
+    같은 척도라도 집단마다 신뢰도가 크게 다르면(예: 한쪽만 α<.6) 점수 비교의 전제가
+    흔들린다 — 측정불변성의 완전한 검증은 아니지만 값싸고 유용한 점검이다.
+    """
+    matrix = _recoded_matrix(data, items, cfg)
+    k = len(items)
+    out: Dict[str, Optional[float]] = {}
+    buckets: Dict[str, List[List[float]]] = {}
+    for row, gv in zip(matrix, group_values):
+        lab = (gv or "").strip()
+        if not lab:
+            continue
+        if all(v is not None for v in row):
+            buckets.setdefault(lab, []).append([float(v) for v in row])  # type: ignore[arg-type]
+        else:
+            buckets.setdefault(lab, [])
+    for lab, rowsg in buckets.items():
+        n = len(rowsg)
+        if k < 2 or n < 2:
+            out[lab] = None
+            continue
+        columns = [[rowsg[r][i] for r in range(n)] for i in range(k)]
+        out[lab] = stats.cronbach_alpha(columns)
+    return out
 
 
 def response_frequencies(
@@ -282,9 +372,21 @@ def analyze(
     # config 문항이 데이터에 실제로 있는지 확인
     missing_cols = [it for it in cfg.all_items() if it not in data.columns]
     if missing_cols:
-        raise ValueError(
-            "config에 적힌 문항이 CSV에 없습니다: " + ", ".join(missing_cols)
-        )
+        # CSV에는 있는데 --id-col/--group-col 로 분석에서 뺀 컬럼이면 '없다'고만 말하면
+        # 사용자가 헤더를 아무리 봐도 원인을 못 찾는다. 두 경우를 구분해 안내한다.
+        header = set(getattr(data, "source_columns", []) or [])
+        excluded = [c for c in missing_cols if c in header]
+        truly_missing = [c for c in missing_cols if c not in header]
+        parts = []
+        if truly_missing:
+            parts.append("CSV에 없습니다: " + ", ".join(truly_missing))
+        if excluded:
+            parts.append(
+                "--id-col/--group-col 로 분석에서 제외되었습니다: "
+                + ", ".join(excluded)
+                + " (그 옵션에서 빼거나 config에서 지우세요)"
+            )
+        raise ValueError("config에 적힌 문항이 " + " / ".join(parts))
 
     items_all = cfg.all_items()
 
@@ -324,6 +426,22 @@ def analyze(
         for name, items in cfg.subscales.items()
     ]
 
+    # 집단 비교(--group-col 지정 시). 하위척도 점수를 집단별로 나눠 Welch 검정·효과크기.
+    group_compare = None
+    group_column = getattr(data, "group_column", None)
+    if group_column:
+        gvals = list(getattr(data, "group_values", []) or [])
+        # 길이 방어: 어떤 이유로든 라벨이 모자라면 빈 문자열(미분류)로 채운다.
+        if len(gvals) < data.n_respondents:
+            gvals += [""] * (data.n_respondents - len(gvals))
+        galphas = {
+            str(s["name"]): _group_alphas(data, cfg, list(s["items"]), gvals)  # type: ignore[arg-type]
+            for s in subscales
+        }
+        group_compare = compare.compare_subscales(
+            subscales, gvals, group_column, conf, galphas
+        )
+
     total_cells = data.n_respondents * len(items_all)
     missing_cells = sum(d["n_missing"] for d in descriptives)
     complete_resp = sum(
@@ -352,6 +470,8 @@ def analyze(
         "subscales": subscales,
         # 하위척도 간 상관(변별타당도). 하위척도가 1개면 None.
         "subscale_corr": quality.subscale_correlations(subscales),
+        "group_column": group_column,
+        "group_compare": group_compare,
         "duplicate_ids": quality.duplicate_ids(data),
         "quality": (
             quality.respondent_quality(data, items_all, longstring_min)

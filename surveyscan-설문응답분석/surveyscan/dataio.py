@@ -17,6 +17,22 @@ class DataError(ValueError):
     """CSV 구조가 분석에 부적합할 때 발생."""
 
 
+# 눈에 보이지 않는 문자들. 그룹 라벨에 섞이면 '치료군' 과 '치료군​' 이 픽셀 단위로
+# 똑같은 별개 집단이 되어(엑셀/웹 복사에서 흔함) 비교표가 조용히 쪼개진다.
+_INVISIBLE = dict.fromkeys(
+    map(ord, "​‌‍﻿‎‏⁠"), None
+)
+_NBSP_MAP = {ord(" "): " ", ord("　"): " "}
+
+
+def normalize_label(raw: str) -> str:
+    """집단 라벨 정규화: 보이지 않는 문자 제거 · 비분리공백→공백 · 양끝 공백 제거.
+
+    라벨을 '보이는 대로' 다루기 위한 최소 정규화다. 대소문자·내부 공백은 건드리지 않는다
+    (실제로 다른 군일 수 있으므로 임의로 합치지 않는다)."""
+    return str(raw).translate(_NBSP_MAP).translate(_INVISIBLE).strip()
+
+
 class SurveyData:
     """설문 응답 표.
 
@@ -34,6 +50,9 @@ class SurveyData:
         source_lines: Optional[List[int]] = None,
         skipped_blank_lines: Optional[List[int]] = None,
         unreadable: Optional[Dict[str, Dict[str, object]]] = None,
+        group_column: Optional[str] = None,
+        group_values: Optional[List[str]] = None,
+        source_columns: Optional[List[str]] = None,
     ):
         self.columns = columns
         self.rows = rows
@@ -51,6 +70,13 @@ class SurveyData:
         self.skipped_blank_lines = skipped_blank_lines or []
         # 값은 있는데 숫자로 읽지 못한 셀: {컬럼: {"count": n, "examples": [원문...]}}
         self.unreadable = unreadable or {}
+        # 집단 비교(--group-col)용 컬럼 이름과 응답자별 라벨(원문 문자열).
+        # ID 컬럼과 달리 중복 판정에는 쓰지 않는다(같은 군에 여러 명이 있는 게 정상).
+        self.group_column = group_column
+        self.group_values = group_values or []
+        # 원본 CSV 헤더 전체(ID·집단 컬럼 포함). config 문항이 '없다'고 할 때
+        # "CSV에는 있는데 --id-col/--group-col 로 뺀 것"인지 구분해 안내하기 위해 보관.
+        self.source_columns = source_columns or list(columns)
 
     @property
     def n_respondents(self) -> int:
@@ -122,14 +148,19 @@ def load_csv(
     id_columns: Optional[Sequence[str]] = None,
     na_numbers: Optional[Sequence[float]] = None,
     delimiter: str = ",",
+    group_column: Optional[str] = None,
 ) -> SurveyData:
     """설문 CSV를 읽어 SurveyData로 변환.
 
     id_columns: 응답자 ID 등 분석에서 제외할 컬럼 이름들.
     na_numbers: 결측 코드로 쓰인 숫자들(예: 999, -9).
+    group_column: 집단 비교 기준 컬럼(치료군·성별 등). 문항 분석에서는 제외된다.
     """
     id_set = set(id_columns or [])
     na_nums = list(na_numbers or [])
+    group_column = group_column.strip() if isinstance(group_column, str) else None
+    if group_column == "":
+        group_column = None
     with open(path, "r", encoding="utf-8-sig", newline="") as fh:
         reader = csv.reader(fh, delimiter=delimiter)
         try:
@@ -143,10 +174,17 @@ def load_csv(
             dupes = sorted({h for h in header if header.count(h) > 1})
             raise DataError("헤더에 중복된 컬럼 이름이 있습니다: " + ", ".join(dupes))
 
-        keep_cols = [h for h in header if h not in id_set]
+        if group_column is not None and group_column not in header:
+            raise DataError(
+                f"--group-col 로 지정한 '{group_column}' 컬럼이 헤더에 없습니다. "
+                "헤더의 컬럼: " + ", ".join(header)
+            )
+        # 집단 컬럼은 문항이 아니므로 분석에서 빼되, ID 처럼 중복 판정에는 쓰지 않는다.
+        keep_cols = [h for h in header if h not in id_set and h != group_column]
         id_cols_present = [h for h in header if h in id_set]
         rows: List[Dict[str, Optional[float]]] = []
         id_values: List[Dict[str, str]] = []
+        group_values: List[str] = []
         source_lines: List[int] = []
         skipped_blank: List[int] = []
         unreadable: Dict[str, Dict[str, object]] = {}
@@ -164,9 +202,19 @@ def load_csv(
                 )
             row: Dict[str, Optional[float]] = {}
             ids: Dict[str, str] = {}
+            gval = ""
             for name, cell in zip(header, record):
+                # 집단 컬럼은 ID 컬럼으로도 동시에 지정될 수 있으므로 먼저 담는다.
+                if name == group_column:
+                    gval = normalize_label(cell)
+                    # 'NA', '.', '-', 999 같은 결측 표기가 하나의 '군'으로 잡히면
+                    # 결측 코드끼리 검정하는 유령 집단이 생긴다 → 라벨 없음으로 본다.
+                    if _classify_cell(gval, DEFAULT_NA, na_nums)[1] in ("blank", "na"):
+                        gval = ""
                 if name in id_set:
                     ids[name] = cell.strip()
+                    continue
+                if name == group_column:
                     continue
                 val, kind = _classify_cell(cell, DEFAULT_NA, na_nums)
                 row[name] = val
@@ -178,6 +226,7 @@ def load_csv(
                         rec["examples"].append(ex)
             rows.append(row)
             id_values.append(ids)
+            group_values.append(gval)
             source_lines.append(lineno)
 
     if not rows:
@@ -192,4 +241,7 @@ def load_csv(
         source_lines=source_lines,
         skipped_blank_lines=skipped_blank,
         unreadable=unreadable,
+        group_column=group_column,
+        group_values=group_values,
+        source_columns=list(header),
     )

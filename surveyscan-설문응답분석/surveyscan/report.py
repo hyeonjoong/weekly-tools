@@ -25,15 +25,33 @@ def _num(x: Optional[float]) -> str:
 
 
 def _ci(pair, nd: int = 2) -> str:
-    """[lo, hi] 를 '[lo, hi]' 문자열로. None이면 빈 문자열."""
+    """[lo, hi] 를 '[lo, hi]' 문자열로. None이거나 비유한값이면 빈 문자열.
+
+    '[nan, nan]' 같은 칸을 그대로 찍으면 사용자는 그것을 '계산된 구간'으로 읽는다.
+    산출 불가는 값이 아니라 공백('-')으로 보여야 한다.
+    """
     if not pair:
         return ""
-    return f"[{pair[0]:.{nd}f}, {pair[1]:.{nd}f}]"
+    try:
+        lo, hi = float(pair[0]), float(pair[1])
+    except (TypeError, ValueError):
+        return ""
+    if not (math.isfinite(lo) and math.isfinite(hi)):
+        return ""
+    return f"[{lo:.{nd}f}, {hi:.{nd}f}]"
 
 
 def _oneline(s: str) -> str:
-    """이름 안의 개행·탭을 공백으로 치환(표 구조가 깨지지 않게)."""
-    return str(s).replace("\r\n", " ").replace("\r", " ").replace("\n", " ").replace("\t", " ")
+    """표 한 칸에 안전하게 들어가는 한 줄 문자열로 정리.
+
+    개행·탭은 공백으로 바꾸고, 제어문자(C0/C1)와 보이지 않는 서식문자(제로폭 공백 등)는
+    지운다. 자료에서 온 라벨(집단명·문항명)에 ANSI 이스케이프(`\\x1b[2K`)가 섞이면
+    터미널 리포트의 다른 줄을 지우거나 색을 바꿔 화면 내용을 왜곡할 수 있다.
+    """
+    txt = str(s).replace("\r\n", " ").replace("\r", " ").replace("\n", " ").replace("\t", " ")
+    return "".join(
+        ch for ch in txt if unicodedata.category(ch) not in ("Cc", "Cf")
+    )
 
 
 def _dwidth(s: str) -> int:
@@ -55,6 +73,32 @@ def _id_text(ids) -> str:
     if not ids:
         return ""
     return " / ".join(str(v) for v in ids.values())
+
+
+def _fmt_p(p: Optional[float]) -> str:
+    """p 값 표기. 관례대로 .001 미만은 '<.001', 그 외 소수 셋째 자리까지.
+
+    '0.000' 으로 적으면 '정확히 0'으로 오해되므로 쓰지 않는다.
+    """
+    if p is None or (isinstance(p, float) and not math.isfinite(p)):
+        return "-"
+    if p < 0.001:
+        return "<.001"
+    return f"{p:.3f}".lstrip("0") if p < 1 else "1.000"
+
+
+def effect_label(g: Optional[float]) -> str:
+    """|g| 관례적 해석(Cohen 1988). 어디까지나 관례일 뿐 임상적 의미와 다를 수 있다."""
+    if g is None or (isinstance(g, float) and not math.isfinite(g)):
+        return "-"
+    a = abs(g)
+    if a < 0.2:
+        return "매우 작음"
+    if a < 0.5:
+        return "작음"
+    if a < 0.8:
+        return "중간"
+    return "큼"
 
 
 def alpha_label(a: Optional[float]) -> str:
@@ -277,6 +321,53 @@ def render(result: Dict[str, object]) -> str:
                 f"     바닥효과 {fl['n']}명({fl['pct']:g}%, ={_num(s['possible_min'])}){fflag}"
                 f"   천장효과 {ce['n']}명({ce['pct']:g}%, ={_num(s['possible_max'])}){cflag}"
             )
+        # 임상 심각도 구간 분포(config 의 severity_bands 지정 시)
+        bands = s.get("bands") or []
+        if bands:
+            pror = int(s.get("n_prorated") or 0)
+            pror_txt = f"; 그중 일부문항 결측으로 비례배분된 {pror}명" if pror else ""
+            lines.append(
+                f"     [ 심각도 구간 분포 ]  (점수산출 {s['n_scored']}명 기준{pror_txt})"
+            )
+            bw = max([_dwidth(str(b["label"])) for b in bands] + [4])
+            for b in bands:
+                rng = f"{_num(b['min'])}~{_num(b['max'])}"
+                lines.append(
+                    f"       {_pad(b['label'], bw)} {_pad(rng, 11, 'right')} : "
+                    f"{_pad(str(b['n']) + '명', 6, 'right')} ({b['pct']:g}%)"
+                )
+            nub = int(s.get("n_unbanded") or 0)
+            if nub:
+                lines.append(
+                    f"       {_pad('미분류', bw)} {_pad('구간 밖', 11, 'right')} : "
+                    f"{_pad(str(nub) + '명', 6, 'right')}  ⚠ 어느 구간에도 속하지 않음"
+                )
+                lines.append(
+                    "         (구간 사이 빈틈에 떨어진 점수 — 결측 비례배분으로 소수점"
+                )
+                lines.append(
+                    "          점수가 생겼거나 구간이 점수 범위를 다 덮지 않는 경우)"
+                )
+            if s.get("bands_out_of_range"):
+                lines.append(
+                    "       ⚠ 구간 경계가 가능한 점수 범위"
+                    f"({_num(s.get('possible_min'))}~{_num(s.get('possible_max'))})를 벗어납니다"
+                )
+                lines.append(
+                    "         — severity_bands 는 지금의 점수 방식"
+                    f"({'총합' if s.get('score_method') == 'sum' else '평균'}) 단위로 적으세요."
+                )
+                lines.append(
+                    "         (단위가 어긋나면 전원이 최하위 구간으로 몰려 '정상적인 표'처럼"
+                )
+                lines.append("          보일 수 있으니 이 경고를 반드시 확인하세요)")
+            if s.get("bands_range_unknown"):
+                lines.append(
+                    "       ⚠ config에 scale_min/scale_max 가 없어 구간 단위(평균/총합)가"
+                )
+                lines.append(
+                    "         맞는지 점검할 수 없었습니다 — 척도 범위를 넣으면 자동으로 확인합니다."
+                )
         no_data = s.get("items_no_data") or []
         if no_data:
             lines.append(
@@ -385,6 +476,105 @@ def render(result: Dict[str, object]) -> str:
             )
         lines.append("      (쌍마다 두 점수가 모두 있는 응답자만 사용 — N이 쌍마다 다를 수 있음)")
 
+    # 집단 비교(--group-col)
+    gc = result.get("group_compare")
+    if gc:
+        conf_pct = int(round(result.get("conf_level", 0.95) * 100))
+        lines.append("")
+        lines.append(f"[ 집단 비교 (기준 컬럼: {_oneline(gc['column'])}) ]")
+        if not gc.get("usable"):
+            lines.append(f"  ⚠ {gc.get('reason')}")
+        else:
+            lines.append("  집단: " + ", ".join(_oneline(x) for x in gc["labels"]))
+            if gc.get("n_no_label"):
+                lines.append(
+                    f"  ※ 집단 라벨이 비어 있는 응답자 {gc['n_no_label']}명은 비교에서 제외했습니다."
+                )
+            for row in gc["subscales"]:
+                lines.append("")
+                lines.append(f"  ▶ {_oneline(row['name'])}")
+                lw = max([_dwidth(str(g["label"])) for g in row["groups"]] + [4])
+                lines.append(
+                    f"     {_pad('집단', lw)} {_pad('N', 5, 'right')} "
+                    f"{_pad('평균', 8, 'right')} {_pad('SD', 8, 'right')} "
+                    f"{_pad('중앙', 7, 'right')} {_pad('α', 6, 'right')}"
+                )
+                lines.append("     " + "-" * (lw + 38))
+                for g in row["groups"]:
+                    lines.append(
+                        f"     {_pad(g['label'], lw)} {_pad(g['n'], 5, 'right')} "
+                        f"{_pad(_fmt(g['mean']), 8, 'right')} {_pad(_fmt(g['sd']), 8, 'right')} "
+                        f"{_pad(_fmt(g['median'], 1), 7, 'right')} "
+                        f"{_pad(_fmt(g.get('alpha'), 2), 6, 'right')}"
+                    )
+                t = row.get("test")
+                if t and t.get("test") == "welch_t":
+                    lines.append(
+                        f"     Welch t({_fmt(t['df'], 1)}) = {_fmt(t['t'], 2)}, "
+                        f"p = {_fmt_p(t['p'])}"
+                        + (
+                            f"   (Holm 보정 p = {_fmt_p(row['p_holm'])})"
+                            if gc.get("n_tests", 0) > 1 else ""
+                        )
+                    )
+                    dl = row.get("diff_labels") or []
+                    who = f"({_oneline(dl[0])} − {_oneline(dl[1])})" if len(dl) == 2 else ""
+                    lines.append(
+                        f"     평균차{who} {_fmt(t['mean_diff'])}  "
+                        f"{conf_pct}% CI {_ci(t['diff_ci'])}"
+                    )
+                    e = row.get("effect")
+                    if e:
+                        lines.append(
+                            f"     Hedges g{who} = {_fmt(e['g'])} {_ci(e['ci'])} "
+                            f"[{effect_label(e['g'])}]"
+                        )
+                elif t and t.get("test") == "welch_anova":
+                    lines.append(
+                        f"     Welch ANOVA F({_fmt(t['df1'], 0)}, {_fmt(t['df2'], 1)}) = "
+                        f"{_fmt(t['F'], 2)}, p = {_fmt_p(t['p'])}"
+                        + (
+                            f"   (Holm 보정 p = {_fmt_p(row['p_holm'])})"
+                            if gc.get("n_tests", 0) > 1 else ""
+                        )
+                    )
+                    lines.append(
+                        "     (집단 3개 이상 → 전체 차이 검정. 어느 쌍이 다른지는 사후검정 필요)"
+                    )
+                exc = row.get("excluded_groups") or []
+                if exc:
+                    lines.append(
+                        "     ※ 점수가 2명 미만이라 검정에서 빠진 집단: "
+                        + ", ".join(_oneline(x) for x in exc)
+                    )
+                if row.get("reason"):
+                    lines.append(f"     ⚠ {row['reason']}")
+            lines.append("")
+            lines.append(
+                "      ※ 등분산을 가정하지 않는 Welch 검정을 씁니다(집단 크기·분산이 다른"
+            )
+            lines.append(
+                "        임상자료의 기본값; Delacre et al. 2017). 하위척도가 여러 개면 검정도"
+            )
+            lines.append(
+                "        여러 번이므로 Holm 보정 p 를 함께 봅니다. 이 비교는 자료 점검·기술"
+            )
+            lines.append(
+                "        목적의 탐색적 분석이며, 사전 정의된 1차 분석을 대신하지 않습니다."
+            )
+            lines.append(
+                "        Hedges g: |0.2| 작음 / |0.5| 중간 / |0.8| 큼 (관례, Cohen 1988)."
+            )
+            lines.append(
+                "        g의 CI는 대표본 근사이므로 집단이 작으면 실제보다 좁습니다."
+            )
+            lines.append(
+                "        표의 N은 '점수가 산출된 인원', α는 그 집단의 '완전응답자' 기준이라"
+            )
+            lines.append(
+                "        분모가 다를 수 있고, 집단이 작으면 α가 음수로도 나옵니다(참고용)."
+            )
+
     lines.append("")
     lines.append("  주: α 해석 — .9우수/.8양호/.7수용/.6의심/<.6낮음.")
     lines.append("      '문항-총점 r'은 수정된 상관(해당 문항 제외 합과의 상관).")
@@ -402,8 +592,22 @@ def render(result: Dict[str, object]) -> str:
 
 
 def _mdcell(x) -> str:
-    """마크다운 표 셀 값에서 파이프(|)를 이스케이프하고 개행을 공백으로 치환."""
-    return _oneline(x).replace("|", "\\|")
+    """마크다운 표 셀 값을 안전하게 만든다.
+
+    파이프(|)는 표 구조를, `<`/`>` 는 원시 HTML(<img onerror=...>)을, 대괄호는 링크
+    (`[클릭](javascript:...)`)를 만든다. 자료에서 온 라벨이 그대로 들어가면 붙여넣은
+    문서에서 실행 가능한 내용이 되므로 모두 무해한 표기로 바꾼다.
+    """
+    return (
+        _oneline(x)
+        .replace("|", "\\|")
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace("[", "\\[")
+        .replace("]", "\\]")
+        .replace("`", "\\`")
+    )
 
 
 def render_markdown(result: Dict[str, object]) -> str:
@@ -556,6 +760,42 @@ def render_markdown(result: Dict[str, object]) -> str:
         )
     L.append("")
 
+    banded = [s for s in result["subscales"] if s.get("bands")]
+    if banded:
+        L.append("## 임상 심각도 구간 분포")
+        L.append("")
+        for s in banded:
+            pror = int(s.get("n_prorated") or 0)
+            pror_txt = f", 그중 비례배분 {pror}명" if pror else ""
+            L.append(f"### {_oneline(s['name'])} (점수산출 {s['n_scored']}명{pror_txt})")
+            L.append("")
+            L.append("| 심각도 | 점수 구간 | N | % |")
+            L.append("|---|---|---:|---:|")
+            for b in s["bands"]:
+                L.append(
+                    f"| {_mdcell(b['label'])} | {_num(b['min'])}~{_num(b['max'])} "
+                    f"| {b['n']} | {b['pct']:g} |"
+                )
+            nub = int(s.get("n_unbanded") or 0)
+            if nub:
+                L.append(f"| 미분류(구간 밖) | - | {nub} | - |")
+            L.append("")
+            if s.get("bands_out_of_range"):
+                L.append(
+                    f"> ⚠ 구간 경계가 가능한 점수 범위({_num(s.get('possible_min'))}~"
+                    f"{_num(s.get('possible_max'))})를 벗어납니다 — `severity_bands` 는 "
+                    f"현재 점수 방식({'총합' if s.get('score_method') == 'sum' else '평균'}) "
+                    "단위로 지정하세요. 단위가 어긋나면 전원이 최하위 구간으로 몰려 "
+                    "정상적인 표처럼 보일 수 있습니다."
+                )
+                L.append("")
+            if s.get("bands_range_unknown"):
+                L.append(
+                    "> ⚠ config에 `scale_min`/`scale_max` 가 없어 구간 단위(평균/총합)가 맞는지 "
+                    "점검할 수 없었습니다 — 척도 범위를 넣으면 자동으로 확인합니다."
+                )
+                L.append("")
+
     for s in result["subscales"]:
         if not (s["n_items"] >= 2 and s["alpha"] is not None):
             continue
@@ -637,6 +877,76 @@ def render_markdown(result: Dict[str, object]) -> str:
         L.append("")
         L.append("> 쌍마다 두 점수가 모두 있는 응답자만 사용(pairwise) — N이 쌍마다 다를 수 있음.")
         L.append("")
+
+    gc = result.get("group_compare")
+    if gc:
+        L.append(f"## 집단 비교 (기준 컬럼: {_mdcell(gc['column'])})")
+        L.append("")
+        if not gc.get("usable"):
+            L.append(f"> ⚠ {gc.get('reason')}")
+            L.append("")
+        else:
+            if gc.get("n_no_label"):
+                L.append(
+                    f"> 집단 라벨이 비어 있는 응답자 {gc['n_no_label']}명은 비교에서 제외했습니다."
+                )
+                L.append("")
+            for row in gc["subscales"]:
+                L.append(f"### {_oneline(row['name'])}")
+                L.append("")
+                L.append("| 집단 | N | 평균 | SD | 중앙 | α |")
+                L.append("|---|---:|---:|---:|---:|---:|")
+                for g in row["groups"]:
+                    L.append(
+                        f"| {_mdcell(g['label'])} | {g['n']} | {_fmt(g['mean'])} "
+                        f"| {_fmt(g['sd'])} | {_fmt(g['median'], 1)} | {_fmt(g.get('alpha'), 2)} |"
+                    )
+                L.append("")
+                t = row.get("test")
+                e = row.get("effect")
+                holm = (
+                    f", Holm 보정 p = {_fmt_p(row['p_holm'])}"
+                    if gc.get("n_tests", 0) > 1 else ""
+                )
+                if t and t.get("test") == "welch_t":
+                    L.append(
+                        f"- Welch t({_fmt(t['df'], 1)}) = {_fmt(t['t'], 2)}, "
+                        f"**p = {_fmt_p(t['p'])}**{holm}"
+                    )
+                    dl = row.get("diff_labels") or []
+                    who = f"({_mdcell(dl[0])} − {_mdcell(dl[1])})" if len(dl) == 2 else ""
+                    L.append(
+                        f"- 평균차{who} {_fmt(t['mean_diff'])}, {conf_pct}% CI {_ci(t['diff_ci'])}"
+                    )
+                    if e:
+                        L.append(
+                            f"- Hedges g{who} = {_fmt(e['g'])} {_ci(e['ci'])} "
+                            f"({effect_label(e['g'])})"
+                        )
+                elif t and t.get("test") == "welch_anova":
+                    L.append(
+                        f"- Welch ANOVA F({_fmt(t['df1'], 0)}, {_fmt(t['df2'], 1)}) = "
+                        f"{_fmt(t['F'], 2)}, **p = {_fmt_p(t['p'])}**{holm}"
+                    )
+                    L.append("- 집단 3개 이상 → 전체 차이 검정(어느 쌍이 다른지는 사후검정 필요)")
+                exc = row.get("excluded_groups") or []
+                if exc:
+                    L.append(
+                        "- 점수가 2명 미만이라 검정에서 빠진 집단: "
+                        + ", ".join(_mdcell(x) for x in exc)
+                    )
+                if row.get("reason"):
+                    L.append(f"- ⚠ {row['reason']}")
+                L.append("")
+            L.append(
+                "> 등분산을 가정하지 않는 **Welch** 검정(Delacre et al. 2017). 하위척도가 여러 개면 "
+                "Holm 보정 p 를 함께 보세요. 이 비교는 자료 점검·기술 목적의 **탐색적** 분석이며 "
+                "사전 정의된 1차 분석을 대신하지 않습니다. Hedges g(2집단 전용) 관례: |0.2| 작음 / "
+                "|0.5| 중간 / |0.8| 큼(Cohen 1988) — CI는 대표본 근사라 소표본에서 좁습니다. "
+                "표의 N은 점수 산출 인원, α는 그 집단의 완전응답자 기준이라 분모가 다를 수 있으며 "
+                "집단이 작으면 α가 음수로도 나옵니다(참고용)."
+            )
+            L.append("")
 
     L.append("---")
     L.append("*α 해석: .9 우수 / .8 양호 / .7 수용 / .6 의심 / <.6 낮음. "
