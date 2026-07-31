@@ -228,6 +228,33 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 2
 
     text = render(table, opt, fmt=args.format)
+
+    # md / html / json embed the legend, per-variable notes and warnings in the
+    # document itself. csv and tsv deliberately do not: a manuscript export has
+    # to stay machine-parseable, and trailing comment rows would corrupt it for
+    # pandas/Excel. Without this the researcher exporting the CSV the README
+    # recommends would never see "1 value could not be parsed and was excluded
+    # from the mean" — so route them to stderr, which stays out of the file
+    # even under '> table1.csv'.
+    if args.format in ("csv", "tsv"):
+        notes = []
+        for row in table.rows:
+            for n in getattr(row, "notes", []) or []:
+                entry = f"{row.name}: {n}"
+                if entry not in notes:
+                    notes.append(entry)
+        if notes or table.warnings:
+            hdr = ("[참고] 이 형식(csv/tsv)은 주석·경고를 파일에 넣지 않습니다"
+                   " — 아래 내용을 확인하세요:"
+                   if (args.lang or "ko") == "ko" else
+                   "[note] csv/tsv output cannot carry notes and warnings; "
+                   "they are listed here:")
+            print(hdr, file=sys.stderr)
+            for n in notes:
+                print(f"  - {n}", file=sys.stderr)
+            for w in table.warnings:
+                print(f"  - {w}", file=sys.stderr)
+
     if args.out:
         try:
             with open(args.out, "w", encoding="utf-8") as fh:

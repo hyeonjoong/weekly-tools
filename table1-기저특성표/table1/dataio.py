@@ -219,6 +219,20 @@ def _frame_from_rows(all_rows: List[List[str]], path: str) -> Frame:
     header = [h.strip() for h in all_rows[0]]
     if not any(header):
         raise ValueError("헤더(첫 행)가 비어 있습니다.")
+    # Give every unnamed column a distinct placeholder name. Two blank headers
+    # (a real shape: a stray trailing comma, or a spreadsheet exported with
+    # spacer columns) would otherwise BOTH map to "" — and Frame.index keeps
+    # only the first, so one column would be summarized twice under a blank
+    # name while another was never summarized at all.
+    taken = {h for h in header if h}
+    for i, h in enumerate(header):
+        if h:
+            continue
+        name = f"col_{i + 1}"
+        while name in taken:
+            name += "_"
+        header[i] = name
+        taken.add(name)
     dupes = sorted({h for h in header if header.count(h) > 1 and h})
     if dupes:
         raise ValueError(
