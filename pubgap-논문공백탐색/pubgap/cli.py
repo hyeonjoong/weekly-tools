@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import List, Optional, Sequence
 
 from . import __version__
-from .analyze import GAP_SORTS, POPULATION_SORTS, is_non_topical
+from .analyze import GAP_NULLS, GAP_SORTS, POPULATION_SORTS, is_non_topical
 from .records import (
     Article,
     apply_include_keywords,
@@ -238,6 +238,7 @@ def _build_meta(args: argparse.Namespace, state: dict, exclude_terms: List[str])
             "gap_max_lift": args.gap_max_lift,
             "gap_max_q": args.gap_max_q,
             "gap_sort": args.gap_sort,
+            "gap_null": args.gap_null,
             "bridges": not args.no_bridges,
             "evidence": not args.no_evidence,
             "top_evidence": args.top_evidence,
@@ -565,6 +566,14 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     p.add_argument(
+        "--gap-null", choices=GAP_NULLS, default="independent",
+        help=(
+            "주제쌍 공백의 귀무모형: independent(기본·초기하, 모든 논문이 같은 확률) / "
+            "degree(색인 밀도 보정 — 논문마다 주제어 수가 다르다는 사실을 반영, "
+            "포아송이항 정확검정). 얇게 색인된 코퍼스에서 헛공백을 줄인다"
+        ),
+    )
+    p.add_argument(
         "--exclude-term", action="append", metavar="TERM",
         help="이 주제어를 분석에서 제외(대소문자 무시). 여러 번 지정 가능 — 보통 검색어 자체",
     )
@@ -766,6 +775,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             gap_max_lift=args.gap_max_lift,
             gap_max_q=args.gap_max_q,
             gap_sort=args.gap_sort,
+            gap_null=args.gap_null,
             drop_check_tags=not args.include_check_tags,
             exclude_terms=exclude_terms,
             bridge_top_n=0 if args.no_bridges else 3,

@@ -105,6 +105,17 @@ def _ci_text(lo, hi, pct: bool = False, dash: str = "–") -> str:
     return f"{lo:.2f}{dash}{hi:.2f}"
 
 
+def _fragility_text(gp: Dict) -> str:
+    """취약도를 표 한 칸으로. 유의하지 않은 줄에는 물을 수 없는 질문이라 '–'."""
+    if gp.get("fragility_capped"):
+        # 실제로 시험한 편수만 주장한다(관측 상한 때문에 40 편을 다 못 얹을 수 있다).
+        return f"≥{gp.get('fragility_tested') or analyze.FRAGILITY_MAX_STEPS}편"
+    d = gp.get("fragility")
+    if d is None:
+        return "–"
+    return f"+{d}편"
+
+
 def _gap_dict(gap) -> Dict:
     """GapPair → 리포트용 dict(검증 URL 포함)."""
     d = dict(gap.__dict__)
@@ -170,6 +181,7 @@ def build_report(
     gap_max_lift: float = 0.5,
     gap_max_q: Optional[float] = None,
     gap_sort: str = "deficit",
+    gap_null: str = "independent",
     drop_check_tags: bool = True,
     exclude_terms: Sequence[str] = (),
     bridge_top_n: int = 3,
@@ -222,11 +234,18 @@ def build_report(
     trends = analyze.term_trends(articles)
     gaps = analyze.gap_pairs(
         articles, top_k=gap_top_k, min_expected=gap_min_expected, max_lift=gap_max_lift,
-        bridge_top_n=bridge_top_n, sort=gap_sort,
+        bridge_top_n=bridge_top_n, sort=gap_sort, null=gap_null,
     )
     if gap_max_q is not None:
         gaps = [g for g in gaps if g.q_value <= gap_max_q]
     n_with_mesh = sum(1 for a in articles if a.mesh)
+    # 색인 밀도(주제어 보유 논문 1편당 평균 주제어 수). `--gap-null` 을 고를 때 필요한
+    # 관측치인데 지금까지 어디에도 없었다 — "얇게 색인됐으면 degree 를 쓰라"는 조언을
+    # 적용할 근거를 사용자가 갖지 못했다.
+    mesh_per_article = (
+        sum(len(set(a.mesh)) for a in articles if a.mesh) / n_with_mesh
+        if n_with_mesh else 0.0
+    )
 
     # 표본이 잘렸는지는 **PubMed 가 돌려준 편수(n_fetched)** 와 전체 편수를 비교해
     # 판정해야 한다. 분석 시점의 논문 수(len(articles))로 비교하면, 사용자가
@@ -261,6 +280,7 @@ def build_report(
         "query": query,
         "n_articles": len(articles),
         "n_with_mesh": n_with_mesh,
+        "mesh_per_article": mesh_per_article,
         "topic_source": topic_source,
         "total_available": total_available,
         "truncated": truncated,
@@ -269,6 +289,7 @@ def build_report(
         "trend_reliable": trend_ok,
         "small_sample": len(articles) < SMALL_SAMPLE_N,
         "gap_sort": gap_sort,
+        "gap_null": gap_null,
         "gap_terms": analyze.gap_candidate_terms(articles, gap_top_k),
         "gap_n_tested": analyze.count_gap_tests(articles, gap_top_k, gap_min_expected),
         "yearly_counts": counts,
@@ -634,6 +655,19 @@ def _render_summary(rep: Dict) -> List[str]:
             f"— 함께 {pick['observed']}편(기대 {pick['expected']:.1f}, lift {pick['lift']:.2f}, "
             f"q={pick.get('q_value', 1.0):.3f}){note}"
         )
+        # 1순위가 몇 편에 매달려 있는지는 요약에서 바로 알려 줘야 한다 — 표까지
+        # 내려가야 보이면, 편수 한둘로 뒤집히는 후보를 그대로 들고 나가게 된다.
+        if pick.get("fragility_capped"):
+            tested = pick.get("fragility_tested") or analyze.FRAGILITY_MAX_STEPS
+            L.append(
+                f"  - 견고성(취약도): 함께 다룬 논문을 **{tested}편** 더 얹어도 "
+                "q≤0.05 가 유지됩니다 — 매우 견고한 공백입니다."
+            )
+        elif pick.get("fragility") is not None:
+            L.append(
+                f"  - 견고성(취약도): 함께 다룬 논문이 **{pick['fragility']}편**만 더 있었어도 "
+                "q>0.05 가 되어 사라졌을 공백입니다."
+            )
     ang = [g for g in angles if g.get("plausible", True)]
     if ang:
         a0 = ang[0]
@@ -984,8 +1018,8 @@ def render_markdown(rep: Dict) -> str:
         show_trend = any(
             gp.get("gap_trend") not in (None, "unknown") for gp in rep["gaps"]
         )
-        head = "| 주제 A | 주제 B | 함께(관측) | 기대 | 부족 | lift | 95% CI | p | q(FDR) |"
-        sep = "|---|---|---:|---:|---:|---:|:--:|---:|---:|"
+        head = "| 주제 A | 주제 B | 함께(관측) | 기대 | 부족 | lift | 95% CI | p | q(FDR) | 취약도 |"
+        sep = "|---|---|---:|---:|---:|---:|:--:|---:|---:|:--:|"
         if show_trend:
             head += " 추이 |"
             sep += ":--:|"
@@ -996,13 +1030,17 @@ def render_markdown(rep: Dict) -> str:
         L.append(sep)
         for gp in rep["gaps"]:
             suspect = " ⚠상하위어?" if gp.get("hierarchy_suspect") else ""
+            # 밀도 모형이 포화된 쌍은 독립가정으로 검정했다 — 어느 행이 그런지 밝힌다.
+            if gp.get("null_fallback"):
+                suspect += " ⚠밀도모형 포화→독립가정"
             row = (
                 f"| {_md_cell(gp['term_a'])} | {_md_cell(gp['term_b'])}{suspect} | {gp['observed']} "
                 f"| {gp['expected']:.1f} | {gp.get('deficit', 0.0):+.1f} "
                 f"| {gp['lift']:.2f} "
                 f"| {_ci_text(gp.get('lift_ci_low'), gp.get('lift_ci_high'))} "
                 f"| {gp['p_value']:.3f} "
-                f"| {gp.get('q_value', 1.0):.3f} |"
+                f"| {gp.get('q_value', 1.0):.3f} "
+                f"| {_fragility_text(gp)} |"
             )
             if show_trend:
                 rate = ""
@@ -1033,12 +1071,56 @@ def render_markdown(rep: Dict) -> str:
             L.append("")
         L.append(
             f"_정렬: **{_SORT_LABEL.get(rep.get('gap_sort', 'deficit'), rep.get('gap_sort'))}** "
-            "(`--gap-sort`). `부족`=기대−관측(**독립 가정 대비** 부족분, '있었어야 할 논문 수'가 아니다) · "
+            "(`--gap-sort`). `부족`=기대−관측("
+            + ("**색인 밀도 보정 모형 대비**" if rep.get("gap_null") == "degree"
+               else "**독립 가정 대비**")
+            + " 부족분, '있었어야 할 논문 수'가 아니다) · "
             "`lift`=관측/기대 · `95% CI`=lift 의 포아송 정확구간(상한이 1 을 넘으면 "
-            "'덜 엮였다'고 단정할 수 없다는 뜻) · `p`=초기하 하단꼬리 · `q`=BH-FDR 보정 · "
+            "'덜 엮였다'고 단정할 수 없다는 뜻) · `p`="
+            + ("포아송이항" if rep.get("gap_null") == "degree" else "초기하")
+            + " 하단꼬리 · `q`=BH-FDR 보정 · "
             "`추이`: ⬜완전공백(양쪽 구간 모두 0편) / ↗메워짐 / ↘벌어짐 / –판단불가. "
             "자세한 읽는 법은 사용법.md 참고._"
         )
+        L.append(
+            "_`취약도` = **함께 다룬 논문이 몇 편만 더 있었어도 q>0.05 가 되어 "
+            "이 공백이 사라졌는가**(임상시험의 fragility index 와 같은 발상). "
+            "`+1편` 이면 색인 한 건에 결론이 매달려 있다는 뜻이고, 숫자가 클수록 견고합니다. "
+            "`–` 는 애초에 q>0.05 라 물을 수 없는 줄입니다. "
+            "**q 기준이라 검정군 크기(`--gap-top-k`)가 바뀌면 값도 바뀝니다** — 설정을 "
+            "고정한 채 후보끼리 비교하는 데 쓰고, 절대 지표로 인용하지 마세요._"
+        )
+        n_fallback = sum(1 for gp in rep["gaps"] if gp.get("null_fallback"))
+        density = rep.get("mesh_per_article") or 0.0
+        density_txt = f"(이 코퍼스: 논문 1편당 평균 {density:.1f}개 주제어) " if density else ""
+        if rep.get("gap_null") == "degree":
+            L.append(
+                "_귀무모형: **색인 밀도 보정**(`--gap-null degree`) — 논문마다 주제어 수가 "
+                f"다르다는 사실을 반영해 {density_txt}기대값을 다시 계산하고 포아송이항 "
+                "정확검정을 썼습니다. 주제어가 하나뿐인 논문은 어떤 쌍도 가질 수 없으므로 "
+                "기대에서 빠집니다. 위 `기대`·`부족`·`lift`·`p` 는 모두 이 모형의 값이고, "
+                "독립가정 기대값은 JSON/CSV 의 `expected_independent` 에 함께 실립니다. "
+                "**이 모형이 '진짜 공백'을 가려 주지는 않습니다** — 앵커 주제의 논문들이 "
+                "코퍼스 평균보다 얇게 색인돼 있으면 공백이 약해지고, 두껍게 색인돼 있으면 "
+                "오히려 강해집니다. 두 모형에서 모두 살아남는 공백만 근거로 쓰세요. "
+                "기대값은 둘 중 **논문이 적은 쪽**을 조건으로 계산합니다(어느 쪽을 잡느냐로 "
+                "값이 크게 갈릴 수 있어 규칙으로 고정했습니다)._"
+            )
+            if n_fallback:
+                L.append(
+                    f"_⚠️ 위 {n_fallback}개 행(`⚠밀도모형 포화→독립가정`)은 밀도 모형이 "
+                    "성립하지 않아(아주 흔한 주제 × 깊게 색인된 논문이라 논문 하나에 그 "
+                    "주제를 한 번 넘게 넣어야 하는 상황) **독립가정으로 되돌려** 검정했습니다. "
+                    "잘라낸 채로 밀도 모형을 쓰면 분산이 사라져 p=0 짜리 가짜 공백이 나옵니다._"
+                )
+        else:
+            L.append(
+                f"_귀무모형: 독립가정(초기하) {density_txt}— 어느 논문이든 그 주제를 달 "
+                "확률이 같다고 봅니다. `--gap-null degree` 를 주면 논문마다 주제어 수가 "
+                "다르다는 사실을 반영한 기대값과 비교할 수 있습니다(제거가 아니라 **재계산** "
+                "입니다 — 공백이 약해질 수도, 오히려 강해질 수도 있습니다). 두 모형에서 "
+                "모두 살아남는 공백이 가장 믿을 만합니다._"
+            )
         # 다중검정 예산을 솔직히 밝힌다. 검정 수가 많을수록 q 는 나빠지므로, 사용자가
         # 'q≤0.05 인 줄이 왜 없는지' 를 알 수 있어야 한다.
         #
@@ -1171,7 +1253,8 @@ def render_markdown(rep: Dict) -> str:
 # 실행정보에서 '기본값과 다른 옵션'만 강조하기 위한 기준값(build_parser 기본값과 일치).
 _DEFAULT_PARAMS = {
     "gap_top_k": 12, "gap_min_expected": 2.0, "gap_max_lift": 0.5, "gap_max_q": None,
-    "gap_sort": "deficit", "bridges": True, "evidence": True, "top_evidence": 12,
+    "gap_sort": "deficit", "gap_null": "independent",
+    "bridges": True, "evidence": True, "top_evidence": 12,
     "angles": True, "angle_top_k": 12, "angle_top_qualifiers": 10,
     "angle_min_expected": 1.0, "angle_max_lift": 0.5,
     "angle_hide_implausible": False, "fuzzy_dedup": True,
@@ -1234,6 +1317,8 @@ _CSV_HEADER = [
     "term_a", "term_b", "observed", "expected", "deficit", "lift",
     "lift_ci_low", "lift_ci_high",
     "jaccard", "cosine", "npmi", "count_a", "count_b", "p_value", "q_value",
+    "null_model", "null_fallback", "expected_independent",
+    "fragility", "fragility_capped", "fragility_tested",
     "observed_early", "observed_recent", "gap_trend",
     "pmids_a", "pmids_b", "pmids_both", "bridges",
     "pubmed_url_mesh", "pubmed_url_text",
@@ -1331,6 +1416,12 @@ def _csv_gaps(writer, rep: Dict) -> None:
             gp["count_b"],
             f"{gp['p_value']:.6f}",
             f"{gp.get('q_value', 1.0):.6f}",
+            gp.get("null_model", "independent"),
+            "yes" if gp.get("null_fallback") else "",
+            f"{gp.get('expected_independent', 0.0):.4f}",
+            "" if gp.get("fragility") is None else gp["fragility"],
+            "yes" if gp.get("fragility_capped") else "",
+            gp.get("fragility_tested", 0),
             gp.get("observed_early", 0),
             gp.get("observed_recent", 0),
             gp.get("gap_trend", "unknown"),
