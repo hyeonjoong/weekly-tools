@@ -28,6 +28,10 @@ from .describe import describe, profile_missing
 from .nonparam import friedman
 from .report import render_csv, render_json, render_text
 from .responder import rci_analysis, responder_analysis
+from .sensitivity import (SensitivityResult, impute_panel,
+                          sensitivity_analysis)
+from .trend import (SlopeRow, TrendResult, orthogonal_polynomials,
+                    trend_analysis)
 
 __all__ = [
     "__version__",
@@ -36,5 +40,7 @@ __all__ = [
     "RMAnovaResult", "rm_anova",
     "describe", "profile_missing", "friedman",
     "responder_analysis", "rci_analysis",
+    "TrendResult", "SlopeRow", "trend_analysis", "orthogonal_polynomials",
+    "SensitivityResult", "sensitivity_analysis", "impute_panel",
     "render_text", "render_json", "render_csv",
 ]

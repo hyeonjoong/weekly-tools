@@ -18,6 +18,8 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from .analyze import Analysis
 from .describe import ALL_LABEL
+from .sensitivity import KIND_EN, KIND_LABEL
+from .trend import reported_p, trend_shape
 
 __all__ = ["render_text", "render_json", "render_csv", "render_markdown",
            "apa_sentences", "fmt_p", "fmt_p_cell", "fmt_es", "fmt_df", "fmt",
@@ -252,6 +254,57 @@ def _rows_between(a: Analysis) -> List[List[str]]:
             for r in a.between]
 
 
+def _rows_trend(a: Analysis) -> List[List[str]]:
+    if a.trend is None:
+        return []
+    return [[t.order_name, t.scope, fmt(t.ss), f"{fmt_df(t.df1)}, {fmt_df(t.df2)}",
+             fmt(t.f), fmt_p_cell(t.p_raw), fmt_p_cell(t.p_adj)
+             + _stars(t.p_adj, a.options.alpha), fmt_es(t.partial_eta2)]
+            for t in a.trend.effects]
+
+
+def _unit(a: Analysis) -> str:
+    """Slope unit suffix, e.g. '/주' — blank when the user did not name one."""
+    if a.trend is None or not a.trend.time_unit:
+        return ""
+    return "/" + a.trend.time_unit
+
+
+def _rows_slopes(a: Analysis) -> List[List[str]]:
+    if a.trend is None:
+        return []
+    return [[s.group, str(s.n), fmt(s.mean_slope, 3), fmt(s.sd, 3),
+             fmt_ci(s.ci_low, s.ci_high, 3),
+             fmt_p_cell(s.p) + _stars(s.p, a.options.alpha)]
+            for s in a.trend.slopes]
+
+
+def _rows_slope_contrast(a: Analysis) -> List[List[str]]:
+    if a.trend is None:
+        return []
+    return [[f"{c.group_a} − {c.group_b}", f"{c.n_a}/{c.n_b}",
+             fmt(c.slope_a, 3), fmt(c.slope_b, 3), fmt(c.diff, 3),
+             fmt_ci(c.ci_low, c.ci_high, 3),
+             fmt_p_cell(c.p) + _stars(c.p, a.options.alpha),
+             fmt_es_ci(c.effect, c.effect_ci)]
+            for c in a.trend.slope_contrasts]
+
+
+def _rows_sensitivity(a: Analysis) -> List[List[str]]:
+    if a.sensitivity is None:
+        return []
+    # Group the three variants of each visit together, but keep the visits in
+    # protocol order — sorting on the label alone would put 12주 before 4주.
+    order = {t: j for j, t in enumerate(a.panel.times)}
+    rows = sorted(a.sensitivity.rows,
+                  key=lambda r: (order.get(r.time, len(order)), r.contrast))
+    return [[r.time, r.contrast, KIND_LABEL[r.kind], str(r.n),
+             str(r.imputed) if r.kind != "observed" else "—",
+             fmt(r.estimate), fmt_ci(r.ci_low, r.ci_high),
+             fmt_p_cell(r.p) + _stars(r.p, a.options.alpha)]
+            for r in rows]
+
+
 def _rows_responder(a: Analysis) -> List[List[str]]:
     if a.responder is None:
         return []
@@ -309,6 +362,41 @@ def apa_sentences(a: Analysis) -> List[str]:
                 f"[EN] {scope_en}a Friedman test gave χ²({fr.df}) = "
                 f"{fmt(fr.chi2)}, p {fmt_p(fr.p)}, Kendall's W = "
                 f"{fmt_es(fr.kendall_w)} (n = {fr.n}).")
+
+    if a.trend is not None and a.recommended == "parametric":
+        for eff in a.trend.effects:
+            if not math.isfinite(eff.f) or eff.residual:
+                continue
+            scope_ko = "시점 추세" if eff.scope == "시점" else "그룹 × 시점 추세"
+            scope_en = ("the " if eff.scope == "시점"
+                        else "the group × time interaction for the ")
+            # Quote the same p the table prints (adjusted within its family) —
+            # quoting p_raw here contradicted the star column two lines above.
+            pv = reported_p(eff)
+            out.append(
+                f"[KO] {scope_ko}의 {eff.order_name} 성분은 "
+                f"F({fmt_df(eff.df1)}, {fmt_df(eff.df2)}) = {fmt(eff.f)}, "
+                f"보정 p {fmt_p(pv)}, ηp² = {fmt_es(eff.partial_eta2)} "
+                "이었다 (직교 다항 대비 — 시점 점수 하나에 대한 검정이라 "
+                "구형성 보정 없음).")
+            out.append(
+                f"[EN] For {scope_en}{_ORDER_EN_SENT.get(eff.order, '')} trend, "
+                f"F({fmt_df(eff.df1)}, {fmt_df(eff.df2)}) = {fmt(eff.f)}, "
+                f"adjusted p {fmt_p(pv)}, ηp² = {fmt_es(eff.partial_eta2)} "
+                "(orthogonal polynomial contrast on a single within-subject "
+                "score, so no sphericity correction applies).")
+        for con in a.trend.slope_contrasts:
+            unit = a.trend.time_unit or "시점 1단위"
+            unit_en = a.trend.time_unit or "unit of time"
+            out.append(
+                f"[KO] 개인별 회귀 기울기의 군간 차이는 {fmt(con.diff, 3)} "
+                f"({a.panel.value_name}/{unit}, 95% CI "
+                f"{fmt_ci(con.ci_low, con.ci_high, 3)}), p {fmt_p(con.p)}.")
+            out.append(
+                f"[EN] The difference between arms in individual regression "
+                f"slopes was {fmt(con.diff, 3)} units per {unit_en} "
+                f"(95% CI {fmt_ci(con.ci_low, con.ci_high, 3)}), "
+                f"p {fmt_p(con.p)}.")
 
     change = a.change_param if a.recommended == "parametric" else a.change_rank
     for row in change.within:
@@ -372,7 +460,42 @@ def apa_sentences(a: Analysis) -> List[str]:
                 f"(risk difference {con.risk_difference:+.1%}, 95% CI "
                 f"[{con.rd_ci[0]:.1%}, {con.rd_ci[1]:.1%}], p "
                 f"{fmt_p(con.p_adj)}; {basis_en}).")
+
+    if a.sensitivity is not None:
+        issues = a.sensitivity.flips(alpha)
+        agree = not issues
+        kinds = " · ".join(KIND_LABEL[k] for k in a.sensitivity.kinds)
+        kinds_en = " and ".join(KIND_EN[k] for k in a.sensitivity.kinds)
+        if not agree and all("비교" in i for i in issues):
+            # Every difference was "no observed-case counterpart".  Claiming
+            # either agreement or disagreement would be an invention.
+            out.append(
+                f"[KO] 일부 시점은 관측값 결과가 없어 {kinds} 대체와 비교할 수 "
+                "없었다 — 그 시점의 민감도 판정은 보류한다.")
+            out.append(
+                "[EN] For some visits there was no observed-case result to "
+                f"compare against {kinds_en} imputation, so no sensitivity "
+                "verdict is claimed for them.")
+        elif agree:
+            out.append(
+                f"[KO] 결측을 {kinds} 로 대체한 민감도 분석에서도 주요 결과의 "
+                "방향과 유의성은 동일했다.")
+            out.append(
+                f"[EN] Sensitivity analyses using {kinds_en} imputation gave "
+                "the same direction and significance as the observed-case "
+                "analysis.")
+        else:
+            out.append(
+                f"[KO] 결측을 {kinds} 로 대체하면 주요 결과의 결론이 달라졌다 — "
+                "탈락 처리에 민감한 결과이므로 신중히 해석해야 한다.")
+            out.append(
+                f"[EN] Under {kinds_en} imputation the conclusion changed, so "
+                "the result is sensitive to how dropout is handled and should "
+                "be interpreted cautiously.")
     return out
+
+
+_ORDER_EN_SENT = {1: "linear", 2: "quadratic", 3: "cubic"}
 
 
 def _en_effect(name: str) -> str:
@@ -504,6 +627,43 @@ def render_text(a: Analysis, full: bool = False, brief: bool = False) -> str:
                 f"p {fmt_p(fr.p)}, W = {fmt_es(fr.kendall_w)}")
     add("")
 
+    # -- [4b] trend over time ---------------------------------------------
+    if a.trend is not None:
+        tr = a.trend
+        spacing = ", ".join(f"{t}={fmt(v, 2).rstrip('0').rstrip('.')}"
+                            for t, v in zip(p.times, tr.time_values))
+        add(f"[4b] 시점 추세 (직교 다항 대비 · 간격 {tr.time_source}: {spacing})")
+        rows = _rows_trend(a)
+        if rows:
+            add(f"  시점 내 대비 (완전자료 N = {tr.n_complete}; 각 행은 시점 점수 "
+                "하나에 대한 검정이라 구형성 보정이 필요 없습니다)")
+            L.extend("    " + ln for ln in table(
+                ["대비", "효과", "SS", "df", "F", "raw p", "보정 p", "ηp²"], rows,
+                ["left", "left", "right", "right", "right", "right", "right",
+                 "right"]))
+            shape = trend_shape(tr.effects, alpha)
+            if shape:
+                add(f"    → {shape}")
+        if tr.slopes:
+            add("")
+            add(f"  개인별 회귀 기울기 (대상마다 관측된 시점만으로 적합 · 단위 "
+                f"{p.value_name}{_unit(a) or ' / 시점 1단위'}, 가용사례)")
+            L.extend("    " + ln for ln in table(
+                ["그룹", "n", "평균 기울기", "SD", "95% CI", "p"],
+                _rows_slopes(a),
+                ["left", "right", "right", "right", "right", "right"]))
+        if tr.slope_contrasts:
+            add("")
+            add("  군간 기울기 차이 (방문을 2회 이상 마친 탈락자도 포함)")
+            L.extend("    " + ln for ln in table(
+                ["대비", "n", "기울기A", "기울기B", "차이", "95% CI", "p",
+                 "Hedges g [95% CI]"], _rows_slope_contrast(a),
+                ["left", "right", "right", "right", "right", "right", "right",
+                 "right"]))
+        for note in tr.notes:
+            add(f"  ※ {note}")
+        add("")
+
     # -- [5] change from baseline ----------------------------------------
     change = a.change_param if a.recommended == "parametric" else a.change_rank
     add(f"[5] 기준시점({change.baseline}) 대비 변화량 — {track}")
@@ -528,6 +688,30 @@ def render_text(a: Analysis, full: bool = False, brief: bool = False) -> str:
             ["left", "left", "right", "right", "right", "right", "right",
              "right"]))
         for note in a.ancova.notes:
+            add(f"    ※ {note}")
+    if a.sensitivity is not None:
+        s = a.sensitivity
+        add("")
+        names = "·".join(KIND_LABEL[k] for k in s.kinds)
+        what = "군간 변화량 차이" if s.grouped else "기저 대비 변화량"
+        add(f"  결측 대체 민감도 ({names}) — 결론이 탈락 처리에 흔들리는지만 봅니다")
+        add(f"    대상 추정치: 위의 '{what}'(기저값 보정 없음). "
+            "ANCOVA 조정평균차는 다시 계산하지 않습니다.")
+        L.extend("    " + ln for ln in table(
+            ["시점", "대비" if s.grouped else "그룹", "분석", "n", "대체 셀",
+             "추정치", "95% CI", "p"], _rows_sensitivity(a),
+            ["left", "left", "left", "right", "right", "right", "right",
+             "right"]))
+        flips = s.flips(alpha)
+        if flips:
+            for line in flips:
+                add(f"    ⚠ {line}")
+        else:
+            add(f"    → 관측값과 {names}의 결론(유의성·방향)이 일치합니다.")
+        if a.recommended != "parametric":
+            add("    ※ 이 표의 세 열은 모두 모수 t-검정 기준입니다 — 위 [5]는 "
+                "권장 트랙(순위검정) 결과이므로 '관측값' 열과 숫자가 다릅니다.")
+        for note in s.notes:
             add(f"    ※ {note}")
     add("")
 
@@ -662,6 +846,14 @@ def render_markdown(a: Analysis, full: bool = False, brief: bool = False) -> str
                      "중앙값 [IQR]"], _rows_descriptives(a))
     block(f"반복측정/혼합 ANOVA ({_CORRECTION_NAME[a.correction_used]})",
           ["효과", "SS", "df", "F", "p", "ηp²", "η²G"], _rows_anova(a))
+    block("시점 추세 (직교 다항 대비)",
+          ["대비", "효과", "SS", "df", "F", "raw p", "보정 p", "ηp²"],
+          _rows_trend(a))
+    block(f"개인별 회귀 기울기 ({p.value_name}{_unit(a) or ' / 시점 1단위'})",
+          ["그룹", "n", "평균 기울기", "SD", "95% CI", "p"], _rows_slopes(a))
+    block("군간 기울기 차이",
+          ["대비", "n", "기울기A", "기울기B", "차이", "95% CI", "p",
+           "Hedges g [95% CI]"], _rows_slope_contrast(a))
     change = a.change_param if a.recommended == "parametric" else a.change_rank
     block(f"기준시점({change.baseline}) 대비 변화량",
           ["그룹", "시점", "n", "평균변화", "SD", "95% CI", "보정 p",
@@ -672,6 +864,12 @@ def render_markdown(a: Analysis, full: bool = False, brief: bool = False) -> str
     block("기저값 보정 (ANCOVA)",
           ["시점", "대비", "n", "조정평균차", "95% CI", "보정 p", "비보정 차이",
            "기저 기울기"], _rows_ancova(a))
+    block("결측 대체 민감도"
+          + (" (" + "·".join(KIND_LABEL[k] for k in a.sensitivity.kinds) + ")"
+             if a.sensitivity is not None else ""),
+          ["시점", "대비" if a.sensitivity and a.sensitivity.grouped else "그룹",
+           "분석", "n", "대체 셀", "추정치", "95% CI", "p"],
+          _rows_sensitivity(a))
     if not brief:
         block("시점 간 사후비교",
               ["그룹", "비교", "n", "평균차", "95% CI", "raw p", "보정 p",
@@ -742,6 +940,8 @@ def render_json(a: Analysis) -> str:
         "change_parametric": _clean(a.change_param),
         "change_rank": _clean(a.change_rank),
         "ancova": _clean(a.ancova),
+        "trend": _clean(a.trend),
+        "sensitivity": _clean(a.sensitivity),
         "responder": _clean(a.responder),
         "rci": _clean(a.rci),
         "apa": apa_sentences(a),
@@ -832,6 +1032,24 @@ def render_csv(a: Analysis) -> str:
                 "adjusted mean difference", c.n_a + c.n_b, c.adjusted_diff, "",
                 c.ci_low, c.ci_high, c.t, c.p_raw, c.p_adj, c.unadjusted_diff,
                 "", "")
+    if a.trend is not None:
+        for t in a.trend.effects:
+            row("trend_contrast", "parametric", "", t.scope,
+                f"{t.order_name} 대비", a.trend.n_complete, t.ss, t.se, t.ci_low,
+                t.ci_high, t.f, t.p_raw, t.p_adj, t.partial_eta2, "", "")
+        for s in a.trend.slopes:
+            row("subject_slope", "parametric", s.group, "", "mean OLS slope",
+                s.n, s.mean_slope, s.sd, s.ci_low, s.ci_high, s.t, s.p, s.p,
+                "", "", "")
+        for c in a.trend.slope_contrasts:
+            row("slope_between", "parametric", f"{c.group_a}−{c.group_b}", "",
+                c.method, c.n_a + c.n_b, c.diff, "", c.ci_low, c.ci_high, "",
+                c.p, c.p, c.effect, c.effect_ci[0], c.effect_ci[1])
+    if a.sensitivity is not None:
+        for r in a.sensitivity.rows:
+            row("sensitivity", "parametric", r.contrast, r.time,
+                KIND_LABEL[r.kind], r.n, r.estimate, "", r.ci_low, r.ci_high,
+                r.imputed, r.p, "", "", "", "")
     if a.responder is not None:
         for x in a.responder.rates:
             row("responder_rate", "", x.group, x.time, "rate", x.n, x.rate, "",

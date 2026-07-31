@@ -165,3 +165,76 @@ def test_duplicates_flag_is_wired_through(tmp_path, capsys):
     assert main(args) == 1
     assert "여러 번" in capsys.readouterr().err
     assert main(args + ["--duplicates", "mean"]) == 0
+
+
+# --------------------------------------------------------------------------
+# trend and sensitivity flags
+# --------------------------------------------------------------------------
+
+def test_time_values_are_echoed_in_the_trend_header(csv_path, capsys):
+    assert main([csv_path, "--id", "대상", "--time", "방문", "--value", "ISI",
+                 "--group", "군", "--time-order", "기저,4주,8주",
+                 "--time-values", "0,4,12", "--time-unit", "주"]) == 0
+    out = capsys.readouterr().out
+    assert "[4b] 시점 추세" in out
+    assert "지정한 값" in out and "8주=12" in out
+    assert "ISI/주" in out
+
+
+def test_time_values_must_match_the_number_of_visits(csv_path, capsys):
+    assert main([csv_path, "--id", "대상", "--time", "방문", "--value", "ISI",
+                 "--time-values", "0,4"]) == 1
+    assert "시점 개수" in capsys.readouterr().err
+
+
+def test_time_values_must_increase(csv_path, capsys):
+    assert main([csv_path, "--id", "대상", "--time", "방문", "--value", "ISI",
+                 "--time-order", "기저,4주,8주",
+                 "--time-values", "0,12,4"]) == 1
+    assert "증가" in capsys.readouterr().err
+
+
+def test_time_values_reject_text(csv_path, capsys):
+    assert main([csv_path, "--id", "대상", "--time", "방문", "--value", "ISI",
+                 "--time-values", "0,넉주,8"]) == 1
+    assert "숫자가 아닙니다" in capsys.readouterr().err
+
+
+def test_time_unit_without_values_is_refused(csv_path, capsys):
+    assert main([csv_path, "--id", "대상", "--time", "방문", "--value", "ISI",
+                 "--time-unit", "주"]) == 1
+    assert "--time-values" in capsys.readouterr().err
+
+
+def test_no_trend_conflicts_with_time_values(csv_path, capsys):
+    assert main([csv_path, "--id", "대상", "--time", "방문", "--value", "ISI",
+                 "--no-trend", "--time-values", "0,4,8"]) == 1
+    assert "함께 쓸 수" in capsys.readouterr().err
+
+
+def test_no_trend_removes_the_section(csv_path, capsys):
+    assert main([csv_path, "--id", "대상", "--time", "방문", "--value", "ISI",
+                 "--no-trend"]) == 0
+    assert "[4b]" not in capsys.readouterr().out
+
+
+def test_bad_sensitivity_value_is_reported_not_crashed(csv_path, capsys):
+    assert main([csv_path, "--id", "대상", "--time", "방문", "--value", "ISI",
+                 "--sensitivity", "mmrm"]) == 1
+    assert "--sensitivity" in capsys.readouterr().err
+
+
+def test_complete_data_shows_no_sensitivity_table(csv_path, capsys):
+    assert main([csv_path, "--id", "대상", "--time", "방문", "--value", "ISI",
+                 "--group", "군"]) == 0
+    assert "결측 대체 민감도" not in capsys.readouterr().out
+
+
+def test_sensitivity_appears_when_a_visit_is_missing(tmp_path, capsys):
+    p = tmp_path / "gap.csv"
+    p.write_text(LONG.replace("S4,8주,18,B\n", ""), encoding="utf-8")
+    assert main([str(p), "--id", "대상", "--time", "방문", "--value", "ISI",
+                 "--group", "군", "--time-order", "기저,4주,8주",
+                 "--sensitivity", "locf"]) == 0
+    out = capsys.readouterr().out
+    assert "결측 대체 민감도" in out and "LOCF" in out and "BOCF" not in out

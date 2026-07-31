@@ -24,6 +24,8 @@ from .normality import MAX_RELIABLE_N, shapiro_wilk
 from .posthoc import (ChangeAnalysis, GroupComparison, PairComparison,
                       between_at_time, change_analysis, pairwise_times)
 from .responder import RCIResult, ResponderResult, rci_analysis, responder_analysis
+from .sensitivity import SensitivityResult, sensitivity_analysis
+from .trend import TrendResult, trend_analysis
 
 __all__ = ["Analysis", "NormalityRow", "Options", "analyze"]
 
@@ -59,6 +61,10 @@ class Options:
     all_pairs: bool = False                # keep every visit pair at large k
     responder_denominator: str = "observed"   # observed | randomized (NRI)
     labels_en: Dict[str, str] = field(default_factory=dict)  # 한글 라벨 → English
+    time_values: Optional[List[float]] = None   # real visit spacing (weeks, ...)
+    time_unit: str = ""                         # unit label for the slope table
+    trend: bool = True                          # polynomial trend contrasts
+    sensitivity: str = "auto"                   # auto | none | locf,bocf,...
 
 
 @dataclass
@@ -78,6 +84,8 @@ class Analysis:
     change_param: ChangeAnalysis
     change_rank: ChangeAnalysis
     ancova: Optional[AncovaResult]
+    trend: Optional[TrendResult]
+    sensitivity: Optional[SensitivityResult]
     responder: Optional[ResponderResult]
     rci: Optional[RCIResult]
     recommended: str                       # "parametric" | "nonparametric"
@@ -171,6 +179,37 @@ def _smallest_cell(panel: Panel) -> int:
     return smallest
 
 
+def _sensitivity_kinds(spec: str) -> List[str]:
+    """Parse ``--sensitivity`` into a list of imputation methods.
+
+    ``auto`` means "the standard pair", which is what a reader expects to see
+    next to an observed-case primary; :func:`sensitivity_analysis` still returns
+    ``None`` when there is nothing missing to impute, so ``auto`` costs nothing
+    on complete data.
+    """
+    spec = ("auto" if spec is None else spec).strip().lower()
+    if spec in ("", "none", "off"):
+        return []
+    if spec == "auto":
+        return ["locf", "bocf"]
+    kinds: List[str] = []
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if part in ("auto", "none", "off"):
+            raise ValueError(
+                f"--sensitivity 의 '{part}' 은(는) 단독으로만 쓸 수 있습니다 "
+                "— 다른 방법과 쉼표로 함께 적을 수 없습니다.")
+        if part not in ("locf", "bocf"):
+            raise ValueError(
+                f"--sensitivity 에 '{part}' 은(는) 쓸 수 없습니다 "
+                "(auto, none, locf, bocf 중에서 고르세요).")
+        if part not in kinds:
+            kinds.append(part)
+    return kinds
+
+
 def analyze(panel: Panel, options: Optional[Options] = None) -> Analysis:
     """Run the full longitudinal analysis pipeline on *panel*."""
     opt = options or Options()
@@ -219,6 +258,44 @@ def analyze(panel: Panel, options: Optional[Options] = None) -> Analysis:
                                   True, opt.welch, opt.primary_time)
     ancova = ancova_analysis(panel, baseline, opt.alpha, opt.correction,
                              opt.primary_time)
+
+    # ---- trend over time -------------------------------------------------
+    if opt.time_values is not None and len(opt.time_values) != panel.n_times:
+        # Checked here rather than only inside trend_analysis, which returns
+        # early for two-visit designs — seven time values for a two-visit file
+        # used to be accepted in silence.
+        raise ValueError(
+            f"--time-values 는 시점 개수({panel.n_times})와 같은 개수의 숫자여야 "
+            f"합니다 (현재 {len(opt.time_values)}개).")
+    trend: Optional[TrendResult] = None
+    if opt.trend:
+        if panel.n_times < 3 and opt.time_values is not None:
+            warnings.append(
+                "시점이 2개라 추세 구획([4b])을 만들지 않습니다 — "
+                "--time-values / --time-unit 은 사용되지 않았습니다.")
+        try:
+            trend = trend_analysis(panel, opt.time_values, opt.alpha,
+                                   opt.correction, opt.welch, opt.time_unit)
+        except ArithmeticError:
+            trend = None
+            warnings.append(
+                "시점 값의 크기가 너무 커서 추세 분석을 수행하지 못했습니다 "
+                "(--time-values 를 확인하세요).")
+        if trend is not None:
+            warnings.extend(n for n in trend.notes if "등간격" in n)
+
+    # ---- missing-data sensitivity ----------------------------------------
+    sens: Optional[SensitivityResult] = None
+    kinds = _sensitivity_kinds(opt.sensitivity)
+    if kinds:
+        sens = sensitivity_analysis(panel, baseline, kinds, opt.alpha, opt.welch)
+        if sens is not None:
+            flips = sens.flips(opt.alpha)
+            if flips:
+                warnings.append(
+                    "결측 대체 방법에 따라 결론이 달라집니다 — " + " / ".join(flips)
+                    + " 확증적 분석이라면 MMRM(R nlme·lme4, SAS PROC MIXED)을 "
+                      "쓰세요.")
 
     # ---- responder / RCI -------------------------------------------------
     responder: Optional[ResponderResult] = None
@@ -302,6 +379,7 @@ def analyze(panel: Panel, options: Optional[Options] = None) -> Analysis:
         missing=miss, normality=norm_rows, anova=anova, anova_error=anova_error,
         friedman=fried, pairwise_param=pair_param, pairwise_rank=pair_rank,
         between=between, change_param=change_param, change_rank=change_rank,
-        ancova=ancova, responder=responder, rci=rci, recommended=recommended,
+        ancova=ancova, trend=trend, sensitivity=sens, responder=responder,
+        rci=rci, recommended=recommended,
         recommendation_reason=reason, correction_used=correction_used,
         warnings=warnings)

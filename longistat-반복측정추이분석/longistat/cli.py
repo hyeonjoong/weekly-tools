@@ -37,7 +37,10 @@ _EPILOG = """\
 출력 해석
   · [1] 결측     = CONSORT 흐름도에 넣을 군별·시점별 관측 수와 탈락 패턴
   · [4] 주 분석  = 시점/그룹/상호작용의 omnibus 검정 (구형성 보정 자동 적용)
+  · [4b] 추세    = 선형·이차 추세 대비 + 개인별 기울기(점/주) — 방문 간격이
+                   불규칙하면 --time-values 0,4,12,24 로 알려주세요
   · [5] 변화량   = 기저 대비 변화 + 군간 차이 + 기저값 보정(ANCOVA)
+                   + 결측 대체 민감도(LOCF·BOCF)
   · [8] 반응자   = MCID 이상 좋아진 사람의 비율과 군간 차이(RD/RR/OR/NNT)
   · [9] RCI      = 개인 수준에서 '측정오차보다 큰 변화'인지 (Jacobson-Truax)
 
@@ -96,6 +99,18 @@ def build_parser() -> argparse.ArgumentParser:
     stat.add_argument("--primary-time", metavar="시점",
                       help="계획서에 사전 지정한 주요 시점. 그 시점의 군간 비교는 "
                            "다중비교 보정 없이 보고하고, 나머지 시점끼리만 보정합니다")
+    stat.add_argument("--time-values", metavar="0,4,12,24",
+                      help="방문의 실제 간격(숫자, 시점 순서대로). 추세 대비와 "
+                           "개인 기울기 계산에 씁니다. 지정하지 않으면 시점 "
+                           "이름의 숫자를 읽고, 그것도 없으면 등간격 가정")
+    stat.add_argument("--time-unit", metavar="주",
+                      help="--time-values 의 단위 이름 (기울기 표에 '점/주' 처럼 표시)")
+    stat.add_argument("--no-trend", action="store_true",
+                      help="시점 추세(직교 다항 대비·개인 기울기) 구획을 생략")
+    stat.add_argument("--sensitivity", default="auto",
+                      metavar="auto|none|locf,bocf",
+                      help="결측 대체 민감도 분석 (기본 auto: 결측이 있으면 "
+                           "LOCF·BOCF 를 함께 계산해 결론이 흔들리는지 확인)")
     stat.add_argument("--all-pairs", action="store_true",
                       help="시점이 12개를 넘어도 모든 시점 조합을 비교 "
                            "(기본은 기준시점 대비 + 인접 시점만)")
@@ -174,6 +189,27 @@ def _parse_labels(spec: Optional[str]) -> Dict[str, str]:
     return out
 
 
+def _parse_time_values(spec: Optional[str]) -> Optional[List[float]]:
+    """``--time-values 0,4,12,24`` → floats, with a readable error on junk."""
+    if spec is None:
+        return None
+    parts = [p.strip() for p in spec.split(",") if p.strip()]
+    if len(parts) < 2:
+        raise DataError("--time-values 에는 시점 개수만큼의 숫자를 쉼표로 "
+                        "구분해 적습니다 (예: 0,4,12,24).")
+    out: List[float] = []
+    for part in parts:
+        try:
+            value = float(part)
+        except ValueError:
+            raise DataError(
+                f"--time-values 의 '{part}' 은(는) 숫자가 아닙니다.") from None
+        if not math.isfinite(value):
+            raise DataError("--time-values 에 nan/inf 는 쓸 수 없습니다.")
+        out.append(value)
+    return out
+
+
 def _validate(args: argparse.Namespace) -> None:
     for value, flag in ((args.alpha, "--alpha"),
                         (args.alpha_norm, "--alpha-norm"),
@@ -211,6 +247,12 @@ def _validate(args: argparse.Namespace) -> None:
         raise DataError("--reliability 는 0과 1 사이여야 합니다.")
     if args.full and args.brief:
         raise DataError("--full 과 --brief 는 함께 쓸 수 없습니다.")
+    if args.time_unit and args.time_values is None:
+        raise DataError("--time-unit 은 --time-values 와 함께 쓰세요 "
+                        "(단위만 붙이면 간격이 여전히 추정값입니다).")
+    if args.no_trend and (args.time_values or args.time_unit):
+        raise DataError("--no-trend 와 --time-values/--time-unit 은 함께 쓸 수 "
+                        "없습니다 (추세를 끄면 간격이 쓰이지 않습니다).")
     if args.wide:
         if not args.columns:
             raise DataError("--wide 형식에는 --columns 로 시점 열을 지정해야 합니다.")
@@ -327,7 +369,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             recovery_cutoff=args.recovery_cutoff,
             primary_time=args.primary_time, all_pairs=args.all_pairs,
             responder_denominator=args.responder_denominator,
-            labels_en=_parse_labels(args.labels_en))
+            labels_en=_parse_labels(args.labels_en),
+            time_values=_parse_time_values(args.time_values),
+            time_unit=(args.time_unit or "").strip(),
+            trend=not args.no_trend, sensitivity=args.sensitivity)
         result = analyze(panel, opt)
         if args.format == "json":
             text = render_json(result)
