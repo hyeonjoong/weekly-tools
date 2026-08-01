@@ -31,8 +31,11 @@ import unicodedata
 from dataclasses import dataclass, field
 from typing import Dict, Iterator, List, Optional, Sequence, Tuple
 
+from .covariates import MAX_LEVELS, Covariate
+
 __all__ = [
     "Panel",
+    "Covariate",
     "load_long",
     "load_wide",
     "read_table",
@@ -339,6 +342,9 @@ class Panel:
     time_name: str = "time"
     id_name: str = "id"
     notes: List[str] = field(default_factory=list)
+    # Subject-level covariates (age, site, stratum …) used by the ANCOVA and
+    # MMRM sections.  Empty unless the caller asked for them.
+    covariates: List[Covariate] = field(default_factory=list)
 
     # -- basic accessors ---------------------------------------------------
     @property
@@ -368,6 +374,14 @@ class Panel:
         return [i for i, row in enumerate(self.values)
                 if all(v is not None for v in row)]
 
+    def subset_covariates(self, keep: Sequence[int]) -> List[Covariate]:
+        """Covariates restricted to the subjects at positions *keep*."""
+        return [Covariate(name=c.name,
+                          values=[c.values[i] for i in keep],
+                          categorical=c.categorical,
+                          numeric=[c.numeric[i] for i in keep] if c.numeric else [])
+                for c in self.covariates]
+
     def complete_case(self) -> "Panel":
         """A copy keeping only subjects with no missing timepoint."""
         keep = self.complete_rows()
@@ -381,6 +395,7 @@ class Panel:
             time_name=self.time_name,
             id_name=self.id_name,
             notes=list(self.notes),
+            covariates=self.subset_covariates(keep),
         )
 
     def subset_times(self, idx: Sequence[int]) -> "Panel":
@@ -395,6 +410,7 @@ class Panel:
             time_name=self.time_name,
             id_name=self.id_name,
             notes=list(self.notes),
+            covariates=self.subset_covariates(range(self.n_subjects)),
         )
 
     def matrix(self) -> List[List[float]]:
@@ -469,6 +485,82 @@ def order_times(labels: Sequence[str], explicit: Optional[Sequence[str]],
             "시점 순서를 파일에 나온 순서(" + " → ".join(found) + ")로 사용합니다. "
             "다르면 --time-order 로 지정하세요.")
     return found
+
+
+# --------------------------------------------------------------------------
+# subject-level covariates
+# --------------------------------------------------------------------------
+
+def _cov_cell(cell: str) -> Optional[str]:
+    """One covariate cell → its label, or ``None`` when it means 'missing'."""
+    lab = clean_label(cell)
+    return None if lab.lower() in MISSING_TOKENS else lab
+
+
+def _make_covariates(names: Sequence[str], forced_cat: Sequence[str],
+                     raw: Dict[str, List[Optional[str]]],
+                     notes: List[str]) -> List["Covariate"]:
+    """Turn per-subject raw covariate strings into typed :class:`Covariate` objects.
+
+    A covariate is continuous when *every* observed cell parses as a number,
+    categorical otherwise.  That rule is stated in the notes together with the
+    reason, because "site coded 1/2/3" silently becoming a continuous slope is
+    exactly the kind of quiet mistake this tool is supposed to prevent — the
+    user can force the categorical reading with ``--categorical``.
+    """
+    forced = {clean_label(c) for c in forced_cat}
+    out: List[Covariate] = []
+    for name in names:
+        vals = raw.get(name, [])
+        observed = [v for v in vals if v is not None]
+        if not observed:
+            raise DataError(f"공변량 '{name}' 에 값이 하나도 없습니다.")
+        numeric: List[Optional[float]] = []
+        example = ""
+        is_num = name not in forced
+        if is_num:
+            for v in vals:
+                if v is None:
+                    numeric.append(None)
+                    continue
+                try:
+                    parsed = parse_number(v, thousands_sep=False)
+                except DataError:
+                    parsed = None
+                if parsed is None:
+                    # `v` is already known not to be a missing token, so a
+                    # failed parse means the column is not numeric at all.
+                    is_num = False
+                    example = _redact(v)
+                    break
+                numeric.append(parsed)
+        if is_num:
+            uniq = {v for v in numeric if v is not None}
+            notes.append(f"공변량 '{name}': 연속형으로 사용 "
+                         f"(관측 {len(observed)}명, 서로 다른 값 {len(uniq)}개).")
+            out.append(Covariate(name=name, values=list(vals),
+                                 categorical=False, numeric=numeric))
+        else:
+            levels: List[str] = []
+            for v in vals:
+                if v is not None and v not in levels:
+                    levels.append(v)
+            if len(levels) > MAX_LEVELS:
+                raise DataError(
+                    f"공변량 '{name}' 의 범주가 {len(levels)}개입니다 "
+                    f"(상한 {MAX_LEVELS}). 대상 ID나 날짜 열을 공변량으로 "
+                    "지정하지 않았는지 확인하세요.")
+            why = (f" (숫자가 아닌 값 '{example}' 이 있어)" if example else "")
+            notes.append(f"공변량 '{name}': 범주형으로 사용{why} — "
+                         f"수준 {len(levels)}개, 기준 '{levels[0]}'.")
+            out.append(Covariate(name=name, values=list(vals),
+                                 categorical=True,
+                                 numeric=[None] * len(vals)))
+        n_missing = sum(1 for v in vals if v is None)
+        if n_missing:
+            notes.append(f"공변량 '{name}' 이 없는 대상 {n_missing}명은 "
+                         "공변량 보정 분석([4c]·[5b])에서 제외됩니다.")
+    return out
 
 
 # --------------------------------------------------------------------------

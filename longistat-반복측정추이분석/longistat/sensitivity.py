@@ -87,7 +87,8 @@ def impute_panel(panel: Panel, baseline: int, kind: str) -> Panel:
         subjects=list(panel.subjects), times=list(panel.times), values=values,
         groups=None if panel.groups is None else list(panel.groups),
         group_name=panel.group_name, value_name=panel.value_name,
-        time_name=panel.time_name, id_name=panel.id_name, notes=list(panel.notes))
+        time_name=panel.time_name, id_name=panel.id_name, notes=list(panel.notes),
+        covariates=panel.subset_covariates(range(panel.n_subjects)))
 
 
 @dataclass
