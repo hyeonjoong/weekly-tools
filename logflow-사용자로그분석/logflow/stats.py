@@ -137,6 +137,78 @@ def chi2_sf_1df(x: float) -> float:
     return math.erfc(math.sqrt(x / 2.0))
 
 
+def chi2_sf(x: float, df: int) -> float:
+    """자유도 df(≥1) 카이제곱의 상측꼬리 P(X > x).
+
+    df=1 은 erfc 로 정확히, df=2 는 닫힌형 exp(-x/2) 로, 그 외는 정규화 상측
+    불완전감마 Q(df/2, x/2) 로 계산한다 (급수 ↔ 연분수 전환).
+    """
+    if df < 1:
+        raise ValueError(f"자유도는 1 이상이어야 합니다 (받은 값: {df})")
+    if x <= 0.0:
+        return 1.0
+    if math.isnan(x):
+        raise ValueError("검정통계량이 NaN 입니다")
+    if math.isinf(x):
+        return 0.0
+    if df == 1:
+        return chi2_sf_1df(x)
+    if df == 2:
+        return math.exp(-x / 2.0)
+    return _gamma_q(df / 2.0, x / 2.0)
+
+
+def _gamma_q(a: float, x: float) -> float:
+    """정규화 상측 불완전감마 Q(a, x) = 1 - P(a, x). a > 0, x >= 0.
+
+    x < a+1 이면 하측 급수가, 그 이상이면 연분수(Lentz)가 빠르게 수렴한다 —
+    각자 수렴이 나쁜 영역을 서로 피한다.
+    """
+    if x < a + 1.0:
+        return 1.0 - _gamma_p_series(a, x)
+    return _gamma_q_cf(a, x)
+
+
+def _gamma_p_series(a: float, x: float) -> float:
+    """하측 P(a, x) 의 급수전개 Σ x^n / (a(a+1)···(a+n)) · x^a e^-x / Γ(a)."""
+    if x <= 0.0:
+        return 0.0
+    term = 1.0 / a
+    total = term
+    n = a
+    for _ in range(1000):
+        n += 1.0
+        term *= x / n
+        total += term
+        if abs(term) < abs(total) * 1e-16:
+            break
+    return min(1.0, total * math.exp(-x + a * math.log(x) - math.lgamma(a)))
+
+
+def _gamma_q_cf(a: float, x: float) -> float:
+    """상측 Q(a, x) 의 연분수 전개 (수정 Lentz 알고리즘)."""
+    tiny = 1e-300
+    b = x + 1.0 - a
+    c = 1.0 / tiny
+    d = 1.0 / b if b != 0.0 else 1.0 / tiny
+    h = d
+    for i in range(1, 1000):
+        an = -i * (i - a)
+        b += 2.0
+        d = an * d + b
+        if abs(d) < tiny:
+            d = tiny
+        c = b + an / c
+        if abs(c) < tiny:
+            c = tiny
+        d = 1.0 / d
+        delta = d * c
+        h *= delta
+        if abs(delta - 1.0) < 1e-16:
+            break
+    return max(0.0, min(1.0, math.exp(-x + a * math.log(x) - math.lgamma(a)) * h))
+
+
 # ---------------------------------------------------------------- 두 비율의 차
 
 @dataclass
@@ -307,6 +379,118 @@ def mann_whitney_u(
         u=u1, z=z, p=p, n1=n1, n2=n2,
         median1=median(x), median2=median(y),
         rank_biserial=2.0 * u1 / (n1 * n2) - 1.0,
+    )
+
+
+# ------------------------------------------------- 3군 이상 총괄(omnibus) 검정
+
+@dataclass
+class KruskalResult:
+    """Kruskal-Wallis H 검정 — 3군 이상 분포의 총괄 비교."""
+
+    h: float                 # 동점 보정된 H 통계량
+    df: int                  # k - 1
+    p: float                 # 카이제곱 근사 양측 p
+    n: List[int]             # 군별 표본 수
+    medians: List[Optional[float]]
+    epsilon_squared: float   # 효과크기 ε² = H/(N-1), 0~1
+
+
+def kruskal_wallis(samples: Sequence[Sequence[float]]) -> Optional[KruskalResult]:
+    """Kruskal-Wallis H 검정 (동점 보정, 카이제곱 근사).
+
+    Mann-Whitney U 를 3군 이상으로 확장한 순위 기반 총괄검정이다. "적어도 한 군이
+    다른가" 만 답하며, 어느 군이 다른지는 말해주지 않는다 — 그건 사후 쌍 비교의 몫.
+
+    두 군만 넣으면 H 는 (연속성 보정 없는) Mann-Whitney 정규근사 z 의 제곱과 같다.
+
+    비어 있지 않은 군이 2개 미만이거나 모든 값이 동점이면 순위로 가를 정보가 없어 None.
+    표본이 작으면(군당 ~5 미만) 카이제곱 근사가 대략적이다.
+    """
+    groups = [list(s) for s in samples if len(s) > 0]
+    k = len(groups)
+    if k < 2:
+        return None
+    combined: List[float] = []
+    for g in groups:
+        combined.extend(g)
+    n_total = len(combined)
+    if n_total < 3:
+        return None
+    ranks, tie_term = _ranks_with_ties(combined)
+    tie_correction = 1.0 - tie_term / (n_total ** 3 - n_total)
+    if tie_correction <= 0.0:
+        return None  # 전부 동점 → H 가 정의되지 않음
+    total = 0.0
+    pos = 0
+    for g in groups:
+        r_sum = sum(ranks[pos:pos + len(g)])
+        total += r_sum * r_sum / len(g)
+        pos += len(g)
+    h = (12.0 / (n_total * (n_total + 1.0))) * total - 3.0 * (n_total + 1.0)
+    h = max(0.0, h / tie_correction)
+    df = k - 1
+    return KruskalResult(
+        h=h,
+        df=df,
+        p=chi2_sf(h, df),
+        n=[len(g) for g in groups],
+        medians=[median(g) for g in groups],
+        epsilon_squared=min(1.0, h / (n_total - 1.0)),
+    )
+
+
+@dataclass
+class HomogeneityResult:
+    """k×2 비율 동질성 카이제곱 검정 — 3군 이상 비율의 총괄 비교."""
+
+    chi2: float
+    df: int
+    p: float
+    successes: List[int]
+    totals: List[int]
+    min_expected: float      # 최소 기대빈도 (5 미만이면 근사가 불안정)
+
+
+def chi2_homogeneity(
+    successes: Sequence[int], totals: Sequence[int]
+) -> Optional[HomogeneityResult]:
+    """k개 군의 성공비율이 모두 같은지에 대한 카이제곱 동질성 검정 (df = k-1).
+
+    연속성 보정은 하지 않는다 (k×2 에서는 관례가 아니며 2×2 에서도 과보정 논란이 있다).
+    기대빈도가 5 미만인 칸이 있으면 근사가 불안정하므로 `min_expected` 를 함께 돌려주니
+    호출자가 경고를 붙일 수 있다 — 이때는 총괄 p 보다 쌍별 Fisher 정확검정을 보라.
+
+    분모가 0 인 군을 빼고 2군 미만이거나, 성공이 전부/전무이면(변이 없음) None.
+    """
+    if len(successes) != len(totals):
+        raise ValueError("successes 와 totals 의 길이가 다릅니다")
+    rows = []
+    for s, n in zip(successes, totals):
+        if n < 0 or s < 0 or s > n:
+            raise ValueError(f"성공 수는 0..n 범위여야 합니다 (받은 값: {s}/{n})")
+        if n > 0:
+            rows.append((s, n))
+    if len(rows) < 2:
+        return None
+    n_total = sum(n for _, n in rows)
+    s_total = sum(s for s, _ in rows)
+    f_total = n_total - s_total
+    if s_total == 0 or f_total == 0:
+        return None  # 한 열이 통째로 0 → 기대빈도 0, 비교할 변이가 없음
+    p_hat = s_total / n_total
+    chi2 = 0.0
+    min_expected = float("inf")
+    for s, n in rows:
+        e_s = n * p_hat
+        e_f = n * (1.0 - p_hat)
+        min_expected = min(min_expected, e_s, e_f)
+        chi2 += (s - e_s) ** 2 / e_s + ((n - s) - e_f) ** 2 / e_f
+    df = len(rows) - 1
+    return HomogeneityResult(
+        chi2=chi2, df=df, p=chi2_sf(chi2, df),
+        successes=[s for s, _ in rows], totals=[n for _, n in rows],
+        min_expected=min_expected,
     )
 
 
