@@ -59,6 +59,15 @@ _EFFECT_SCHEMA = {
     "exploratory": ((), ()),
 }
 
+# Effect families that can be declared as a non-inferiority design, and the
+# margin key each one requires. (A correlation or an R² increment has no
+# "clinically irrelevant amount worse", so NI is undefined for them.)
+_NI_MARGIN_KEY = {
+    "two_group": "margin_d",
+    "two_proportion": "margin",
+    "survival": "margin_hr",
+}
+
 
 class TemplateError(ValueError):
     """Raised when a template pack is malformed."""
@@ -91,10 +100,50 @@ def validate_effect(effect, where: str) -> dict:
             f"Supported: {sorted(_EFFECT_SCHEMA)}"
         )
     out = {"type": etype}
+
+    # A non-inferiority design changes what every downstream number MEANS
+    # (assumed difference vs margin, one-sided alpha/2, unpooled variance), so
+    # it is validated first and relaxes the "the effect must be non-zero" rules
+    # below: for NI, "no true difference" is the standard planning assumption.
+    ni = False
+    if "design" in effect:
+        design = effect["design"]
+        if design not in ("superiority", "noninferiority"):
+            raise TemplateError(
+                f"{where}: effect.design must be 'superiority' or "
+                f"'noninferiority' (got {design!r})."
+            )
+        ni = design == "noninferiority"
+        if ni:
+            if etype not in _NI_MARGIN_KEY:
+                raise TemplateError(
+                    f"{where}: non-inferiority is only defined for effect types "
+                    f"{sorted(_NI_MARGIN_KEY)} (got {etype!r})."
+                )
+            out["design"] = design
+
     if etype == "correlation":
         out["r"] = _require_number(effect.get("r"), "r", where, upper=1.0)
     elif etype in ("two_group", "paired"):
-        out["d"] = _require_number(effect.get("d"), "d", where)
+        if ni:
+            # The assumed TRUE difference; 0 ("the arms are equivalent") is the
+            # conventional planning value and a negative value states an assumed
+            # disadvantage that eats into the margin.
+            out["d"] = _require_number(
+                effect.get("d", 0.0), "d", where, positive=False
+            )
+            margin = _require_number(
+                effect.get("margin_d"), "margin_d", where
+            )
+            if margin + out["d"] <= 0:
+                raise TemplateError(
+                    f"{where}: effect.margin_d + effect.d must be > 0 — an "
+                    "assumed disadvantage at least as large as the margin can "
+                    "never be shown non-inferior."
+                )
+            out["margin_d"] = margin
+        else:
+            out["d"] = _require_number(effect.get("d"), "d", where)
         if etype == "two_group" and "allocation" in effect:
             alloc = _require_number(
                 effect["allocation"], "allocation", where, upper=1.0
@@ -118,7 +167,23 @@ def validate_effect(effect, where: str) -> dict:
     elif etype == "two_proportion":
         out["p1"] = _require_number(effect.get("p1"), "p1", where, upper=1.0)
         out["p2"] = _require_number(effect.get("p2"), "p2", where, upper=1.0)
-        if out["p1"] == out["p2"]:
+        if ni:
+            margin = _require_number(effect.get("margin"), "margin", where,
+                                     upper=1.0)
+            out["margin"] = margin
+            higher = effect.get("higher_is_better", True)
+            if not isinstance(higher, bool):
+                raise TemplateError(
+                    f"{where}: effect.higher_is_better must be true or false."
+                )
+            out["higher_is_better"] = higher
+            sign = 1.0 if higher else -1.0
+            if margin + sign * (out["p2"] - out["p1"]) <= 0:
+                raise TemplateError(
+                    f"{where}: the assumed rates are worse than the margin "
+                    "allows; non-inferiority could never be shown."
+                )
+        elif out["p1"] == out["p2"]:
             # A zero risk difference needs an infinite sample; catching it here
             # beats surfacing "필요 표본수가 1,000,000명을 넘습니다" at run time.
             raise TemplateError(
@@ -130,8 +195,20 @@ def validate_effect(effect, where: str) -> dict:
                 effect["allocation"], "allocation", where, upper=1.0
             )
     elif etype == "survival":
-        out["hr"] = _require_number(effect.get("hr"), "hr", where)
-        if out["hr"] == 1.0:
+        out["hr"] = _require_number(
+            effect.get("hr", 1.0) if ni else effect.get("hr"), "hr", where
+        )
+        if ni:
+            margin_hr = _require_number(
+                effect.get("margin_hr"), "margin_hr", where
+            )
+            if margin_hr == out["hr"]:
+                raise TemplateError(
+                    f"{where}: effect.margin_hr must differ from effect.hr "
+                    "(a zero-width margin cannot be tested)."
+                )
+            out["margin_hr"] = margin_hr
+        elif out["hr"] == 1.0:
             raise TemplateError(
                 f"{where}: effect.hr must differ from 1 (no effect to detect)."
             )
