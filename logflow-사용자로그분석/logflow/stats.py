@@ -10,6 +10,9 @@
   치우친 분포의 군 간 비교에 t-검정보다 적절.
 - 생존분석: Kaplan-Meier 추정(Greenwood 분산)과 log-rank 검정 — 사용자 이탈까지의
   시간을 우측 절단(censoring)을 지키며 다루기 위함.
+- 대응표본(paired) 이분형 검정: Cochran's Q(k개 시점)와 McNemar 정확검정(2개 시점) —
+  같은 참여자를 주차마다 반복 관찰한 준수 여부처럼 **관측이 독립이 아닌** 자료에
+  카이제곱·Fisher 를 쓰면 안 되기 때문에 필요하다.
 - 분위수(quantile): 세션 길이처럼 치우친(skewed) 분포를 평균 하나로 요약하면
   오해를 부르므로 중앙값·사분위수를 함께 보고하기 위한 헬퍼.
 
@@ -675,6 +678,107 @@ def logrank_test(
         observed1=o1, expected1=e1_sum,
         observed2=o2, expected2=e2_sum,
     )
+
+
+# ------------------------------------------------ 대응표본(paired) 이분형 검정
+
+@dataclass
+class CochranQResult:
+    """Cochran's Q — 같은 참여자를 k개 시점에서 반복 관찰한 이분형 결과의 동질성 검정."""
+
+    q: float
+    df: int
+    p: float
+    n_subjects: int
+    k: int
+    successes_by_time: List[int]     # 시점별 성공(=1) 수
+
+
+def cochran_q(rows: Sequence[Sequence[int]]) -> Optional[CochranQResult]:
+    """k개 시점의 대응표본 이분형 자료에 대한 Cochran's Q 검정.
+
+    rows[i][j] = 참여자 i 의 시점 j 결과(0/1). 모든 행의 길이가 같아야 한다
+    (결측 없는 **균형 패널**만 받는다 — Q 는 결측을 다루지 못한다).
+
+    귀무가설: k개 시점의 성공 확률이 모두 같다. Q ~ chi2(k-1) 근사.
+
+        Q = (k-1) · [k·ΣG_j² − (ΣG_j)²] / [k·ΣL_i − ΣL_i²]
+
+    여기서 G_j 는 시점별 성공 수, L_i 는 참여자별 성공 수다.
+
+    분모가 0 이면(모든 참여자가 전 시점 성공이거나 전 시점 실패) 시점 간 차이를
+    말해 줄 정보가 없으므로 None 을 돌려준다 — 이때 Q=0/p=1 로 보고하면
+    "차이가 없다" 는 증거처럼 읽히지만 실제로는 검정이 불가능한 상태다.
+
+    McNemar 와의 관계: k=2 이면 Q 는 연속성 보정 없는 McNemar 카이제곱과 같다.
+    표본이 작으면(불일치 쌍이 적으면) Q 의 카이제곱 근사가 나쁘므로
+    k=2 는 `mcnemar_exact` 를 쓰라.
+    """
+    n = len(rows)
+    if n == 0:
+        return None
+    k = len(rows[0])
+    if k < 2:
+        raise ValueError(f"시점은 2개 이상이어야 합니다 (받은 값: {k})")
+    col = [0] * k
+    row_tot: List[int] = []
+    for r in rows:
+        if len(r) != k:
+            raise ValueError("모든 참여자의 시점 수가 같아야 합니다 (균형 패널만 가능)")
+        s = 0
+        for j, v in enumerate(r):
+            if v not in (0, 1, True, False):
+                raise ValueError(f"결과값은 0 또는 1 이어야 합니다 (받은 값: {v!r})")
+            if v:
+                col[j] += 1
+                s += 1
+        row_tot.append(s)
+    denom = k * sum(row_tot) - sum(v * v for v in row_tot)
+    if denom <= 0:
+        return None
+    total = sum(col)
+    numer = (k - 1) * (k * sum(v * v for v in col) - total * total)
+    q = numer / denom
+    return CochranQResult(
+        q=q, df=k - 1, p=chi2_sf(q, k - 1), n_subjects=n, k=k,
+        successes_by_time=col,
+    )
+
+
+@dataclass
+class McNemarResult:
+    """McNemar 정확검정 — 같은 참여자의 두 시점 이분형 결과 비교."""
+
+    b: int                # 시점1 성공 → 시점2 실패 (불일치)
+    c: int                # 시점1 실패 → 시점2 성공 (불일치)
+    n_discordant: int
+    p: float              # 양측 정확검정 (이항 n=b+c, p=0.5)
+
+
+def mcnemar_exact(b: int, c: int) -> McNemarResult:
+    """불일치 쌍 (b, c) 에 대한 McNemar 양측 **정확**검정.
+
+    일치 쌍(둘 다 성공/둘 다 실패)은 검정에 정보를 주지 않으므로 들어가지 않는다.
+    귀무가설 하에서 불일치 쌍은 Bin(b+c, 0.5) 를 따르므로
+
+        p = min(1, 2 · P(X ≤ min(b, c)))
+
+    카이제곱 근사 대신 정확검정을 쓰는 이유: 임상 코호트는 불일치 쌍이 한 자릿수인
+    경우가 흔하고(참여자 24명 규모), 그 영역에서 근사는 p 를 과소평가한다.
+
+    b = c = 0 이면(불일치 쌍 없음) p = 1.0 — 두 시점이 완전히 같았다는 뜻이다.
+    """
+    if b < 0 or c < 0:
+        raise ValueError(f"불일치 쌍 수는 0 이상이어야 합니다 (받은 값: b={b}, c={c})")
+    n = b + c
+    if n == 0:
+        return McNemarResult(b=b, c=c, n_discordant=0, p=1.0)
+    lo = min(b, c)
+    # 이항 하측 꼬리를 정수 조합으로 정확히 — 부동소수 누적 없이 분수로 더한다.
+    # 정수 조합의 합을 정수 2^n 으로 나눈다 — 몫이 1 이하라 큰 n 에서도 오버플로 없이
+    # 올바르게 반올림된다(부동소수 2.0**n 은 n≥1024 에서 inf 가 된다).
+    tail = sum(math.comb(n, i) for i in range(lo + 1))
+    return McNemarResult(b=b, c=c, n_discordant=n, p=min(1.0, (2 * tail) / (2 ** n)))
 
 
 # ---------------------------------------------------------------- 다중비교 보정

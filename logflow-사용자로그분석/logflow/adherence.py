@@ -45,7 +45,7 @@ from datetime import date
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 from .dataio import Event
-from .stats import median, wilson_interval
+from .stats import cochran_q, mcnemar_exact, median, wilson_interval
 
 # 기본 기간 단위(일)와 '전체 준수' 판정 기준(준수 주 비율).
 DEFAULT_PERIOD_DAYS = 7
@@ -83,6 +83,35 @@ class UserAdherence:
 
 
 @dataclass
+class AdherenceTrend:
+    """준수율이 주차에 따라 변했는지 — **같은 참여자만** 놓고 본 검정.
+
+    주차별 표(`weeks`)의 준수율을 그냥 이어 보면 추세처럼 보이지만, 주차마다 대상
+    집합이 달라서(뒤 주차일수록 부분집합) 그 변화에는 코호트 구성 변화가 섞여 있다.
+    여기서는 1..K 주차를 **모두** 관찰한 참여자만 남긴 균형 패널(balanced panel)에서
+    같은 사람의 주차 간 변화를 본다 — 구성 변화가 원천적으로 없다.
+
+    관측이 독립이 아니므로(같은 사람의 반복 측정) 카이제곱·Fisher 는 쓸 수 없다.
+    K개 주차 전체는 Cochran's Q, 첫 주 대 마지막 주는 McNemar 정확검정을 쓴다.
+    """
+
+    weeks: int                       # K — 패널의 주차 수
+    n_users: int                     # 패널에 든 참여자 수 (1..K 주차를 모두 관찰)
+    from_completers: bool            # K 가 --adherence-weeks 완주자 기준인지
+    adherent_by_week: List[int]      # 패널 안에서 주차별 준수자 수 (길이 K)
+    rates: List[float]               # 그 비율 (길이 K)
+    first_rate: float
+    last_rate: float
+    diff: float                      # last - first (음수면 준수율 하락)
+    q: Optional[float]               # Cochran's Q 통계량 (계산 불가면 None)
+    q_df: Optional[int]
+    q_p: Optional[float]
+    mcnemar_b: int                   # 1주차 준수 → K주차 미준수
+    mcnemar_c: int                   # 1주차 미준수 → K주차 준수
+    mcnemar_p: float
+
+
+@dataclass
 class Adherence:
     """준수도 분석 결과 전체."""
 
@@ -104,6 +133,7 @@ class Adherence:
     n_no_full_week: int             # 완전 관찰 주가 하나도 없어 제외된 참여자 수
     n_incomplete: int               # 창을 끝까지 관찰하지 못해 제외된 참여자 수
     eligible_weeks_range: Optional[Tuple[int, int]] = None  # 분모에 든 참여자의 (min, max)
+    trend: Optional[AdherenceTrend] = None  # 균형 패널의 주차 간 변화 검정
     notes: List[str] = field(default_factory=list)
 
 
@@ -117,6 +147,75 @@ def _longest_streak(weeks: Sequence[int]) -> int:
         if cur > best:
             best = cur
     return best
+
+
+# 균형 패널로 추세를 검정하기 위한 최소 크기 — 이보다 작으면 검정을 만들지 않는다.
+# (주차 2개 미만이면 '변화' 자체가 정의되지 않고, 참여자 2명 미만이면 개인의 이야기다.)
+MIN_TREND_WEEKS = 2
+MIN_TREND_USERS = 2
+
+
+def _adherence_trend(
+    adherent_sets: Dict[str, Set[int]],
+    eligible_weeks: Dict[str, int],
+    table_weeks: int,
+    required: Optional[int],
+) -> Optional[AdherenceTrend]:
+    """1..K 주차를 모두 관찰한 참여자만의 균형 패널에서 주차 간 변화를 검정한다.
+
+    K 고르기:
+      - `--adherence-weeks`(required)를 주었고 그 창이 표 범위 안이며 완주자가 충분하면
+        **그 창** 을 쓴다 — '준수 참여자' 분석 집단과 같은 사람들이라 리포트가 일관된다.
+      - 아니면 `K × (1..K 주차를 모두 관찰한 인원)` 을 최대로 하는 K 를 고른다.
+        같으면 더 긴 K 를 택한다 (짧은 창의 큰 표본보다 추세를 더 잘 보여준다).
+
+    돌려주는 검정 둘 다 **대응표본** 검정이다 (같은 참여자의 반복 측정).
+    """
+    def panel_size(k: int) -> int:
+        return sum(1 for w in eligible_weeks.values() if w >= k)
+
+    k: Optional[int] = None
+    from_completers = False
+    if required is not None and MIN_TREND_WEEKS <= required <= table_weeks:
+        if panel_size(required) >= MIN_TREND_USERS:
+            k, from_completers = required, True
+    if k is None:
+        best_score = 0
+        for cand in range(MIN_TREND_WEEKS, table_weeks + 1):
+            n = panel_size(cand)
+            if n < MIN_TREND_USERS:
+                continue
+            score = cand * n
+            if score >= best_score:      # 동점이면 더 긴 창 (cand 가 커지는 순서)
+                best_score, k = score, cand
+    if k is None:
+        return None
+
+    panel = sorted(u for u, w in eligible_weeks.items() if w >= k)
+    rows = [[1 if j in adherent_sets[u] else 0 for j in range(1, k + 1)] for u in panel]
+    n = len(rows)
+    counts = [sum(r[j] for r in rows) for j in range(k)]
+    rates = [c / n for c in counts]
+    b = sum(1 for r in rows if r[0] == 1 and r[-1] == 0)
+    c = sum(1 for r in rows if r[0] == 0 and r[-1] == 1)
+    mc = mcnemar_exact(b, c)
+    q = cochran_q(rows)
+    return AdherenceTrend(
+        weeks=k,
+        n_users=n,
+        from_completers=from_completers,
+        adherent_by_week=counts,
+        rates=rates,
+        first_rate=rates[0],
+        last_rate=rates[-1],
+        diff=rates[-1] - rates[0],
+        q=None if q is None else q.q,
+        q_df=None if q is None else q.df,
+        q_p=None if q is None else q.p,
+        mcnemar_b=b,
+        mcnemar_c=c,
+        mcnemar_p=mc.p,
+    )
 
 
 def adherence(
@@ -220,10 +319,14 @@ def adherence(
         per_week[u] = cnt
 
     users: List[UserAdherence] = []
+    adherent_sets: Dict[str, Set[int]] = {}
+    eligible_by_user: Dict[str, int] = {}
     for u in sorted(by_user):
         nw = min(full_weeks[u], window)
         cnt = per_week[u]
         adherent_ks = sorted(k for k, v in cnt.items() if v >= min_days)
+        adherent_sets[u] = set(adherent_ks)
+        eligible_by_user[u] = nw
         users.append(
             UserAdherence(
                 user=u,
@@ -254,6 +357,8 @@ def adherence(
                 median_active_days=median([float(v) for v in vals]) if vals else None,
             )
         )
+
+    trend = _adherence_trend(adherent_sets, eligible_by_user, table_weeks, required)
 
     # ── '준수 참여자' 의 분석 집단 ────────────────────────────────────────────
     # required(= --adherence-weeks)를 주면 **창을 끝까지 관찰한 완주자**만 분모에 넣는다.
@@ -337,5 +442,6 @@ def adherence(
             if population
             else None
         ),
+        trend=trend,
         notes=notes,
     )
