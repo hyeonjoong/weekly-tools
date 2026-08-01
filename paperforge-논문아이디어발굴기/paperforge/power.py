@@ -560,6 +560,250 @@ def mdes_survival(
     return math.exp((za + zb) / math.sqrt(events * allocation * (1.0 - allocation)))
 
 
+# --- Non-inferiority designs -------------------------------------------------
+#
+# A superiority trial asks "is the new treatment better?"; most modern pharma
+# trials (biosimilars, shorter regimens, oral vs IV, de-escalation) instead ask
+# "is it not worse by more than a clinically irrelevant margin M?". The sizing is
+# NOT the superiority formula with a different number plugged in: the alternative
+# hypothesis is shifted by the margin, the test is one-sided at alpha/2 by
+# convention (ICH E9 / E10), and the variance is the unpooled one because H0 is
+# not "the two are equal". Sizing such a trial with the superiority forms — the
+# only thing this tool used to offer — gets the N wrong in both directions
+# depending on how the assumed true difference sits relative to the margin.
+#
+# The effect spec carries ``"design": "noninferiority"`` plus a margin on the
+# family's natural scale; the assumed *true* difference stays in the usual key
+# (and is conventionally "no difference": d=0, p2=p1, hr=1).
+
+
+def is_noninferiority(effect: dict) -> bool:
+    """True when this effect spec describes a non-inferiority design."""
+    return effect.get("design") == "noninferiority"
+
+
+def _z_alpha_ni(alpha: float) -> float:
+    """One-sided critical z for a non-inferiority test at nominal ``alpha``.
+
+    ICH E9/E10 practice is a one-sided test at half the nominal two-sided level
+    (0.025 from the usual 0.05), so the NI confidence interval matches the 95%
+    two-sided interval a reader expects. That makes ``--one-sided`` meaningless
+    for these designs — they are already one-sided — which the report states.
+    """
+    return _z_alpha(alpha, 2)
+
+
+def _ni_delta_two_group(effect: dict) -> float:
+    """Effective standardized shift for a mean-difference NI design.
+
+    ``margin_d`` is the largest standardized inferiority still acceptable;
+    ``d`` is the assumed *true* standardized difference, signed so that positive
+    means the test arm is better. The test statistic is powered on their sum.
+    """
+    margin = abs(float(effect["margin_d"]))
+    d = float(effect.get("d", 0.0))
+    delta = margin + d
+    if delta <= 0.0:
+        raise ValueError(
+            "비열등성 마진(margin_d)보다 가정한 열등 정도(d)가 커서 "
+            "어떤 표본으로도 비열등성을 보일 수 없습니다."
+        )
+    return delta
+
+
+def _ni_delta_two_proportion(effect: dict):
+    """``(delta, variance_per_unit_n)`` for a risk-difference NI design."""
+    p1 = _check_proportion(effect["p1"], "p1")
+    p2 = _check_proportion(effect["p2"], "p2")
+    margin = float(effect["margin"])
+    if not 0.0 < margin < 1.0:
+        raise ValueError("margin must satisfy 0 < margin < 1")
+    allocation = float(effect.get("allocation", 0.5))
+    if not 0.0 < allocation < 1.0:
+        raise ValueError("allocation must satisfy 0 < allocation < 1")
+    sign = 1.0 if effect.get("higher_is_better", True) else -1.0
+    delta = margin + sign * (p2 - p1)
+    if delta <= 0.0:
+        raise ValueError(
+            "비열등성 마진(margin)보다 가정한 열등 정도가 커서 어떤 표본으로도 "
+            "비열등성을 보일 수 없습니다."
+        )
+    w1, w2 = allocation, 1.0 - allocation
+    # Unpooled variance: under an NI null the two rates are NOT equal, so the
+    # pooled term the superiority test uses does not apply.
+    var = p1 * (1.0 - p1) / w1 + p2 * (1.0 - p2) / w2
+    return delta, var
+
+
+def _ni_delta_survival(effect: dict) -> float:
+    """Effective log-hazard shift for a time-to-event NI design."""
+    hr = float(effect.get("hr", 1.0))
+    margin_hr = float(effect["margin_hr"])
+    for value, name in ((hr, "hr"), (margin_hr, "margin_hr")):
+        if value != value or value <= 0.0 or not math.isfinite(value):
+            raise ValueError(f"{name} must be a finite number > 0")
+    delta = abs(math.log(margin_hr) - math.log(hr))
+    if delta <= 0.0:
+        raise ValueError(
+            "비열등성 마진 HR이 가정한 HR과 같아 비열등성을 검정할 수 없습니다."
+        )
+    return delta
+
+
+def n_for_ni_two_group(effect: dict, alpha: float = 0.05,
+                       power: float = 0.80) -> int:
+    """Total N for a non-inferiority comparison of two means.
+
+    ``N = (z_{1-a/2} + z_{1-b})^2 / (w1 w2 (M + d)^2)``. At M=0.30, d=0,
+    alpha=0.05, power=0.80 and a 1:1 split this gives 349 total (175/arm),
+    matching the textbook ``2(1.96+0.84)^2/M^2`` per arm.
+    """
+    allocation = float(effect.get("allocation", 0.5))
+    if not 0.0 < allocation < 1.0:
+        raise ValueError("allocation must satisfy 0 < allocation < 1")
+    delta = _ni_delta_two_group(effect)
+    za, zb = _z_pair(alpha, power, 2)
+    denom = allocation * (1.0 - allocation) * _sq(delta, "margin_d")
+    return _checked_n((za + zb) ** 2 / denom)
+
+
+def power_for_ni_two_group(effect: dict, n_total, alpha: float = 0.05) -> float:
+    """Attained one-sided NI power for two means at ``n_total``."""
+    n_total = int(n_total)
+    if n_total < 4:
+        raise ValueError("n_total must be >= 4 (>= 2 per group)")
+    allocation = float(effect.get("allocation", 0.5))
+    if not 0.0 < allocation < 1.0:
+        raise ValueError("allocation must satisfy 0 < allocation < 1")
+    delta = _ni_delta_two_group(effect)
+    za = _z_alpha_ni(alpha)
+    return norm_cdf(delta * math.sqrt(n_total * allocation * (1.0 - allocation)) - za)
+
+
+def mdes_ni_two_group(effect: dict, n_total, alpha: float = 0.05,
+                      power: float = 0.80) -> float:
+    """Smallest NI margin (in SD units) provable at ``n_total``.
+
+    The NI analogue of an MDES: not "what effect could I see" but "how tight a
+    margin could I actually rule out with the sample I have" — the number a
+    protocol argument about the margin turns on.
+    """
+    n_total = int(n_total)
+    if n_total < 4:
+        raise ValueError("n_total must be >= 4 (>= 2 per group)")
+    allocation = float(effect.get("allocation", 0.5))
+    if not 0.0 < allocation < 1.0:
+        raise ValueError("allocation must satisfy 0 < allocation < 1")
+    za, zb = _z_pair(alpha, power, 2)
+    margin = (za + zb) / math.sqrt(
+        n_total * allocation * (1.0 - allocation)
+    ) - float(effect.get("d", 0.0))
+    if margin <= 0.0:
+        raise ValueError("no positive NI margin is required at this N")
+    return margin
+
+
+def n_for_ni_two_proportions(effect: dict, alpha: float = 0.05,
+                             power: float = 0.80) -> int:
+    """Total N for a non-inferiority comparison of two response rates.
+
+    ``N = (z_{1-a/2} + z_{1-b})^2 (p1 q1/w1 + p2 q2/w2) / (M + (p2-p1))^2``.
+    For p1=p2=0.72 and M=0.10 at 1:1 this gives 633 total (317/arm), the value
+    the standard NI tables quote.
+    """
+    delta, var = _ni_delta_two_proportion(effect)
+    za, zb = _z_pair(alpha, power, 2)
+    return _checked_n((za + zb) ** 2 * var / _sq(delta, "margin"))
+
+
+def power_for_ni_two_proportions(effect: dict, n_total,
+                                 alpha: float = 0.05) -> float:
+    """Attained one-sided NI power for two proportions at ``n_total``."""
+    n_total = int(n_total)
+    if n_total < 4:
+        raise ValueError("n_total must be >= 4 (>= 2 per group)")
+    delta, var = _ni_delta_two_proportion(effect)
+    za = _z_alpha_ni(alpha)
+    return norm_cdf(delta * math.sqrt(n_total / var) - za)
+
+
+def mdes_ni_two_proportions(effect: dict, n_total, alpha: float = 0.05,
+                            power: float = 0.80) -> float:
+    """Smallest risk-difference NI margin provable at ``n_total``."""
+    n_total = int(n_total)
+    if n_total < 4:
+        raise ValueError("n_total must be >= 4 (>= 2 per group)")
+    _, var = _ni_delta_two_proportion(effect)
+    za, zb = _z_pair(alpha, power, 2)
+    p1 = float(effect["p1"])
+    p2 = float(effect["p2"])
+    sign = 1.0 if effect.get("higher_is_better", True) else -1.0
+    margin = (za + zb) * math.sqrt(var / n_total) - sign * (p2 - p1)
+    if margin <= 0.0:
+        raise ValueError("no positive NI margin is required at this N")
+    return margin
+
+
+def events_for_ni_survival(effect: dict, alpha: float = 0.05,
+                           power: float = 0.80) -> int:
+    """Events needed for a non-inferiority log-rank test (Schoenfeld, shifted).
+
+    ``E = (z_{1-a/2} + z_{1-b})^2 / (w1 w2 (ln M - ln HR)^2)``. A margin of
+    HR=1.30 against a true HR of 1.00 at 1:1 needs 457 events.
+    """
+    allocation = float(effect.get("allocation", 0.5))
+    if not 0.0 < allocation < 1.0:
+        raise ValueError("allocation must satisfy 0 < allocation < 1")
+    delta = _ni_delta_survival(effect)
+    za, zb = _z_pair(alpha, power, 2)
+    return _checked_n(
+        (za + zb) ** 2 / (allocation * (1.0 - allocation) * _sq(delta, "margin_hr"))
+    )
+
+
+def n_for_ni_survival(effect: dict, alpha: float = 0.05,
+                      power: float = 0.80) -> int:
+    """Subjects to enrol so an NI survival trial accrues the required events."""
+    rate = _check_proportion_inclusive(effect["event_rate"], "event_rate")
+    return _checked_n(events_for_ni_survival(effect, alpha, power) / rate)
+
+
+def power_for_ni_survival(effect: dict, n_total, alpha: float = 0.05) -> float:
+    """Attained one-sided NI log-rank power from the events ``n_total`` yields."""
+    allocation = float(effect.get("allocation", 0.5))
+    if not 0.0 < allocation < 1.0:
+        raise ValueError("allocation must satisfy 0 < allocation < 1")
+    delta = _ni_delta_survival(effect)
+    events = expected_events(n_total, effect["event_rate"])
+    if events is None or events < 1:
+        raise ValueError("n_total x event_rate must yield at least one event")
+    za = _z_alpha_ni(alpha)
+    return norm_cdf(
+        delta * math.sqrt(events * allocation * (1.0 - allocation)) - za
+    )
+
+
+def mdes_ni_survival(effect: dict, n_total, alpha: float = 0.05,
+                     power: float = 0.80) -> float:
+    """Smallest NI hazard-ratio margin provable at ``n_total``.
+
+    Returned on the same side of the assumed HR as the declared margin, so a
+    trial assuming HR=1.0 with a 1.30 margin gets back something like 1.42 when
+    the sample is short of the target.
+    """
+    allocation = float(effect.get("allocation", 0.5))
+    if not 0.0 < allocation < 1.0:
+        raise ValueError("allocation must satisfy 0 < allocation < 1")
+    events = expected_events(n_total, effect["event_rate"])
+    if events is None or events < 1:
+        raise ValueError("n_total x event_rate must yield at least one event")
+    za, zb = _z_pair(alpha, power, 2)
+    hr = float(effect.get("hr", 1.0))
+    step = (za + zb) / math.sqrt(events * allocation * (1.0 - allocation))
+    upward = math.log(float(effect["margin_hr"])) >= math.log(hr)
+    return math.exp(math.log(hr) + (step if upward else -step))
+
+
 def scale_effect(effect: dict, factor: float) -> dict:
     """Return a copy of ``effect`` with its magnitude scaled by ``factor``.
 
@@ -578,6 +822,25 @@ def scale_effect(effect: dict, factor: float) -> dict:
         raise ValueError("factor must be > 0")
     e = dict(effect)
     etype = e.get("type")
+    if is_noninferiority(e):
+        # For an NI design the quantity a planning meeting argues over is the
+        # MARGIN, not the assumed true difference (which is conventionally zero
+        # and cannot be scaled at all). Scaling it keeps the direction the rest
+        # of the tool promises: factor<1 = a stricter demand = a larger N.
+        if etype == "two_group":
+            e["margin_d"] = abs(float(e["margin_d"])) * factor
+        elif etype == "two_proportion":
+            e["margin"] = min(max(abs(float(e["margin"])) * factor, 1e-9),
+                              1.0 - 1e-9)
+        elif etype == "survival":
+            hr = float(e.get("hr", 1.0))
+            margin = float(e["margin_hr"])
+            if hr > 0.0 and margin > 0.0 and math.isfinite(margin):
+                gap = math.log(margin) - math.log(hr)
+                e["margin_hr"] = math.exp(
+                    math.log(hr) + max(-700.0, min(700.0, gap * factor))
+                )
+        return e
     if etype == "correlation":
         e["r"] = min(abs(e["r"]) * factor, 0.999)
     elif etype in ("two_group", "paired"):
@@ -606,6 +869,16 @@ def scale_effect(effect: dict, factor: float) -> dict:
 def effect_magnitude(effect: dict):
     """The headline magnitude of an effect spec (r / d / f2), or ``None``."""
     etype = effect.get("type")
+    if is_noninferiority(effect):
+        # The margin IS the design's magnitude: it is what the sample size is
+        # driven by and what scale_effect moves.
+        if etype == "two_group":
+            return abs(float(effect["margin_d"]))
+        if etype == "two_proportion":
+            return abs(float(effect["margin"]))
+        if etype == "survival":
+            return float(effect["margin_hr"])
+        return None
     if etype == "correlation":
         return effect["r"]
     if etype in ("two_group", "paired"):
@@ -644,6 +917,19 @@ def required_total_n(effect: dict, alpha: float = 0.05, power: float = 0.80,
     and ``sided`` is ignored for them (documented in the report).
     """
     etype = effect.get("type")
+    if is_noninferiority(effect):
+        # NI tests are one-sided at alpha/2 by convention, so `sided` is ignored
+        # here exactly as it is for the F-based families (documented in the
+        # report and in the generated justification sentence).
+        if etype == "two_group":
+            return n_for_ni_two_group(effect, alpha, power)
+        if etype == "two_proportion":
+            return n_for_ni_two_proportions(effect, alpha, power)
+        if etype == "survival":
+            return n_for_ni_survival(effect, alpha, power)
+        raise ValueError(
+            f"non-inferiority is not defined for effect type {etype!r}"
+        )
     if etype == "correlation":
         return n_for_correlation(effect["r"], alpha, power, sided)
     if etype == "two_group":
@@ -685,6 +971,8 @@ def required_events(effect: dict, alpha: float = 0.05, power: float = 0.80,
     """
     if effect.get("type") != "survival":
         return None
+    if is_noninferiority(effect):
+        return events_for_ni_survival(effect, alpha, power)
     return events_for_survival(
         effect["hr"], alpha, power, effect.get("allocation", 0.5), sided
     )
@@ -1137,6 +1425,21 @@ def detectable_effect(effect: dict, n, alpha: float = 0.05, power: float = 0.80,
         return None
     etype = effect.get("type")
     try:
+        if is_noninferiority(effect):
+            # For an NI design the useful inverse question is not "what effect
+            # could I see" (the alternative is *no* difference) but "how tight a
+            # margin could I still rule out at this N".
+            if etype == "two_group":
+                return {"metric": "margin_d",
+                        "value": mdes_ni_two_group(effect, n, alpha, power)}
+            if etype == "two_proportion":
+                return {"metric": "margin_p",
+                        "value": mdes_ni_two_proportions(effect, n, alpha, power)}
+            if etype == "survival":
+                return {"metric": "margin_hr",
+                        "value": mdes_ni_survival(effect, n, alpha, power),
+                        "events": expected_events(n, effect["event_rate"])}
+            return None
         if etype == "correlation":
             return {"metric": "r", "value": mdes_correlation(n, alpha, power, sided)}
         if etype == "two_group":
@@ -1304,6 +1607,14 @@ def attained_power(effect: dict, n, alpha: float = 0.05, sided: int = 2):
         return None
     etype = effect.get("type")
     try:
+        if is_noninferiority(effect):
+            if etype == "two_group":
+                return power_for_ni_two_group(effect, n, alpha)
+            if etype == "two_proportion":
+                return power_for_ni_two_proportions(effect, n, alpha)
+            if etype == "survival":
+                return power_for_ni_survival(effect, n, alpha)
+            return None
         if etype == "correlation":
             return power_for_correlation(effect["r"], n, alpha, sided)
         if etype == "two_group":

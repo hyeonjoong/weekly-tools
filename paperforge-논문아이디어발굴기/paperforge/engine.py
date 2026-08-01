@@ -12,6 +12,7 @@ from .power import (
     detectable_effect,
     effect_magnitude,
     expected_events,
+    is_noninferiority,
     observation_level,
     required_events,
     required_total_n,
@@ -20,9 +21,13 @@ from .power import (
     subjects_to_rows,
 )
 
-# How each effect metric renders in the "detectable effect" cell.
+# How each effect metric renders in the "detectable effect" cell. The margin_*
+# metrics belong to non-inferiority designs, where the inverse question is "how
+# tight a margin could this N rule out", not "what effect could it detect".
 _METRIC_LABEL = {"r": "r", "d": "d", "d_z": "d_z", "f2": "f²",
-                 "delta_p": "Δp", "hr": "HR"}
+                 "delta_p": "Δp", "hr": "HR",
+                 "margin_d": "마진 d", "margin_p": "마진 Δp",
+                 "margin_hr": "마진 HR"}
 
 # Effect-size sensitivity strip: required N is recomputed at these multiples of
 # the template's planned effect so the reader sees how the target moves if the
@@ -39,6 +44,18 @@ _SUBJECT_ONLY = frozenset({"survival", "two_proportion"})
 _SENSITIVITY_METRIC = {"correlation": "r", "two_group": "d", "paired": "d_z",
                        "regression": "f²", "regression_change": "f²",
                        "two_proportion": "Δp", "survival": "HR"}
+
+# Same, for non-inferiority designs — there the strip varies the MARGIN.
+_NI_SENSITIVITY_METRIC = {"two_group": "마진 d", "two_proportion": "마진 Δp",
+                          "survival": "마진 HR"}
+
+
+def _sensitivity_metric(effect: dict) -> str:
+    """Name of the quantity the sensitivity strip varies for this design."""
+    etype = effect.get("type")
+    if is_noninferiority(effect):
+        return _NI_SENSITIVITY_METRIC.get(etype, "마진")
+    return _SENSITIVITY_METRIC.get(etype, "효과")
 
 
 @dataclass
@@ -183,6 +200,61 @@ def _arm_clause(total, allocation: float) -> str:
     return f"(1군 {n1}명 / 2군 {n2}명)"
 
 
+def _ni_justification(effect: dict, *, alpha_eff: float, power: float,
+                      required_n, events) -> str:
+    """Protocol sentence for a non-inferiority design.
+
+    Separate from the superiority text because every clause differs: the null is
+    the margin (not zero), the test is one-sided at half the nominal level, and
+    the margin's clinical justification — not the effect size's — is the thing a
+    regulator will ask about, so that is where the blank goes.
+    """
+    etype = effect.get("type")
+    alloc = float(effect.get("allocation", 0.5))
+    split = ("1:1 배분" if abs(alloc - 0.5) < 1e-12
+             else f"{_pct(alloc)}:{_pct(1 - alloc)} 배분")
+    one_sided = f"단측 유의수준 α={_fmt_alpha(alpha_eff / 2)}"
+    level = f"{one_sided}(양측 {_fmt_alpha(alpha_eff)} 상당), 목표 검정력 {power:.0%}"
+
+    if etype == "two_group":
+        m_txt = f"{effect['margin_d']:.2f}"
+        d_txt = f"{float(effect.get('d', 0.0)):.2f}"
+        return (
+            f"{level}, {split}의 비열등성 설계에서 비열등성 마진 "
+            f"d={m_txt}(표준편차 단위), 가정한 실제 군간 차이 d={d_txt} 조건으로 "
+            f"산출한 필요 표본은 총 {required_n}명"
+            f"{_arm_clause(required_n, alloc)}이다(정규근사)."
+        )
+    if etype == "two_proportion":
+        m_txt = _pct(float(effect["margin"]))
+        direction = ("높을수록 좋은 종점"
+                     if effect.get("higher_is_better", True)
+                     else "낮을수록 좋은 종점")
+        return (
+            f"{level}, {split}의 비열등성 설계에서 대조군 "
+            f"{_pct(float(effect['p1']))} 대비 시험군 "
+            f"{_pct(float(effect['p2']))}({direction})을 가정하고 비열등성 마진 "
+            f"{m_txt}{_obj(m_txt)} 적용하면, 두 비율 비교(비합동 분산 정규근사, "
+            f"연속성 보정 없음) 기준 총 {required_n}명"
+            f"{_arm_clause(required_n, alloc)}이 필요하다."
+        )
+    if etype == "survival":
+        m_txt = f"{effect['margin_hr']:.2f}"
+        hr_txt = f"{float(effect.get('hr', 1.0)):.2f}"
+        er_txt = _pct(float(effect["event_rate"]))
+        return (
+            f"{level}, {split}의 비열등성 로그순위검정에서 비열등성 마진 "
+            f"HR={m_txt}, 가정한 실제 HR={hr_txt} 조건이면 Schoenfeld 공식에 따라 "
+            f"총 {events}건의 사건이 필요하며, 관찰기간 내 사건 발생률 "
+            f"{er_txt}{_obj(er_txt)} 가정하면 {required_n}명"
+            f"{_arm_clause(required_n, alloc)}을 등록해야 한다. 사건 수가 "
+            "검정력을 결정하므로 추적기간이 짧아지면 등록 수를 늘려도 검정력은 "
+            "회복되지 않는다. Schoenfeld 공식은 비례위험을 가정하며, 비례위험 "
+            "가정은 Schoenfeld 잔차로 점검한다."
+        )
+    return f"비열등성 설계 기준 필요 표본은 총 {required_n}명이다."  # pragma: no cover
+
+
 def sample_size_justification(
     effect: dict, *, alpha: float, alpha_eff: float, power: float, sided: int,
     required_n, required_rows, events, recruit_n, dropout: float, n_tests: int,
@@ -223,7 +295,10 @@ def sample_size_justification(
     got = (f"필요 분석 관측 수는 {unit_n}개이다" if converted
            else f"필요 표본은 총 {required_n}명이다")
 
-    if etype == "correlation":
+    if is_noninferiority(effect):
+        core = _ni_justification(effect, alpha_eff=alpha_eff, power=power,
+                                 required_n=required_n, events=events)
+    elif etype == "correlation":
         r_txt = f"{effect['r']:.2f}"
         core = (
             f"{level} 조건에서 Pearson 상관 r={r_txt}{_obj(r_txt)} 검출하기 위해 "
@@ -610,9 +685,7 @@ def evaluate(
                 n_sensitivity.append({
                     "label": label,
                     "factor": factor,
-                    "metric": _SENSITIVITY_METRIC.get(
-                        planned_effect.get("type"), "효과"
-                    ),
+                    "metric": _sensitivity_metric(planned_effect),
                     "effect_value": round(effect_magnitude(eff), 4),
                     "required_n": _subjects(rows),
                 })
