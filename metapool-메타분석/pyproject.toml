@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "metapool"
+version = "1.0.0"
+description = "메타분석 CLI — 효과크기 합성(고정·변량), 이질성·예측구간, 하위군, 민감도, 출판편향, 논문 문장 (외부 의존성 0)"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "hyeonjoong", email = "hyeonjoongk@gmail.com" }]
+keywords = ["meta-analysis", "systematic-review", "effect-size", "forest-plot", "clinical-research"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Medical Science Apps.",
+]
+dependencies = []
+
+[project.scripts]
+metapool = "metapool.cli:main"
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
+[tool.setuptools]
+packages = ["metapool"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
