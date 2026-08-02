@@ -32,6 +32,7 @@ from dataclasses import dataclass, field
 from typing import Dict, Iterator, List, Optional, Sequence, Tuple
 
 from .covariates import MAX_LEVELS, Covariate
+from .xlsx import XlsxError, is_xlsx, read_xlsx, sheet_names
 
 __all__ = [
     "Panel",
@@ -39,6 +40,7 @@ __all__ = [
     "load_long",
     "load_wide",
     "read_table",
+    "sheet_names",
     "clean_label",
     "MISSING_TOKENS",
     "MAX_INPUT_BYTES",
@@ -135,9 +137,56 @@ def _sniff_delimiter(sample: str, notes: List[str]) -> str:
     return best
 
 
-def read_table(path: str, delimiter: Optional[str], notes: List[str]
+def _rows_from_cells(cells: List[List[str]], notes: List[str], origin: str
+                     ) -> Tuple[List[str], Iterator[Tuple[int, List[str]]]]:
+    """Shared tail of the CSV and Excel paths: header + padded row stream.
+
+    ``origin`` names what the row numbers refer to, so an Excel error says
+    "시트 12행" rather than pointing at a line in a file the user never sees.
+    """
+    header_at = next((k for k, row in enumerate(cells)
+                      if any(c.strip() for c in row)), None)
+    if header_at is None:
+        raise DataError("데이터 행이 없습니다 (빈 줄만 있습니다).")
+    header = _dedupe_header([c.strip() for c in cells[header_at]], notes)
+    width = len(header)
+
+    def _stream() -> Iterator[Tuple[int, List[str]]]:
+        for k in range(header_at + 1, len(cells)):
+            row = [c.strip() for c in cells[k]]
+            if not any(row):
+                continue
+            if len(row) > width:
+                if any(c for c in row[width:]):
+                    raise DataError(
+                        f"{origin} {k + 1}행의 열 개수({len(row)})가 "
+                        f"머리글({width})보다 많습니다.")
+                row = row[:width]
+            elif len(row) < width:
+                row = row + [""] * (width - len(row))
+            yield k + 1, row
+
+    stream = _stream()
+    first = next(stream, None)
+    if first is None:
+        raise DataError("머리글만 있고 데이터 행이 없습니다.")
+
+    def rows() -> Iterator[Tuple[int, List[str]]]:
+        yield first
+        for item in stream:
+            yield item
+
+    return header, rows()
+
+
+def read_table(path: str, delimiter: Optional[str], notes: List[str],
+               sheet: Optional[str] = None
                ) -> Tuple[List[str], Iterator[Tuple[int, List[str]]]]:
     """Read *path* and return ``(header, rows)``.
+
+    Accepts a CSV/TSV text file or an Excel ``.xlsx`` workbook — the format is
+    detected from the file's own bytes, not its extension, because clinical
+    exports are routinely named ``.csv`` while actually being Excel files.
 
     ``rows`` is a generator of ``(line_number, cells)`` — line numbers are the
     physical ones in the file, so an error message points at the line the user
@@ -160,6 +209,19 @@ def read_table(path: str, delimiter: Optional[str], notes: List[str]
             f"입력 파일이 {size / 1024 / 1024:.0f} MB 로 너무 큽니다 "
             f"(상한 {MAX_INPUT_BYTES // 1024 // 1024} MB). 필요한 열·기간만 "
             "추출해서 다시 시도하세요.")
+    if is_xlsx(path):
+        if delimiter is not None:
+            raise DataError("--delimiter 는 CSV 전용입니다 (엑셀 파일에는 "
+                            "구분자가 없습니다).")
+        try:
+            cells = read_xlsx(path, sheet, notes)
+        except XlsxError as exc:
+            raise DataError(str(exc)) from None
+        except OSError as exc:
+            raise DataError(f"엑셀 파일을 읽을 수 없습니다: {exc}") from None
+        return _rows_from_cells(cells, notes, "시트")
+    if sheet is not None:
+        raise DataError("--sheet 는 엑셀(.xlsx) 파일에만 쓸 수 있습니다.")
     try:
         with open(path, "rb") as fh:
             raw = fh.read()
@@ -654,10 +716,11 @@ def load_long(path: str, id_col: str, time_col: str, value_col: str,
               duplicates: str = "error",
               covariate_cols: Optional[Sequence[str]] = None,
               categorical_cols: Sequence[str] = (),
-              notes: Optional[List[str]] = None) -> Panel:
-    """Load a long-format file into a :class:`Panel`."""
+              notes: Optional[List[str]] = None,
+              sheet: Optional[str] = None) -> Panel:
+    """Load a long-format CSV or ``.xlsx`` file into a :class:`Panel`."""
     notes = notes if notes is not None else []
-    header, rows = read_table(path, delimiter, notes)
+    header, rows = read_table(path, delimiter, notes, sheet)
     comma_delimited = not any("구분자를" in n for n in notes)
     i_id = _col_index(header, id_col, "대상 ID(--id)")
     i_tm = _col_index(header, time_col, "시점(--time)")
@@ -778,10 +841,11 @@ def load_wide(path: str, columns: Sequence[str], id_col: Optional[str] = None,
               value_name: str = "측정값",
               covariate_cols: Optional[Sequence[str]] = None,
               categorical_cols: Sequence[str] = (),
-              notes: Optional[List[str]] = None) -> Panel:
+              notes: Optional[List[str]] = None,
+              sheet: Optional[str] = None) -> Panel:
     """Load a wide-format file (one column per timepoint) into a :class:`Panel`."""
     notes = notes if notes is not None else []
-    header, rows = read_table(path, delimiter, notes)
+    header, rows = read_table(path, delimiter, notes, sheet)
     comma_delimited = not any("구분자를" in n for n in notes)
     cols = [clean_label(c) for c in columns if c.strip()]
     if len(cols) < 2:
