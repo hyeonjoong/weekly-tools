@@ -546,13 +546,20 @@ def _make_covariates(names: Sequence[str], forced_cat: Sequence[str],
                 if v is not None and v not in levels:
                     levels.append(v)
             if len(levels) > MAX_LEVELS:
+                # Naming the cell that forced the categorical reading matters:
+                # one "45세" in an age column produced "your column has 40
+                # categories, is it an ID or a date?", sending the user to look
+                # for the wrong problem entirely.
+                why_cat = (f"숫자가 아닌 값 '{example}' 때문에 범주형으로 "
+                           "판정되었는데, " if example else "")
                 raise DataError(
-                    f"공변량 '{name}' 의 범주가 {len(levels)}개입니다 "
-                    f"(상한 {MAX_LEVELS}). 대상 ID나 날짜 열을 공변량으로 "
-                    "지정하지 않았는지 확인하세요.")
+                    f"공변량 '{name}': {why_cat}범주가 {len(levels)}개입니다 "
+                    f"(상한 {MAX_LEVELS}). 단위가 붙은 값이 섞여 있지 않은지, "
+                    "대상 ID나 날짜 열을 공변량으로 지정하지 않았는지 "
+                    "확인하세요.")
             why = (f" (숫자가 아닌 값 '{example}' 이 있어)" if example else "")
             notes.append(f"공변량 '{name}': 범주형으로 사용{why} — "
-                         f"수준 {len(levels)}개, 기준 '{levels[0]}'.")
+                         f"수준 {len(levels)}개, 기준 '{_redact(levels[0])}'.")
             out.append(Covariate(name=name, values=list(vals),
                                  categorical=True,
                                  numeric=[None] * len(vals)))
@@ -585,11 +592,68 @@ def clean_label(cell: str) -> str:
 _clean_label = clean_label
 
 
+def _covariate_indices(header: Sequence[str], names: Sequence[str],
+                       taken: Sequence[int]) -> List[Tuple[str, int]]:
+    """Resolve ``--covariate`` names to column positions, rejecting overlaps."""
+    out: List[Tuple[str, int]] = []
+    seen: set = set()
+    for raw in names:
+        name = clean_label(raw)
+        if not name:
+            continue
+        if name in seen:
+            raise DataError(f"--covariate 에 '{name}' 이(가) 두 번 있습니다.")
+        seen.add(name)
+        idx = _col_index(header, name, "공변량(--covariate)")
+        if idx in taken:
+            raise DataError(
+                f"공변량 '{name}' 이(가) 이미 --id/--time/--value/--group/"
+                "--columns 로 쓰이고 있습니다. 공변량은 그와 다른 열이어야 합니다.")
+        out.append((name, idx))
+    return out
+
+
+def _subject_covariates(specs: Sequence[Tuple[str, int]],
+                        per_subject: Dict[str, Dict[str, Optional[str]]],
+                        kept: Sequence[str], forced_cat: Sequence[str],
+                        notes: List[str]) -> List["Covariate"]:
+    """Per-subject raw strings → typed covariates, ordered like *kept*."""
+    if not specs:
+        return []
+    raw: Dict[str, List[Optional[str]]] = {
+        name: [per_subject.get(sid, {}).get(name) for sid in kept]
+        for name, _ in specs}
+    return _make_covariates([name for name, _ in specs], forced_cat, raw, notes)
+
+
+def _record_covariate(store: Dict[str, Dict[str, Optional[str]]], sid: str,
+                      name: str, cell: Optional[str], lineno: int) -> None:
+    """Remember one subject-level covariate cell, refusing to average conflicts.
+
+    A covariate that changes value within a subject is not a subject-level
+    covariate — it is a time-varying one, and quietly keeping the first row
+    would put a number in the model that no visit actually had.
+    """
+    bucket = store.setdefault(sid, {})
+    prev = bucket.get(name)
+    if cell is None:
+        bucket.setdefault(name, None)
+        return
+    if prev is not None and prev != cell:
+        raise DataError(
+            f"{lineno}행: 공변량 '{name}' 이 같은 대상 안에서 "
+            f"'{_redact(prev)}' 와 '{_redact(cell)}' 로 달라집니다. 공변량은 대상마다 값이 하나인 "
+            "변수(나이·성별·기관 등)여야 합니다.")
+    bucket[name] = cell
+
+
 def load_long(path: str, id_col: str, time_col: str, value_col: str,
               group_col: Optional[str] = None,
               delimiter: Optional[str] = None,
               time_order: Optional[Sequence[str]] = None,
               duplicates: str = "error",
+              covariate_cols: Optional[Sequence[str]] = None,
+              categorical_cols: Sequence[str] = (),
               notes: Optional[List[str]] = None) -> Panel:
     """Load a long-format file into a :class:`Panel`."""
     notes = notes if notes is not None else []
@@ -602,6 +666,8 @@ def load_long(path: str, id_col: str, time_col: str, value_col: str,
     chosen = [i_id, i_tm, i_val] + ([i_grp] if i_grp is not None else [])
     if len(set(chosen)) < len(chosen):
         raise DataError("--id/--time/--value/--group 에 같은 열을 두 번 지정했습니다.")
+    cov_specs = _covariate_indices(header, covariate_cols or [], chosen)
+    cov_raw: Dict[str, Dict[str, Optional[str]]] = {}
 
     cells: Dict[Tuple[str, str], List[float]] = {}
     subj_order: List[str] = []
@@ -643,6 +709,8 @@ def load_long(path: str, id_col: str, time_col: str, value_col: str,
             subj_group[sid] = g
         else:
             subj_group.setdefault(sid, "")
+        for name, ci in cov_specs:
+            _record_covariate(cov_raw, sid, name, _cov_cell(row[ci]), lineno)
         if val is None:
             continue
         cells.setdefault((sid, tlab), []).append(val)
@@ -698,6 +766,8 @@ def load_long(path: str, id_col: str, time_col: str, value_col: str,
         time_name=time_col,
         id_name=id_col,
         notes=notes,
+        covariates=_subject_covariates(cov_specs, cov_raw, kept,
+                                       categorical_cols, notes),
     )
 
 
@@ -706,6 +776,8 @@ def load_wide(path: str, columns: Sequence[str], id_col: Optional[str] = None,
               delimiter: Optional[str] = None,
               duplicates: str = "error",
               value_name: str = "측정값",
+              covariate_cols: Optional[Sequence[str]] = None,
+              categorical_cols: Sequence[str] = (),
               notes: Optional[List[str]] = None) -> Panel:
     """Load a wide-format file (one column per timepoint) into a :class:`Panel`."""
     notes = notes if notes is not None else []
@@ -725,6 +797,9 @@ def load_wide(path: str, columns: Sequence[str], id_col: Optional[str] = None,
         raise DataError("--id 열이 --columns 에도 들어 있습니다.")
     if i_grp is not None and i_grp in idx:
         raise DataError("--group 열이 --columns 에도 들어 있습니다.")
+    taken = list(idx) + [i for i in (i_id, i_grp) if i is not None]
+    cov_specs = _covariate_indices(header, covariate_cols or [], taken)
+    cov_raw: Dict[str, Dict[str, Optional[str]]] = {}
 
     subjects: List[str] = []
     groups: List[str] = []
@@ -751,6 +826,8 @@ def load_wide(path: str, columns: Sequence[str], id_col: Optional[str] = None,
             n_blank += 1
             continue
         label = clean_label(row[i_grp]) or "(미기재)" if i_grp is not None else ""
+        for name, ci in cov_specs:
+            _record_covariate(cov_raw, sid, name, _cov_cell(row[ci]), lineno)
         if sid in seen:
             n_dupes += 1
             if duplicates == "error":
@@ -799,4 +876,6 @@ def load_wide(path: str, columns: Sequence[str], id_col: Optional[str] = None,
         time_name="time",
         id_name=id_col or "row",
         notes=notes,
+        covariates=_subject_covariates(cov_specs, cov_raw, subjects,
+                                       categorical_cols, notes),
     )

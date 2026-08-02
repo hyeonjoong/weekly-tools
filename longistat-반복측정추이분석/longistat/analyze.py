@@ -295,7 +295,7 @@ def analyze(panel: Panel, options: Optional[Options] = None) -> Analysis:
     change_rank = change_analysis(panel, baseline, opt.alpha, opt.correction,
                                   True, opt.welch, opt.primary_time)
     ancova = ancova_analysis(panel, baseline, opt.alpha, opt.correction,
-                             opt.primary_time)
+                             opt.primary_time, covariates=panel.covariates)
 
     # ---- MMRM: the only track here that keeps partially observed subjects --
     mmrm: Optional[MMRMResult] = None
@@ -304,7 +304,8 @@ def analyze(panel: Panel, options: Optional[Options] = None) -> Analysis:
         skipped: List[str] = []
         try:
             mmrm = mmrm_analysis(panel, baseline, opt.alpha, opt.correction,
-                                 opt.primary_time, skipped=skipped)
+                                 opt.primary_time, skipped=skipped,
+                                 covariates=panel.covariates)
         except (ArithmeticError, ValueError) as exc:
             mmrm_error = str(exc)
         if mmrm is None and mmrm_error is None and skipped:
@@ -397,6 +398,18 @@ def analyze(panel: Panel, options: Optional[Options] = None) -> Analysis:
             f"[4c] MMRM 이 EM 반복 {mmrm.iterations}회 안에 수렴하지 "
             "않았습니다 — 그 구획의 추정치·p값을 인용하지 마세요 "
             "(시점을 줄이거나 R mmrm·SAS PROC MIXED 로 확인).")
+    # Over-adjustment travels the same way non-convergence does: to the top-level
+    # 주의 list, so it is visible without scrolling into [4c]/[5b].  A user who
+    # over-adjusts gets wide-but-plausible intervals, which is exactly the kind
+    # of result that gets pasted into a manuscript unchallenged.
+    thin_df = [tag for tag, res in (("[4c] MMRM", mmrm), ("[5b] ANCOVA", ancova))
+               if res is not None
+               and any("잔차 자유도가" in n for n in res.notes)]
+    if thin_df:
+        warnings.append(
+            " · ".join(thin_df) + " 의 잔차 자유도가 5 미만입니다 — 대상 수에 "
+            "비해 모형에 넣은 모수(공변량·시점·군)가 너무 많습니다. 그 구획의 "
+            "신뢰구간을 그대로 인용하지 마세요 (--covariate 를 줄이세요).")
     if mmrm is not None and mmrm.n_subjects > len(panel.complete_rows()):
         # The whole point of MMRM is that it reads subjects the complete-case
         # tables drop.  If the two tracks then disagree, say so out loud — that

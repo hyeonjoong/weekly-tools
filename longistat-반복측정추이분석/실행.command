@@ -23,6 +23,7 @@ cat <<'EOF'
      · 시점 간·군간 사후비교 (Holm 보정)
      · 기저 대비 변화량과 "군간 변화량 차이 + 95% CI"
      · 기저값 보정 ANCOVA (조정평균차 + 95% CI)
+     · 나이·성별·기관 등 층화/예후 공변량 보정 (--covariate)
      · 결측 대체 민감도 LOCF/BOCF (결론이 탈락에 흔들리는지)
      · MCID 반응자 비율과 RD/RR/OR/NNT, 신뢰변화지수(RCI)
      · 논문에 바로 넣는 한/영 결과 문장
@@ -36,15 +37,17 @@ cat <<'EOF'
 EOF
 
 echo
-echo "▶ 예제 1/2 — 불면 ISI, 2군(능동/가짜) × 3시점, 탈락 포함"
+echo "▶ 예제 1/2 — 불면 ISI, 2군(능동/가짜) × 3시점, 탈락 포함, 나이·성별·기관 보정"
 echo "  \$ python3 -m longistat.cli examples/isi_serene_예시.csv --id 대상 --time 방문 --value ISI --group 군 \\"
 echo "        --time-order 기저,4주,8주 --primary-time 8주 --time-values 0,4,8 --time-unit 주 \\"
+echo "        --covariate 나이,성별,기관 \\"
 echo "        --mcid 6 --direction lower --reliability 0.9 --recovery-cutoff 7"
 echo
 "$PY" -m longistat.cli examples/isi_serene_예시.csv \
   --id 대상 --time 방문 --value ISI --group 군 \
   --time-order 기저,4주,8주 --primary-time 8주 \
   --time-values 0,4,8 --time-unit 주 \
+  --covariate 나이,성별,기관 \
   --mcid 6 --direction lower --reliability 0.9 --recovery-cutoff 7
 STATUS1=$?
 

@@ -14,7 +14,7 @@ import json
 import math
 import unicodedata
 from dataclasses import asdict, is_dataclass
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from .analyze import Analysis
 from .describe import ALL_LABEL
@@ -162,6 +162,23 @@ def _stars(p: float, alpha: float) -> str:
 def _en(a: Analysis, label: str) -> str:
     """English rendering of a timepoint/group label, if the user supplied one."""
     return a.options.labels_en.get(label, label)
+
+
+def _covariate_phrases(a: Analysis, names: Sequence[str]) -> Tuple[str, str]:
+    """``['나이', '기관=B', '기관=C']`` → ``('나이, 기관', '나이, 기관')``.
+
+    Encoded dummy columns are collapsed back to the variable the user named:
+    a methods sentence says "adjusted for site", not "adjusted for site=B and
+    site=C".  ``--labels-en`` translates the English side when it has an entry.
+    """
+    base: List[str] = []
+    for name in names:
+        head = name.split("=", 1)[0]
+        if head not in base:
+            base.append(head)
+    if not base:
+        return "", ""
+    return ", ".join(base), ", ".join(_en(a, b) for b in base)
 
 
 # --------------------------------------------------------------------------
@@ -395,13 +412,21 @@ def apa_sentences(a: Analysis) -> List[str]:
 
     if a.mmrm is not None and a.mmrm.contrasts:
         m = a.mmrm
-        what = ("baseline-adjusted between-arm difference in mean change"
+        adj_en = ("baseline- and covariate-adjusted" if m.covariates
+                  else "baseline-adjusted")
+        what = (f"{adj_en} between-arm difference in mean change"
                 if m.grouped else "mean change from baseline")
+        # The methods sentence must name every fixed effect that was actually
+        # fitted — a covariate-adjusted model described as unadjusted is a
+        # misreported analysis, not a formatting detail.
+        cov_ko, cov_en = _covariate_phrases(a, m.covariates)
         out.append(
             f"[KO] 결측을 MAR로 가정한 혼합모형 반복측정(MMRM, 비구조화 공분산, "
             f"REML)을 {m.n_subjects}명(관측 {m.n_obs}개)에 적합하였다"
             + ("; 고정효과는 시점, 군, 시점×군 및 기저값(시점과의 교호작용 포함)"
-               "이었다." if m.adjusted else "; 고정효과는 시점이었다.")
+               if m.adjusted else "; 고정효과는 시점")
+            + (f", 그리고 {cov_ko}(각각 시점과의 교호작용 포함)이었다."
+               if cov_ko else "이었다.")
             + " 자유도는 시점별 잔차 자유도 근사이며 Kenward–Roger 가 아니다.")
         out.append(
             f"[EN] A mixed model for repeated measures (MMRM) with an "
@@ -409,10 +434,22 @@ def apa_sentences(a: Analysis) -> List[str]:
             f"participants ({m.n_obs} observations) under a missing-at-random "
             "assumption"
             + ("; fixed effects were visit, arm, visit × arm, and baseline "
-               "with its visit interaction." if m.adjusted
-               else "; visit was the only fixed effect.")
+               "with its visit interaction" if m.adjusted
+               else "; visit was the only fixed effect")
+            + (f", together with {cov_en}, each interacted with visit."
+               if cov_en else ".")
             + " Degrees of freedom used a per-visit residual approximation, "
               "not Kenward–Roger.")
+        # A near-saturated model produces sentences that read exactly like a
+        # well-powered one.  Flag it here too, not only in the [4c] table.
+        if any("잔차 자유도가" in note for note in m.notes):
+            out.append(
+                "[KO] 다만 이 모형은 대상 수에 비해 모수가 많아 잔차 자유도가 "
+                "5 미만입니다 — 아래 신뢰구간을 그대로 인용하지 마십시오.")
+            out.append(
+                "[EN] Note, however, that this model has fewer than 5 residual "
+                "degrees of freedom for the number of parameters fitted; the "
+                "intervals below should not be quoted as they stand.")
         if not m.converged:
             out.append(
                 f"[KO] 다만 이 모형은 EM 반복 {m.iterations}회 안에 수렴하지 "
@@ -506,14 +543,19 @@ def apa_sentences(a: Analysis) -> List[str]:
             f"p {fmt_p(con.p_adj)}{mark_en}.")
 
     if a.ancova is not None:
+        acov_ko, acov_en = _covariate_phrases(a, a.ancova.covariates)
         for con in a.ancova.contrasts:
             out.append(
-                f"[KO] 기저값을 공변량으로 보정했을 때 {con.time} 시점의 "
+                "[KO] 기저값"
+                + (f"과 {acov_ko}" if acov_ko else "")
+                + f"을 공변량으로 보정했을 때 {con.time} 시점의 "
                 f"{con.group_a} − {con.group_b} 조정평균차는 "
                 f"{fmt(con.adjusted_diff)} (95% CI "
                 f"{fmt_ci(con.ci_low, con.ci_high)}), p {fmt_p(con.p_adj)}.")
             out.append(
-                f"[EN] Adjusting for baseline (ANCOVA), the adjusted mean "
+                f"[EN] Adjusting for baseline"
+                + (f" and {acov_en}" if acov_en else "")
+                + f" (ANCOVA), the adjusted mean "
                 f"difference at {_en(a, con.time)} between "
                 f"{_en(a, con.group_a)} and {_en(a, con.group_b)} was "
                 f"{fmt(con.adjusted_diff)} (95% CI "
@@ -756,9 +798,16 @@ def render_text(a: Analysis, full: bool = False, brief: bool = False) -> str:
                    "들어갑니다)." if m.adjusted else " (관측이 하나 이상 있으면 "
                    "모형에 들어갑니다).")
                 + " 구형성 가정이 없어 GG/HF 보정도 필요 없습니다.")
-        else:
+        elif m.n_subjects == a.missing.n_complete:
             add("  → 구형성 가정이 없어 GG/HF 보정이 필요 없습니다 "
                 "(이 자료에서는 완전자료 대상과 같은 인원을 씁니다).")
+        else:
+            # Fewer subjects than the complete-case tables — a covariate was
+            # missing for some of them.  Claiming "the same people" here was
+            # flatly contradicted by the count printed one line above.
+            add(f"  → 구형성 가정이 없어 GG/HF 보정이 필요 없습니다 "
+                f"(완전자료 {a.missing.n_complete}명 중 {m.n_subjects}명만 "
+                "모형에 들어갔습니다 — 아래 ※ 를 보세요).")
         if a.recommended != "parametric":
             add("  ※ MMRM 은 다변량 정규성을 가정하는 모수 모형입니다 — 이 자료는 "
                 "정규성이 기각되었으니 [4]·[5]의 순위검정 결과와 반드시 함께 "
@@ -811,12 +860,20 @@ def render_text(a: Analysis, full: bool = False, brief: bool = False) -> str:
              "right", "right"]))
     if a.ancova is not None:
         add("")
-        add("  기저값 보정 (ANCOVA) — 기저 불균형·평균회귀에 강건하고 대개 검정력이 더 높습니다")
-        L.extend("    " + ln for ln in table(
-            ["시점", "대비", "n", "조정평균차", "95% CI", "보정 p", "비보정 차이",
-             "기저 기울기"], _rows_ancova(a),
-            ["left", "left", "right", "right", "right", "right", "right",
-             "right"]))
+        if a.ancova.contrasts:
+            add("  [5b] 기저값 보정 (ANCOVA) — 기저 불균형·평균회귀에 강건하고 대개 "
+                "검정력이 더 높습니다")
+            L.extend("    " + ln for ln in table(
+                ["시점", "대비", "n", "조정평균차", "95% CI", "보정 p", "비보정 차이",
+                 "기저 기울기"], _rows_ancova(a),
+                ["left", "left", "right", "right", "right", "right", "right",
+                 "right"]))
+        else:
+            # Every visit failed.  The reasons are in the notes, and dropping
+            # the whole section used to hide them — the user saw an unadjusted
+            # [5] table and no hint that the adjusted one was even attempted.
+            add("  [5b] 기저값 보정 (ANCOVA) 미수행 — 어느 시점에서도 적합할 수 "
+                "없었습니다:")
         for note in a.ancova.notes:
             add(f"    ※ {note}")
     if a.sensitivity is not None:
@@ -1010,9 +1067,16 @@ def render_markdown(a: Analysis, full: bool = False, brief: bool = False) -> str
         for note in a.mmrm.notes:
             add(f"> {note}")
         add("")
-    block("기저값 보정 (ANCOVA)",
+    block("[5b] 기저값 보정 (ANCOVA)",
           ["시점", "대비", "n", "조정평균차", "95% CI", "보정 p", "비보정 차이",
            "기저 기울기"], _rows_ancova(a))
+    if a.ancova is not None:
+        # Same reason as the MMRM notes above: which covariates the adjusted
+        # means were adjusted *for* has to travel with the table into the
+        # manuscript, not stay behind in the text report.
+        for note in a.ancova.notes:
+            add(f"> {note}")
+        add("")
     block("결측 대체 민감도"
           + (" (" + "·".join(KIND_LABEL[k] for k in a.sensitivity.kinds) + ")"
              if a.sensitivity is not None else ""),
@@ -1187,6 +1251,13 @@ def render_csv(a: Analysis) -> str:
                 "adjusted mean difference", c.n_a + c.n_b, c.adjusted_diff, "",
                 c.ci_low, c.ci_high, c.t, c.p_raw, c.p_adj, c.unadjusted_diff,
                 "", "")
+        # The adjustment set and the excluded-subject counts travel with the
+        # estimates, the same way mmrm_note does — a spreadsheet of "adjusted
+        # mean differences" with no record of what they were adjusted for is
+        # not a reportable table.
+        for note in a.ancova.notes:
+            row("ancova_note", "parametric", "", "", note, "", "", "", "", "",
+                "", "", "", "", "", "")
     if a.mmrm is not None:
         # The df column is meaningless without knowing how it was derived, and a
         # spreadsheet has nowhere else to carry that, so it travels as a row.

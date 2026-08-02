@@ -23,7 +23,7 @@ from typing import Dict, List, Optional, Sequence
 
 from . import __version__
 from .analyze import Options, analyze
-from .dataio import DataError, load_long, load_wide
+from .dataio import DataError, clean_label, load_long, load_wide
 from .report import render_csv, render_json, render_markdown, render_text
 
 __all__ = ["main", "build_parser"]
@@ -78,6 +78,15 @@ def build_parser() -> argparse.ArgumentParser:
                           "지정하지 않으면 숫자면 숫자순, 아니면 파일 등장 순서")
     fmt.add_argument("--baseline", help="기준(기저) 시점 이름 (기본: 첫 시점)")
     fmt.add_argument("--delimiter", help="구분자 직접 지정 (기본: 자동 인식)")
+    fmt.add_argument("--covariate", metavar="나이,성별,기관",
+                     help="대상마다 값이 하나인 공변량 열 (쉼표 구분). "
+                          "[4c] MMRM 과 [5b] ANCOVA 의 보정에 함께 넣습니다 — "
+                          "무작위배정 층화인자(기관·중증도)와 예후인자(나이 등)를 "
+                          "넣는 것이 ICH E9 권고입니다. 숫자면 연속형, 아니면 "
+                          "범주형으로 자동 판정합니다")
+    fmt.add_argument("--categorical", metavar="기관,층",
+                     help="--covariate 중 숫자로 코딩됐지만 범주형으로 다뤄야 할 "
+                          "열 (예: 1/2/3 으로 적은 기관 번호)")
     fmt.add_argument("--duplicates", choices=["error", "mean", "first"],
                      default="error",
                      help="같은 (대상, 시점)이 여러 번 있을 때 처리 "
@@ -199,6 +208,30 @@ def _parse_labels(spec: Optional[str]) -> Dict[str, str]:
     return out
 
 
+def _split_names(spec: Optional[str], flag: str) -> List[str]:
+    """``'나이, 성별'`` → ``['나이', '성별']``, normalised the way headers are.
+
+    The same NFC/control-character cleanup the CSV header goes through, so a
+    decomposed-Hangul argument from a macOS shell still matches its column.
+    """
+    if spec is None:
+        return []
+    # An *empty* argument is not the same as an absent one: `--covariate ""` is
+    # what an unset shell variable expands to in a wrapper script, and silently
+    # producing an unadjusted report there is the worst possible answer.
+    out: List[str] = []
+    for part in spec.split(","):
+        name = clean_label(part)
+        if not name:
+            continue
+        if name in out:
+            raise DataError(f"{flag} 에 '{name}' 이(가) 두 번 있습니다.")
+        out.append(name)
+    if not out:
+        raise DataError(f"{flag} 에 열 이름이 비어 있습니다.")
+    return out
+
+
 def _parse_time_values(spec: Optional[str]) -> Optional[List[float]]:
     """``--time-values 0,4,12,24`` → floats, with a readable error on junk."""
     if spec is None:
@@ -263,6 +296,14 @@ def _validate(args: argparse.Namespace) -> None:
     if args.no_trend and (args.time_values or args.time_unit):
         raise DataError("--no-trend 와 --time-values/--time-unit 은 함께 쓸 수 "
                         "없습니다 (추세를 끄면 간격이 쓰이지 않습니다).")
+    if args.categorical and not args.covariate:
+        raise DataError("--categorical 은 --covariate 와 함께 쓰세요 "
+                        "(공변량 중 어느 것을 범주로 볼지 지정하는 옵션입니다).")
+    cov_names = _split_names(args.covariate, "--covariate")
+    for name in _split_names(args.categorical, "--categorical"):
+        if name not in cov_names:
+            raise DataError(
+                f"--categorical 의 '{name}' 은(는) --covariate 목록에 없습니다.")
     if args.wide:
         if not args.columns:
             raise DataError("--wide 형식에는 --columns 로 시점 열을 지정해야 합니다.")
@@ -355,19 +396,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     try:
         _validate(args)
         notes: List[str] = []
+        cov_cols = _split_names(args.covariate, "--covariate")
+        cat_cols = _split_names(args.categorical, "--categorical")
         if args.wide:
             panel = load_wide(args.csv,
                               [c.strip() for c in args.columns.split(",")],
                               id_col=args.id, group_col=args.group,
                               delimiter=args.delimiter,
-                              duplicates=args.duplicates, notes=notes)
+                              duplicates=args.duplicates,
+                              covariate_cols=cov_cols,
+                              categorical_cols=cat_cols, notes=notes)
         else:
             order = ([t.strip() for t in args.time_order.split(",")]
                      if args.time_order else None)
             panel = load_long(args.csv, args.id, args.time, args.value,
                               group_col=args.group, delimiter=args.delimiter,
                               time_order=order, duplicates=args.duplicates,
-                              notes=notes)
+                              covariate_cols=cov_cols,
+                              categorical_cols=cat_cols, notes=notes)
         opt = Options(
             alpha=args.alpha, alpha_norm=args.alpha_norm,
             correction=args.correction, sphericity=args.sphericity,
