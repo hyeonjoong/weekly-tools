@@ -13,6 +13,8 @@
 - 대응표본(paired) 이분형 검정: Cochran's Q(k개 시점)와 McNemar 정확검정(2개 시점) —
   같은 참여자를 주차마다 반복 관찰한 준수 여부처럼 **관측이 독립이 아닌** 자료에
   카이제곱·Fisher 를 쓰면 안 되기 때문에 필요하다.
+- 발생률(rate): Poisson 정확(Garwood) 신뢰구간과 두 발생률 비(rate ratio)의 조건부
+  이항 정확검정 — 반복 이벤트를 "1인-주당 몇 건" 으로 볼 때 필요한 도구.
 - 분위수(quantile): 세션 길이처럼 치우친(skewed) 분포를 평균 하나로 요약하면
   오해를 부르므로 중앙값·사분위수를 함께 보고하기 위한 헬퍼.
 
@@ -779,6 +781,224 @@ def mcnemar_exact(b: int, c: int) -> McNemarResult:
     # 올바르게 반올림된다(부동소수 2.0**n 은 n≥1024 에서 inf 가 된다).
     tail = sum(math.comb(n, i) for i in range(lo + 1))
     return McNemarResult(b=b, c=c, n_discordant=n, p=min(1.0, (2 * tail) / (2 ** n)))
+
+
+# ---------------------------------------------------------------- 발생률(Poisson)
+
+# 이 사건 수를 넘으면 정확 구간 대신 로그-정규 근사를 쓴다. 불완전감마 급수의 반복
+# 상한(1000)이 a ~ 1e6 부근에서 부족해지기 시작하고, 그쯤이면 두 방법의 차이가
+# 상대적으로 1e-4 미만이라 실용적 손실이 없다.
+MAX_EXACT_POISSON_K = 200_000
+
+# 조건부 이항 정확검정을 그대로 계산할 최대 시행 수 (O(n) 항 합산). 이보다 크면
+# 연속성 보정 정규근사로 대체한다 — 그 영역에서는 두 값이 사실상 같다.
+MAX_EXACT_BINOM_N = 200_000
+
+
+def chi2_ppf(p: float, df: int) -> float:
+    """자유도 df 카이제곱의 분위수 — P(X ≤ x) = p 를 만족하는 x.
+
+    `chi2_sf` 가 x 에 대해 단조감소한다는 사실만 이용한 괄호잡기 + 이분법이라
+    별도의 근사식 없이 `chi2_sf` 와 항상 일관된 값을 준다(역함수 관계가 깨지지 않는다).
+    """
+    if not (0.0 <= p < 1.0):
+        raise ValueError(f"p 는 0 이상 1 미만이어야 합니다 (받은 값: {p})")
+    if df < 1:
+        raise ValueError(f"자유도는 1 이상이어야 합니다 (받은 값: {df})")
+    if p == 0.0:
+        return 0.0
+    target = 1.0 - p  # 찾는 x 에서의 상측꼬리 확률
+    lo = 0.0
+    hi = max(1.0, float(df))
+    # sf(hi) 가 target 아래로 내려갈 때까지 상한을 넓힌다.
+    for _ in range(200):
+        if chi2_sf(hi, df) <= target:
+            break
+        lo = hi
+        hi *= 2.0
+    else:  # pragma: no cover - df<1e300 이면 도달 불가
+        return hi
+    for _ in range(200):
+        mid = 0.5 * (lo + hi)
+        if mid <= lo or mid >= hi:  # 부동소수 해상도 한계 — 더 좁힐 수 없다
+            break
+        if chi2_sf(mid, df) > target:
+            lo = mid
+        else:
+            hi = mid
+    return 0.5 * (lo + hi)
+
+
+def poisson_exact_interval(
+    k: int, confidence: float = 0.95
+) -> Tuple[float, float]:
+    """관측 사건 수 k 에 대한 Poisson 평균의 정확(Garwood) 신뢰구간.
+
+    카이제곱 분위수와의 관계를 그대로 쓴다:
+
+        lower = χ²(α/2; 2k) / 2      (k = 0 이면 0)
+        upper = χ²(1−α/2; 2k+2) / 2
+
+    Wald 구간(k ± z√k)과 달리 k 가 한 자릿수여도 음수로 내려가지 않고 실제
+    포함확률이 명목 수준 이상이다 — 임상 로그에서 흔한 "8주간 이상반응 3건" 같은
+    작은 수에 필요한 성질이다.
+
+    k 가 매우 클 때(`MAX_EXACT_POISSON_K` 초과)는 로그-정규 근사로 대체한다.
+    """
+    if k < 0:
+        raise ValueError(f"사건 수는 0 이상이어야 합니다 (받은 값: {k})")
+    if not (math.isfinite(confidence) and 0.0 < confidence < 1.0):
+        raise ValueError(f"신뢰수준은 0 과 1 사이여야 합니다 (받은 값: {confidence})")
+    alpha = 1.0 - confidence
+    if k > MAX_EXACT_POISSON_K:
+        z = z_for_confidence(confidence)
+        half = z / math.sqrt(k)
+        return (k * math.exp(-half), k * math.exp(half))
+    lower = 0.0 if k == 0 else chi2_ppf(alpha / 2.0, 2 * k) / 2.0
+    upper = chi2_ppf(1.0 - alpha / 2.0, 2 * k + 2) / 2.0
+    return (lower, upper)
+
+
+def binom_test_two_sided(k: int, n: int, p0: float) -> float:
+    """이항 정확검정(양측) — H0: 성공확률 = p0.
+
+    양측 p 값은 "관측된 것만큼 또는 그보다 확률이 낮은" 모든 결과의 확률 합
+    (small-p method, Fisher exact 와 같은 관례)이다.
+
+    두 발생률의 비를 검정할 때 이 함수가 곧 **조건부 Poisson 정확검정**이 된다:
+    전체 사건 수 N 을 고정하면 한쪽 군의 사건 수는 Binomial(N, π) 를 따르고,
+    귀무가설(rate ratio = 1)에서 π₀ = T_a / (T_a + T_b) (T = 관찰 인-시간)이다.
+
+    n 이 매우 클 때(`MAX_EXACT_BINOM_N` 초과)는 연속성 보정 정규근사로 대체한다.
+    """
+    if n < 0 or not (0 <= k <= n):
+        raise ValueError(f"k 는 0..n 범위여야 합니다 (받은 값: k={k}, n={n})")
+    if not (math.isfinite(p0) and 0.0 <= p0 <= 1.0):
+        raise ValueError(f"p0 는 0 과 1 사이여야 합니다 (받은 값: {p0})")
+    if n == 0:
+        return 1.0
+    if p0 == 0.0:
+        return 1.0 if k == 0 else 0.0
+    if p0 == 1.0:
+        return 1.0 if k == n else 0.0
+    if n > MAX_EXACT_BINOM_N:
+        mean = n * p0
+        sd = math.sqrt(n * p0 * (1.0 - p0))
+        if sd == 0.0:  # pragma: no cover - p0 이 0/1 인 경우는 위에서 걸러짐
+            return 1.0 if k == mean else 0.0
+        z = (abs(k - mean) - 0.5) / sd
+        return min(1.0, 2.0 * norm_sf(max(0.0, z)))
+    # log pmf 를 점화식으로 훑는다: logpmf(i+1) = logpmf(i) + log((n-i)/(i+1)) + logit(p0).
+    logit = math.log(p0) - math.log1p(-p0)
+    logpmf = n * math.log1p(-p0)
+    logs: List[float] = [logpmf]
+    for i in range(n):
+        logpmf += math.log((n - i) / (i + 1)) + logit
+        logs.append(logpmf)
+    threshold = logs[k] + 1e-7  # Fisher exact 와 같은 상대 허용오차
+    return min(1.0, sum(math.exp(lp) for lp in logs if lp <= threshold))
+
+
+@dataclass
+class RateRatioResult:
+    """두 발생률의 비(rate ratio)와 그 구간·p 값."""
+
+    events_a: int
+    time_a: float          # 인-시간 (a 군)
+    events_b: int
+    time_b: float
+    rate_a: Optional[float]
+    rate_b: Optional[float]
+    ratio: Optional[float]           # rate_a / rate_b
+    ci: Optional[Tuple[float, float]]  # log 비의 Wald 구간 (과산포 보정 포함)
+    p_exact: float                   # 조건부 이항 정확검정 (과산포 보정 없음)
+    p_value: float                   # 과산포 보정 Wald 검정 (dispersion=1 이면 Poisson Wald)
+    dispersion: float                # 적용한 과산포 계수 φ (1 미만은 1 로 둔다)
+
+
+def rate_ratio_test(
+    events_a: int,
+    time_a: float,
+    events_b: int,
+    time_b: float,
+    *,
+    confidence: float = 0.95,
+    dispersion: float = 1.0,
+) -> Optional[RateRatioResult]:
+    """두 군의 발생률 비 λ_a/λ_b 를 검정한다.
+
+    - p_exact : 조건부 이항 정확검정. Poisson 가정(사건들이 서로 독립)이 맞을 때 정확하다.
+    - p_value : log 비에 대한 Wald 검정, SE = √(φ · (1/e_a + 1/e_b)).
+      φ 는 과산포(overdispersion) 계수다. 같은 사람이 사건을 여러 번 만드는 반복이벤트
+      자료에서는 φ > 1 이 보통이고, 그때 Poisson 구간은 **실제보다 좁다**. φ 를 넘기면
+      quasi-Poisson 방식으로 구간과 p 값을 함께 넓힌다. φ < 1 은 1 로 둔다(구간을
+      Poisson 보다 좁히지 않는다).
+
+    어느 한쪽 사건 수가 0 이면 비와 구간은 정의되지 않는다(None) — 정확검정 p 값은
+    여전히 계산된다.
+    """
+    if events_a < 0 or events_b < 0:
+        raise ValueError("사건 수는 0 이상이어야 합니다")
+    if not (time_a > 0.0 and time_b > 0.0) or not (
+        math.isfinite(time_a) and math.isfinite(time_b)
+    ):
+        return None
+    if not (math.isfinite(dispersion) and dispersion > 0.0):
+        raise ValueError(f"과산포 계수는 양의 유한한 수여야 합니다 (받은 값: {dispersion})")
+    phi = max(1.0, dispersion)
+    total = events_a + events_b
+    rate_a = events_a / time_a
+    rate_b = events_b / time_b
+    p0 = time_a / (time_a + time_b)
+    p_exact = binom_test_two_sided(events_a, total, p0)
+    if events_a == 0 or events_b == 0:
+        return RateRatioResult(
+            events_a=events_a, time_a=time_a, events_b=events_b, time_b=time_b,
+            rate_a=rate_a, rate_b=rate_b, ratio=None, ci=None,
+            p_exact=p_exact, p_value=p_exact, dispersion=phi,
+        )
+    ratio = rate_a / rate_b
+    se = math.sqrt(phi * (1.0 / events_a + 1.0 / events_b))
+    z = z_for_confidence(confidence)
+    log_r = math.log(ratio)
+    ci = (math.exp(log_r - z * se), math.exp(log_r + z * se))
+    p_wald = min(1.0, 2.0 * norm_sf(abs(log_r) / se))
+    return RateRatioResult(
+        events_a=events_a, time_a=time_a, events_b=events_b, time_b=time_b,
+        rate_a=rate_a, rate_b=rate_b, ratio=ratio, ci=ci,
+        p_exact=p_exact, p_value=p_wald, dispersion=phi,
+    )
+
+
+def poisson_dispersion(
+    counts: Sequence[int], exposures: Sequence[float], rates: Sequence[float]
+) -> Optional[Tuple[float, float, int, float]]:
+    """Pearson 과산포 계수 φ = X²/df 와 그 적합도 검정.
+
+    X² = Σ (kᵢ − λᵢ·tᵢ)² / (λᵢ·tᵢ) — 사람 i 의 기대 사건 수 대비 편차의 제곱합.
+    Poisson 이 맞으면 X² ~ χ²(df) 이고 φ ≈ 1 이다. 같은 사람이 사건을 몰아서 만드는
+    군집(clustering)이 있으면 φ 가 1 보다 크게 나오고, 그만큼 Poisson 신뢰구간을
+    믿으면 안 된다는 신호가 된다.
+
+    df 는 (관측 수 − 추정한 비율의 수)로, `rates` 에 들어 있는 서로 다른 값의 개수를
+    추정 모수로 센다. 반환: (φ, X², df, p) 또는 계산 불가 시 None.
+    """
+    if not (len(counts) == len(exposures) == len(rates)):
+        raise ValueError("counts·exposures·rates 의 길이가 서로 같아야 합니다")
+    chi2 = 0.0
+    n = 0
+    for k, t, lam in zip(counts, exposures, rates):
+        expected = lam * t
+        if not (expected > 0.0):
+            continue
+        n += 1
+        chi2 += (k - expected) ** 2 / expected
+    n_params = len(set(r for r in rates if r > 0.0))
+    df = n - n_params
+    if df < 1:
+        return None
+    phi = chi2 / df
+    return (phi, chi2, df, chi2_sf(chi2, df))
 
 
 # ---------------------------------------------------------------- 다중비교 보정
