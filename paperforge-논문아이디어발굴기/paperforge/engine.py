@@ -24,7 +24,7 @@ from .power import (
 # How each effect metric renders in the "detectable effect" cell. The margin_*
 # metrics belong to non-inferiority designs, where the inverse question is "how
 # tight a margin could this N rule out", not "what effect could it detect".
-_METRIC_LABEL = {"r": "r", "d": "d", "d_z": "d_z", "f2": "f²",
+_METRIC_LABEL = {"r": "r", "d": "d", "d_z": "d_z", "f2": "f²", "f": "f",
                  "delta_p": "Δp", "hr": "HR",
                  "margin_d": "마진 d", "margin_p": "마진 Δp",
                  "margin_hr": "마진 HR"}
@@ -36,14 +36,15 @@ SENSITIVITY_FACTORS = [("보수적", 2.0 / 3.0), ("계획", 1.0), ("낙관적", 
 
 # Effect families whose N is counted in subjects no matter what a template says
 # (see :func:`_is_observation_level`).
-_SUBJECT_ONLY = frozenset({"survival", "two_proportion"})
+_SUBJECT_ONLY = frozenset({"survival", "two_proportion", "anova", "ancova"})
 
 # How the sensitivity strip labels its magnitude column, per family. "효과 0.79"
 # beside the 보수적 label reads as a *bigger* effect for a hazard ratio, so the
 # metric is named.
 _SENSITIVITY_METRIC = {"correlation": "r", "two_group": "d", "paired": "d_z",
                        "regression": "f²", "regression_change": "f²",
-                       "two_proportion": "Δp", "survival": "HR"}
+                       "two_proportion": "Δp", "survival": "HR",
+                       "anova": "f", "ancova": "d"}
 
 # Same, for non-inferiority designs — there the strip varies the MARGIN.
 _NI_SENSITIVITY_METRIC = {"two_group": "마진 d", "two_proportion": "마진 Δp",
@@ -106,6 +107,12 @@ class IdeaResult:
         if not self.detectable:
             return "—"
         metric = _METRIC_LABEL.get(self.detectable["metric"], self.detectable["metric"])
+        # A registry-scale N (n=1,000,000 is well under the tool's own ceiling)
+        # drives the MDES below 0.005, where "%.2f" prints "f≥0.00" — which
+        # reads as "no effect is too small" directly beside the caption saying
+        # smaller effects may go undetected. Switch to significant figures there.
+        if metric not in ("HR", "Δp") and 0 < self.detectable["value"] < 0.01:
+            return f"{metric}≥{self.detectable['value']:.2g}"
         if metric == "HR":
             # A hazard ratio is symmetric on the log scale, so quoting only the
             # >1 side would read as "harm only" to a clinician looking at a
@@ -198,6 +205,14 @@ def _arm_clause(total, allocation: float) -> str:
     if n1 == n2:
         return f"(군당 {n1}명)"
     return f"(1군 {n1}명 / 2군 {n2}명)"
+
+
+def _anova_arm_clause(total, k_groups: int) -> str:
+    """``'(군당 53명, 3군)'`` — the per-arm size a k-arm protocol must state."""
+    if total is None or k_groups < 2 or total < k_groups:
+        return ""
+    per = -(-int(total) // int(k_groups))  # ceil, so no arm is short
+    return f"(군당 {per}명 × {k_groups}군)"
 
 
 def _ni_justification(effect: dict, *, alpha_eff: float, power: float,
@@ -322,6 +337,56 @@ def sample_size_justification(
             f"{level} 조건의 대응(피험자 내) 비교에서 d_z={d_txt}{_obj(d_txt)} "
             f"검출하려면 {got}(정규근사)."
         )
+    elif etype == "anova":
+        k_groups = int(effect["k_groups"])
+        f_txt = f"{effect['f']:.2f}"
+        per = "" if converted else _anova_arm_clause(required_n, k_groups)
+        core = (
+            f"{k_groups}개 군의 일원배치 분산분석(one-way ANOVA) 옴니버스 F "
+            f"검정에서 Cohen's f={f_txt}{_obj(f_txt)} 검출하려면 {ftest} 기준 "
+            f"{got}{per}(비중심 F 분포로 정확 계산). 옴니버스 검정이 유의해도 "
+            "어느 군끼리 다른지는 말해주지 않으므로, 사후 쌍별 비교를 계획한다면 "
+            "그에 대한 다중비교 보정을 별도로 명시한다."
+        )
+    elif etype == "ancova":
+        alloc = float(effect.get("allocation", 0.5))
+        split = ("1:1 배분" if abs(alloc - 0.5) < 1e-12
+                 else f"{_pct(alloc)}:{_pct(1 - alloc)} 배분")
+        d_txt = f"{effect['d']:.2f}"
+        rho = abs(float(effect.get("r_covariate", 0.0)))
+        k_cov = int(effect.get("k_covariates", 1))
+        per = "" if converted else _arm_clause(required_n, alloc)
+        core = (
+            f"{level}, {split}의 공분산분석(ANCOVA)에서 공변량 {k_cov}개"
+            f"(기저값 등, 종점과의 상관 ρ={rho:.2f})를 보정하면 잔차분산이 "
+            f"(1−ρ²)={1 - rho * rho:.2f}배로 줄어, 보정 전 표준화 평균차 "
+            f"d={d_txt}{_obj(d_txt)} 검출하는 데 {got}{per}"
+            "(Borm 등 2007 근사)."
+        )
+        # The whole point of adjusting for baseline is the N it saves; quoting
+        # the unadjusted target beside it is what makes the choice reviewable.
+        try:
+            plain = required_total_n(
+                {"type": "two_group", "d": effect["d"], "allocation": alloc},
+                alpha=alpha_eff, power=power, sided=sided,
+            )
+        except (ValueError, OverflowError, ZeroDivisionError):
+            plain = None
+        # ...but only when there IS one. A weak covariate (rho<=~0.1) rounds to
+        # the same N, and the sentence is destined for an IRB submission, so
+        # asserting a saving of zero subjects is not a cosmetic problem.
+        if plain is not None and required_n is not None and plain > required_n:
+            core += (
+                f" 공변량 보정 없이 단순 2군 비교로 계산하면 {plain}명이 "
+                "필요하므로, 기저값 보정은 사전에 분석계획서에 명시해야 이 "
+                "표본수 감소가 정당화된다."
+            )
+        elif plain is not None:
+            core += (
+                f" 다만 가정한 ρ={rho:.2f}에서는 보정 없는 2군 비교"
+                f"({plain}명) 대비 표본 감소가 사실상 없으므로, 공변량은 "
+                "표본수가 아니라 검정력·해석의 근거로만 정당화된다."
+            )
     elif etype == "regression":
         k = int(effect.get("k", 1))
         f2_txt = f"{effect['f2']:.3g}"
@@ -417,12 +482,14 @@ def _is_observation_level(template, effect) -> bool:
         return False
     if unit == "observation":
         # ...but the override cannot make a subject-level family observation-
-        # level. A log-rank test counts events in distinct subjects and a
-        # two-proportion test counts subjects classified responder/non-responder;
-        # measuring each subject four times yields no extra events and no extra
-        # responders. Honouring the override here divided the survival target by
-        # the design effect (412 -> 134 subjects) and flipped the verdict to
-        # "충분 가능" while the same record still printed 247 required events.
+        # level. A log-rank test counts events in distinct subjects, a
+        # two-proportion test counts subjects classified responder/non-responder,
+        # and a parallel-group ANOVA/ANCOVA randomises each subject to exactly one
+        # arm; measuring each subject four times yields no extra events, no extra
+        # responders and no extra arms. Honouring the override here divided the
+        # survival target by the design effect (412 -> 134 subjects) and flipped
+        # the verdict to "충분 가능" while the same record still printed 247
+        # required events — and did the same to a 3-arm ANOVA (159 -> 64).
         return effect.get("type") not in _SUBJECT_ONLY
     return observation_level(effect)
 
@@ -752,12 +819,17 @@ def evaluate(
             # 412->325) and are exactly where a one-sided log-rank or
             # risk-difference test draws reviewer fire, so they need the caveat
             # most.
-            if etype in ("correlation", "two_group", "paired",
+            if etype in ("correlation", "two_group", "paired", "ancova",
                          "two_proportion", "survival"):
                 notes.append("단측검정(one-sided) 기준 — 방향 가설일 때만 사용하세요.")
-            elif etype in ("regression", "regression_change"):
+            elif etype in ("regression", "regression_change", "anova"):
+                # The omnibus F belongs here for the same reason ΔR² does: it is
+                # one-tailed *on F* while staying direction-free on the means, so
+                # --one-sided changes nothing. Saying so beats leaving the user
+                # to wonder why the k-arm row alone did not move.
                 notes.append(
-                    "ΔR²/F 검정은 단측 개념이 없어 --one-sided 가 적용되지 않았습니다."
+                    "옴니버스 F/ΔR² 검정은 단측 개념이 없어 --one-sided 가 "
+                    "적용되지 않았습니다."
                 )
         if feasible is False:
             msg = (

@@ -25,6 +25,16 @@ References
   ``events = (z_a + z_b)^2 / (w1 w2 (ln HR)^2)``, converted to subjects by the
   expected event probability. HR=0.70 at alpha=.05/power=.80 needs 247 events —
   the number every oncology protocol quotes.
+- One-way ANOVA over k arms (Cohen's f): the same exact non-central F machinery
+  as the regression forms, with numerator df = k-1 and lambda = f^2 N. For
+  f=0.25, k=3 at alpha=.05/power=.80 this gives N=159 (53/arm), matching
+  G*Power's "ANOVA: Fixed effects, omnibus, one-way".
+- ANCOVA on a continuous endpoint adjusted for baseline (Borm, Fransen &
+  Lemmens 2007, J Clin Epidemiol 60:1234-8): the two-group target shrinks by
+  the residual-variance factor ``(1 - rho^2)`` and the degrees of freedom the
+  covariates consume are added back. d=0.4 with a baseline correlation of 0.6
+  needs 128 total instead of the 198 a balanced unadjusted two-group design
+  would need.
 
 Note: the correlation and two-group forms are normal approximations that can
 land ~1 subject/group below exact non-central-t tools (e.g. G*Power gives
@@ -843,8 +853,13 @@ def scale_effect(effect: dict, factor: float) -> dict:
         return e
     if etype == "correlation":
         e["r"] = min(abs(e["r"]) * factor, 0.999)
-    elif etype in ("two_group", "paired"):
+    elif etype in ("two_group", "paired", "ancova"):
+        # For ANCOVA the magnitude is the group difference d; the covariate
+        # correlation is a property of the measurement, not of the effect, so it
+        # is deliberately left alone.
         e["d"] = abs(e["d"]) * factor
+    elif etype == "anova":
+        e["f"] = abs(e["f"]) * factor
     elif etype in ("regression", "regression_change"):
         e["f2"] = e["f2"] * factor
     elif etype == "two_proportion":
@@ -881,8 +896,10 @@ def effect_magnitude(effect: dict):
         return None
     if etype == "correlation":
         return effect["r"]
-    if etype in ("two_group", "paired"):
+    if etype in ("two_group", "paired", "ancova"):
         return effect["d"]
+    if etype == "anova":
+        return effect["f"]
     if etype in ("regression", "regression_change"):
         return effect["f2"]
     if etype == "two_proportion":
@@ -902,6 +919,9 @@ def required_total_n(effect: dict, alpha: float = 0.05, power: float = 0.80,
         {"type": "correlation", "r": 0.3}
         {"type": "two_group", "d": 0.5, "allocation": 0.5}   # total (opt. split)
         {"type": "paired", "d": 0.5}           # within-subject; total = n pairs
+        {"type": "anova", "f": 0.25, "k_groups": 3}          # k-arm omnibus F
+        {"type": "ancova", "d": 0.4, "r_covariate": 0.6,     # baseline-adjusted
+         "k_covariates": 1, "allocation": 0.5}
         {"type": "regression", "f2": 0.15, "k": 3}           # overall-R^2 test
         {"type": "regression_change", "f2": 0.15,            # incremental-R^2
          "k_tested": 2, "k_control": 1}
@@ -940,6 +960,14 @@ def required_total_n(effect: dict, alpha: float = 0.05, power: float = 0.80,
         return n_total_two_group(effect["d"], alpha, power, alloc, sided)
     if etype == "paired":
         return n_for_paired(effect["d"], alpha, power, sided)
+    if etype == "anova":
+        return n_for_anova(effect["f"], effect["k_groups"], alpha, power)
+    if etype == "ancova":
+        return n_total_ancova(
+            effect["d"], effect.get("r_covariate", 0.0),
+            int(effect.get("k_covariates", 1)), alpha, power,
+            effect.get("allocation", 0.5), sided,
+        )
     if etype == "regression":
         return n_for_regression(effect["f2"], effect.get("k", 1), alpha, power)
     if etype == "regression_change":
@@ -989,7 +1017,8 @@ def _f_power(f2: float, n: int, k_num: int, k_full: int, alpha: float) -> float:
     return 1.0 - _ncf_cdf(f_crit, k_num, d2, f2 * n)
 
 
-def _smallest_n_for_power(power_at, n_min: int, target: float) -> int:
+def _smallest_n_for_power(power_at, n_min: int, target: float,
+                          metric: str = "f2") -> int:
     """Smallest integer ``n >= n_min`` with ``power_at(n) >= target``.
 
     Power is increasing in n, so we bracket geometrically and then bisect. The
@@ -1011,7 +1040,7 @@ def _smallest_n_for_power(power_at, n_min: int, target: float) -> int:
         hi = _MAX_N + 1
     if hi > _MAX_N:
         raise ValueError(
-            f"Required N exceeds {_MAX_N:,}; check the effect size (f2)."
+            f"Required N exceeds {_MAX_N:,}; check the effect size ({metric})."
         )
     while hi - lo > 1:
         mid = (lo + hi) // 2
@@ -1262,6 +1291,272 @@ def n_for_regression(f2: float, k: int, alpha: float = 0.05, power: float = 0.80
     )
 
 
+# --- k-arm ANOVA and baseline-adjusted ANCOVA --------------------------------
+#
+# Two designs a clinical/pharma protocol reaches for constantly that none of the
+# forms above can express:
+#
+# * a dose-ranging / three-arm trial whose primary test is a one-way ANOVA over
+#   k arms (Cohen's f). Sizing it as a pairwise t-test understates N, because the
+#   omnibus F spends k-1 numerator degrees of freedom, not 1.
+# * an RCT whose continuous endpoint is analysed by ANCOVA with the baseline
+#   value as a covariate — which is what essentially every regulatory-grade trial
+#   of a continuous endpoint actually does (EMA CHMP guideline on baseline
+#   covariates; ICH E9). Sizing it as an unadjusted t-test is not conservative in
+#   any useful sense: it simply overstates the target by 1/(1-rho^2), i.e. 56%
+#   more subjects at rho=0.6 than the trial will actually need.
+
+# A guard, not a statistical limit: a "one-way ANOVA" with thousands of arms is
+# a typo, and every arm costs an F-quantile evaluation inside the N search.
+_MAX_GROUPS = 1000
+
+
+def _check_groups(k_groups) -> int:
+    """Validate the number of ANOVA arms."""
+    k = int(k_groups)
+    if k < 2:
+        raise ValueError("k_groups must be >= 2")
+    if k > _MAX_GROUPS:
+        raise ValueError(f"k_groups must be <= {_MAX_GROUPS}")
+    return k
+
+
+def _anova_power_at(f2: float, n: int, k: int, alpha: float) -> float:
+    """Non-central F power for a one-way omnibus test at total N ``n``."""
+    d2 = n - k
+    if d2 < 1:
+        return 0.0
+    f_crit = _f_quantile(1.0 - alpha, k - 1, d2)
+    return 1.0 - _ncf_cdf(f_crit, k - 1, d2, f2 * n)
+
+
+def _check_f_power_target(alpha: float, power: float) -> None:
+    """Reject a power target an omnibus F test already meets at zero effect.
+
+    :func:`_z_pair` guards the z-based families at ``alpha/sided``, but an F
+    test rejects with probability exactly ``alpha`` when the effect is zero — so
+    for ``alpha/2 < power <= alpha`` the z-guard passes while the MDES bisection
+    collapses onto its lower bracket and the report prints ``f≥0.00``: a flat
+    falsehood of the same kind ``_z_pair`` exists to prevent.
+    """
+    alpha, power = float(alpha), float(power)
+    if power <= alpha:
+        raise ValueError(
+            f"power={power!r} is at or below the test's own false-positive rate "
+            f"(alpha={alpha:.4g}); any effect is trivially 'detectable' there. "
+            "Choose power > alpha."
+        )
+
+
+def n_for_anova(f: float, k_groups: int, alpha: float = 0.05,
+                power: float = 0.80) -> int:
+    """Total N for a one-way ANOVA omnibus test over ``k_groups`` arms.
+
+    Exact non-central F (numerator df = k-1, denominator df = N-k,
+    non-centrality lambda = f^2 N), the same machinery the regression forms use.
+    The result is rounded UP to a multiple of ``k_groups`` so the arms come out
+    balanced — G*Power does the same, and rounding up can only raise the attained
+    power. f=0.25, k=3, alpha=.05, power=.80 -> 159 (53 per arm); k=4 -> 180.
+
+    There is deliberately no ``sided`` parameter: the omnibus F is intrinsically
+    one-tailed on F while remaining direction-free on the group means, exactly as
+    for the regression families, so ``--one-sided`` cannot move this target (the
+    report says so rather than leaving the k-arm row looking stuck).
+    """
+    f = abs(float(f))
+    if f <= 0:
+        raise ValueError("f must be > 0")
+    if not math.isfinite(f) or f > 1e6:
+        raise ValueError(_TOO_LARGE.format(kind="f", value=f))
+    k = _check_groups(k_groups)
+    _z_pair(alpha, power)
+    f2 = _sq(f, "f")
+    n = _smallest_n_for_power(
+        lambda size: _anova_power_at(f2, size, k, alpha), k + 1, power,
+        metric="f",
+    )
+    if n % k:
+        n += k - n % k
+    if n > _MAX_N:
+        raise ValueError(
+            f"필요 표본수가 {_MAX_N:,}명을 넘습니다 — 가정 효과크기가 "
+            "비현실적으로 작지 않은지 확인하세요."
+        )
+    return n
+
+
+def power_for_anova(f: float, n_total: int, k_groups: int,
+                    alpha: float = 0.05) -> float:
+    """Exact non-central F power for a one-way ANOVA (mirrors
+    :func:`n_for_anova`)."""
+    f = abs(float(f))
+    if f <= 0:
+        raise ValueError("f must be > 0")
+    k = _check_groups(k_groups)
+    n = int(n_total)
+    if n < k + 1:
+        raise ValueError("n_total must be >= k_groups + 1 for an ANOVA power calculation")
+    _z_alpha(alpha)
+    return _anova_power_at(_sq(f, "f"), n, k, alpha)
+
+
+def mdes_anova(n_total: int, k_groups: int, alpha: float = 0.05,
+               power: float = 0.80) -> float:
+    """Smallest Cohen's f detectable with ``n_total`` split over ``k_groups``.
+
+    Power is strictly increasing in f at fixed (N, k, alpha), so the exact power
+    curve is bisected — the same approach (and the same return-``hi`` rule) as
+    :func:`mdes_regression`, so feeding the result back into
+    :func:`power_for_anova` reaches the target rather than missing it by 1e-9.
+    """
+    k = _check_groups(k_groups)
+    n = int(n_total)
+    if n < k + 1:
+        raise ValueError("n_total must be >= k_groups + 1 for an ANOVA MDES")
+    _z_pair(alpha, power)
+    _check_f_power_target(alpha, power)
+    d2 = n - k
+    f_crit = _f_quantile(1.0 - alpha, k - 1, d2)
+
+    def _power(f: float) -> float:
+        return 1.0 - _ncf_cdf(f_crit, k - 1, d2, f * f * n)
+
+    lo, hi = 1e-9, 1.0
+    while _power(hi) < power:
+        hi *= 2.0
+        if hi > 1e5:
+            raise ValueError("No detectable f below 1e5; n likely too small.")
+    for _ in range(200):
+        mid = 0.5 * (lo + hi)
+        if _power(mid) < power:
+            lo = mid
+        else:
+            hi = mid
+        if hi - lo <= 1e-12 * hi:
+            break
+    return hi
+
+
+def _ancova_params(r_covariate: float, k_covariates: int):
+    """Validate ANCOVA covariate settings -> ``(1 - rho^2, df_cost)``.
+
+    ``df_cost`` is the number of subjects added back for the degrees of freedom
+    the covariates and the group term consume: ``k_cov + 1`` in total, so a
+    conventional single-covariate trial pays 2 subjects overall. Borm et al.
+    state the correction as a single ``+1`` on a per-group size; expressing it on
+    the TOTAL keeps it well defined for k covariates and for an unbalanced split,
+    where "per arm" has no single meaning. The choice is conservative by at most
+    one subject and is stated in the generated protocol sentence.
+    """
+    rho = abs(float(r_covariate))
+    if rho != rho:
+        raise ValueError("r_covariate must be a number")
+    if rho >= 1.0:
+        raise ValueError("r_covariate must satisfy |rho| < 1")
+    k_cov = int(k_covariates)
+    if k_cov < 1:
+        raise ValueError("k_covariates must be >= 1")
+    if k_cov > _MAX_GROUPS:
+        raise ValueError(f"k_covariates must be <= {_MAX_GROUPS}")
+    var_factor = 1.0 - rho * rho
+    if var_factor <= 0.0:  # pragma: no cover - guarded by |rho| < 1 above
+        raise ValueError("r_covariate must satisfy |rho| < 1")
+    return var_factor, k_cov + 1
+
+
+def n_total_ancova(d: float, r_covariate: float = 0.0, k_covariates: int = 1,
+                   alpha: float = 0.05, power: float = 0.80,
+                   allocation: float = 0.5, sided: int = 2) -> int:
+    """Total N for a two-arm ANCOVA on a continuous endpoint.
+
+    A covariate correlated ``rho`` with the endpoint (in a randomised trial this
+    is almost always the endpoint's own baseline value) removes ``rho^2`` of the
+    residual variance, so the two-group normal-approximation target shrinks by
+    ``(1 - rho^2)``; the degrees of freedom the covariates and the group term
+    consume are added back as whole subjects::
+
+        N = (1 - rho^2) (z_a + z_b)^2 / (p (1-p) d^2) + k_cov + 1
+
+    (Borm, Fransen & Lemmens 2007, *J Clin Epidemiol* 60:1234-8.) ``d`` is the
+    standardized group difference on the *unadjusted* endpoint scale, i.e. the
+    same quantity a two-group template would declare — the rho only changes how
+    precisely it can be estimated. At rho=0 this is the plain two-group target
+    plus the df correction; at rho=0.6 it is 36% smaller.
+    """
+    d = abs(float(d))
+    if d <= 0:
+        raise ValueError("d must be > 0")
+    if not 0.0 < allocation < 1.0:
+        raise ValueError("allocation must satisfy 0 < allocation < 1")
+    var_factor, df_cost = _ancova_params(r_covariate, k_covariates)
+    za, zb = _z_pair(alpha, power, sided)
+    denom = allocation * (1.0 - allocation) * _sq(d, "d")
+    if denom <= 0.0:  # pragma: no cover - _sq already rejects the degenerate d
+        raise ValueError(_TOO_SMALL.format(kind="d/allocation", value=d))
+    # Floor at the smallest N the matching power/MDES functions accept. Without
+    # it a huge assumed effect (d>=1.5 with a strong covariate) returned N=5,
+    # which power_for_ancova then refused -> a row reading "권장 N=5 / 충분 가능"
+    # with both the power and detectable-effect cells blank.
+    return max(_checked_n(var_factor * (za + zb) ** 2 / denom) + df_cost,
+               df_cost + 4)
+
+
+def power_for_ancova(d: float, n_total: int, r_covariate: float = 0.0,
+                     k_covariates: int = 1, alpha: float = 0.05,
+                     allocation: float = 0.5, sided: int = 2) -> float:
+    """Power for a two-arm ANCOVA at ``n_total``.
+
+    Inverts :func:`n_total_ancova` exactly — but both are the same normal
+    approximation, so this is internal consistency, not exactness against a
+    non-central t.
+    """
+    d = abs(float(d))
+    if d <= 0:
+        raise ValueError("d must be > 0")
+    if not 0.0 < allocation < 1.0:
+        raise ValueError("allocation must satisfy 0 < allocation < 1")
+    var_factor, df_cost = _ancova_params(r_covariate, k_covariates)
+    n = int(n_total)
+    if n - df_cost < 4:
+        raise ValueError(
+            "n_total must exceed the covariate degrees of freedom by >= 4"
+        )
+    za = _z_alpha(alpha, sided)
+    _sq(d, "d")
+    delta = d * math.sqrt(
+        (n - df_cost) * allocation * (1.0 - allocation) / var_factor
+    )
+    pw = norm_cdf(delta - za)
+    if sided == 2:
+        pw += norm_cdf(-delta - za)
+    return pw
+
+
+def mdes_ancova(n_total: int, r_covariate: float = 0.0, k_covariates: int = 1,
+                alpha: float = 0.05, power: float = 0.80,
+                allocation: float = 0.5, sided: int = 2) -> float:
+    """Smallest unadjusted Cohen's d an ANCOVA at ``n_total`` could detect.
+
+    Algebraic inverse of :func:`n_total_ancova`::
+
+        d = (z_a + z_b) sqrt(1 - rho^2) / sqrt((N - k_cov - 1) p (1-p))
+
+    so ``n_total_ancova(mdes_ancova(N)) == N`` exactly, not approximately.
+    """
+    if not 0.0 < allocation < 1.0:
+        raise ValueError("allocation must satisfy 0 < allocation < 1")
+    var_factor, df_cost = _ancova_params(r_covariate, k_covariates)
+    n = int(n_total)
+    if n - df_cost < 4:
+        raise ValueError(
+            "n_total must exceed the covariate degrees of freedom by >= 4"
+        )
+    za, zb = _z_pair(alpha, power, sided)
+    return (za + zb) * math.sqrt(
+        var_factor / ((n - df_cost) * allocation * (1.0 - allocation))
+    )
+
+
 # --- Sensitivity analysis: minimum detectable effect (MDES) ------------------
 #
 # The inverse question of ``required_total_n``: *given the N you already have*,
@@ -1448,6 +1743,21 @@ def detectable_effect(effect: dict, n, alpha: float = 0.05, power: float = 0.80,
                     "value": mdes_two_group(n, alpha, power, alloc, sided)}
         if etype == "paired":
             return {"metric": "d_z", "value": mdes_paired(n, alpha, power, sided)}
+        if etype == "anova":
+            f = mdes_anova(n, effect["k_groups"], alpha, power)
+            # Mirrors the f2>9 rule below (f>3 IS f2>9): an MDES this large means
+            # eta^2 > 0.9 — only an implausible effect would be detectable, and
+            # printing "f≥12.81" beside Cohen's 0.40 = "large" misleads.
+            if f > 3.0:
+                return None
+            return {"metric": "f", "value": f}
+        if etype == "ancova":
+            return {"metric": "d",
+                    "value": mdes_ancova(
+                        n, effect.get("r_covariate", 0.0),
+                        int(effect.get("k_covariates", 1)), alpha, power,
+                        effect.get("allocation", 0.5), sided,
+                    )}
         if etype in ("regression", "regression_change"):
             if etype == "regression":
                 f2 = mdes_regression(n, int(effect.get("k", 1)), alpha, power)
@@ -1623,6 +1933,14 @@ def attained_power(effect: dict, n, alpha: float = 0.05, sided: int = 2):
             )
         if etype == "paired":
             return power_for_paired(effect["d"], n, alpha, sided)
+        if etype == "anova":
+            return power_for_anova(effect["f"], n, effect["k_groups"], alpha)
+        if etype == "ancova":
+            return power_for_ancova(
+                effect["d"], n, effect.get("r_covariate", 0.0),
+                int(effect.get("k_covariates", 1)), alpha,
+                effect.get("allocation", 0.5), sided,
+            )
         if etype == "regression":
             return power_for_regression(
                 effect["f2"], n, int(effect.get("k", 1)), alpha

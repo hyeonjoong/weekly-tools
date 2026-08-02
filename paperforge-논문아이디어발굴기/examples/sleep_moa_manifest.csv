@@ -1,4 +1,5 @@
-# 데이터 인벤토리 예시 (CSV). 스프레드시트에서 바로 내보내 쓰세요.
+# 데이터 인벤토리 예시 (CSV) — 가공된 예시이며 실제 참가자 데이터가 아닙니다.
+# 스프레드시트에서 바로 내보내 쓰세요.
 # variables 열은 ';' 또는 '|' 로 여러 변수를 구분합니다.
 study,name,modality,n,variables,sampling_hz,notes
 수면 MoA 코호트 (CSV 예시),MoA EEG,뇌파,92,delta_power;theta_power;alpha_power;beta_power;frontal_alpha_asymmetry,256,이완 전/후 안정상태

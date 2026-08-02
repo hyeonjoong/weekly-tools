@@ -8,7 +8,7 @@ import sys
 from .engine import evaluate
 from .knowledge import IDEA_TEMPLATES
 from .manifest import ManifestError, load_manifest
-from .report import render_csv, render_json, render_markdown
+from .report import render_csv, render_html, render_json, render_markdown
 from .templates import TemplateError, load_template_pack, merge_templates
 
 
@@ -96,6 +96,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--csv", help="CSV 매트릭스 저장 경로 (선택)")
     p.add_argument("--json", dest="json_out", metavar="PATH",
                    help="구조화 JSON 저장 경로 (선택; 프로그램 연동용)")
+    p.add_argument("--html", dest="html_out", metavar="PATH",
+                   help="HTML 리포트 저장 경로 (선택; 브라우저에서 열어 PDF 인쇄·공유)")
     p.add_argument(
         "--alpha", type=_probability, default=0.05,
         help="유의수준 (기본 0.05; 0<alpha<1 의 임의 값)",
@@ -106,7 +108,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--one-sided", dest="one_sided", action="store_true",
-        help="단측검정 기준으로 표본수 계산 (상관/평균차에만 적용; ΔR²는 무관)",
+        help="단측검정 기준으로 표본수 계산 (상관/평균차/ANCOVA 등; 옴니버스 F·ΔR²는 무관)",
     )
     p.add_argument(
         "--n-tests", dest="n_tests", type=_bounded_int(1_000_000), default=1,
@@ -264,11 +266,23 @@ def main(argv=None) -> int:
     # report success for both — the same half-success the ordering below guards
     # against.
     chosen = [(flag, path) for flag, path in
-              (("--out", args.out), ("--csv", args.csv), ("--json", args.json_out))
+              (("--out", args.out), ("--csv", args.csv),
+               ("--json", args.json_out), ("--html", args.html_out))
               if path]
     seen: dict = {}
     for flag, path in chosen:
-        key = os.path.abspath(path)
+        # realpath, not abspath: two flags pointing at the same file through a
+        # symlink passed the guard, wrote both, reported both as saved, and left
+        # only the last one on disk — exactly the half-success this exists to
+        # prevent. realpath on a non-existent path still resolves its parents.
+        key = os.path.realpath(path)
+        # ...and realpath does not see a HARD link, where two distinct names
+        # genuinely are one file. Use the inode when the file already exists.
+        try:
+            st = os.stat(path)
+            key = (st.st_dev, st.st_ino)
+        except OSError:
+            pass  # not created yet (the normal case) — the path key stands
         if key in seen:
             print(
                 f"오류: {seen[key]} 와 {flag} 가 같은 경로를 가리킵니다: {path}",
@@ -296,6 +310,15 @@ def main(argv=None) -> int:
                     )
                     + "\n"
                 )
+        if args.html_out:
+            with open(args.html_out, "w", encoding="utf-8") as fh:
+                fh.write(
+                    render_html(
+                        manifest, results, args.alpha, args.power,
+                        dropout=args.dropout, settings=settings,
+                    )
+                    + "\n"
+                )
     except OSError as exc:
         print(f"출력 파일 쓰기 오류: {exc}", file=sys.stderr)
         return 2
@@ -308,6 +331,8 @@ def main(argv=None) -> int:
         print(f"CSV 저장: {args.csv}", file=sys.stderr)
     if args.json_out:
         print(f"JSON 저장: {args.json_out}", file=sys.stderr)
+    if args.html_out:
+        print(f"HTML 저장: {args.html_out}", file=sys.stderr)
 
     return 0
 
