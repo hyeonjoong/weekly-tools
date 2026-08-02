@@ -148,7 +148,7 @@ def test_lsmeans_are_adjusted_mean_changes_when_grouped():
 def test_restricted_loglikelihood_never_decreases():
     from longistat.mmrm import _build
     p = _make(random.Random(77), 60, 4, dropout=0.25)
-    subs, visits, _lab, _cc, _bc, ncols, _drop = _build(p, 0, True)
+    subs, visits, _lab, _cc, _bc, ncols, _drop, _cov = _build(p, 0, True)
     *_rest, history = _fit_reml(subs, ncols, len(visits), 400, 1e-9)
     assert len(history) > 3
     for a, b in zip(history, history[1:]):
@@ -720,7 +720,7 @@ def test_unconverged_fit_still_returns_a_self_consistent_set_of_numbers():
     assert res is not None and not res.converged
 
     # Rebuild X'V⁻¹X from the *reported* Σ and check the reported SEs.
-    subs, visits, _lab, cell_col, base_col, n_cols, _drop = _build(p, 0, True)
+    subs, visits, _lab, cell_col, base_col, n_cols, _drop, _cov = _build(p, 0, True)
     sigma = res.cov
     xtx = [[0.0] * n_cols for _ in range(n_cols)]
     for s in subs:

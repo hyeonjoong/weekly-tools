@@ -233,7 +233,7 @@ def test_mmrm_em_reaches_the_same_reml_optimum_as_a_numerical_optimiser():
 
     fitted = mmrm_analysis(panel, 0)
     assert fitted is not None and fitted.converged
-    subs, visits, _lab, _cc, _bc, n_cols, _drop = _build(panel, 0, True)
+    subs, visits, _lab, _cc, _bc, n_cols, _drop, _cov = _build(panel, 0, True)
     t_model = len(visits)
 
     xs, ys, obs = [], [], []

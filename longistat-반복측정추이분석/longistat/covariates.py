@@ -21,8 +21,13 @@ Design decisions worth knowing
   directly as an LS-mean (MMRM cell coefficients) or take differences of arm
   coefficients (ANCOVA).  Centring every covariate column on the mean of the
   subjects actually in the fit makes those coefficients LS-means *at the mean
-  covariate value*, which is exactly what SAS ``LSMEANS`` prints.  Without it
-  the "LS-mean" would be the value at covariate = 0 — meaningless for age.
+  covariate value*.  Without it the "LS-mean" would be the value at
+  covariate = 0 — meaningless for age.  For a *continuous* covariate that is
+  what SAS ``LSMEANS`` prints; for a categorical one it is not, because
+  centring a dummy weights the levels by their **observed proportions** while
+  SAS's default weights them equally (1/k) — the centred version is SAS
+  ``LSMEANS / OM``.  The between-arm *difference*, which is the number this
+  tool actually reports, is identical under either weighting.
 * **Categoricals get reference coding**, with the first level in data order as
   the reference, so ``k`` levels cost ``k − 1`` columns.
 * **Rank repair is done here, once.**  Two site columns that happen to be
@@ -43,7 +48,8 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 __all__ = ["Covariate", "CovariateDesign", "encode_covariates",
-           "complete_subjects", "MAX_LEVELS", "MAX_COLUMNS"]
+           "complete_subjects", "orthonormal_basis", "independent_of",
+           "MAX_LEVELS", "MAX_COLUMNS"]
 
 # A categorical covariate with more levels than this is almost always a mistake
 # (a subject ID, a free-text site name, a date).  Fitting it would eat the
@@ -91,9 +97,49 @@ class CovariateDesign:
     def n_columns(self) -> int:
         return len(self.names)
 
-    def row_for(self, subject: int) -> List[float]:
-        """The covariate row of *subject* (raises if it is not in the design)."""
-        return self.columns[self.rows.index(subject)]
+
+def orthonormal_basis(columns: Sequence[Sequence[float]]) -> List[List[float]]:
+    """Modified Gram–Schmidt over *columns*, dropping the dependent ones."""
+    basis: List[List[float]] = []
+    for col in columns:
+        work = list(col)
+        for b in basis:
+            dot = math.fsum(w * bv for w, bv in zip(work, b))
+            work = [w - dot * bv for w, bv in zip(work, b)]
+        norm = math.sqrt(math.fsum(v * v for v in work))
+        if norm > 0.0:
+            basis.append([v / norm for v in work])
+    return basis
+
+
+def independent_of(col: Sequence[float], basis: Sequence[Sequence[float]]) -> bool:
+    """Does *col* add a direction the *basis* does not already span?
+
+    Relative to the column's own norm, so the answer does not depend on whether
+    a covariate is recorded in years or in seconds.
+    """
+    norm0 = math.sqrt(math.fsum(v * v for v in col))
+    if norm0 <= 0.0:
+        return False
+    work = list(col)
+    for b in basis:
+        dot = math.fsum(w * bv for w, bv in zip(work, b))
+        work = [w - dot * bv for w, bv in zip(work, b)]
+    return math.sqrt(math.fsum(v * v for v in work)) > norm0 * 1e-8
+
+
+def _short(level: str, limit: int = 32) -> str:
+    """Bound a level label before it becomes a printed coefficient name.
+
+    A category level is a *data value*: if someone points ``--covariate`` at a
+    free-text field it can be a patient name, and nothing else bounds its
+    length (one cell may be 131,072 characters).  The label has to identify the
+    coefficient, not reproduce the record — so collapse whitespace and cut.
+    """
+    flat = " ".join(level.split())
+    if len(flat) <= limit:
+        return flat
+    return f"{flat[:limit - 8]}…({len(flat)}자)"
 
 
 def complete_subjects(covariates: Sequence[Covariate],
@@ -117,19 +163,24 @@ def _raw_columns(covariates: Sequence[Covariate], rows: Sequence[int]
         if cov.categorical:
             # Levels present *among the subjects in this fit* — a level that
             # dropped out entirely would contribute an all-zero column.
-            present: List[str] = []
-            for i in rows:
-                v = cov.values[i]
-                if v is not None and v not in present:
-                    present.append(v)
+            #
+            # The order comes from the whole covariate, not from this subset:
+            # ANCOVA refits at every visit, and taking "first row wins" per fit
+            # let the reference level flip between visits as soon as the first
+            # subject was missing at one of them.  A reference that changes
+            # halfway down the table makes the covariate coefficients
+            # incomparable (the arm contrast is unaffected either way).
+            here = {cov.values[i] for i in rows if cov.values[i] is not None}
+            present: List[str] = [lev for lev in cov.level_labels()
+                                  if lev in here]
             if len(present) < 2:
-                only = present[0] if present else "관측 없음"
+                only = _short(present[0]) if present else "관측 없음"
                 dropped.append(f"{cov.name}: 분석에 들어간 대상이 모두 "
                                f"'{only}' 한 수준뿐이라 제외")
                 continue
             ref = present[0]
             for lev in present[1:]:
-                names.append(f"{cov.name}={lev}")
+                names.append(f"{cov.name}={_short(lev)}")
                 cols.append([1.0 if cov.values[i] == lev else 0.0 for i in rows])
         else:
             vals = [cov.numeric[i] for i in rows]
@@ -172,9 +223,18 @@ def encode_covariates(covariates: Sequence[Covariate], rows: Sequence[int]
             dot = math.fsum(w * bv for w, bv in zip(work, b))
             work = [w - dot * bv for w, bv in zip(work, b)]
         norm = math.sqrt(math.fsum(v * v for v in work))
-        if norm0 <= 0.0 or norm <= max(norm0, 1.0) * 1e-8:
+        # Relative to the column's own norm, never to an absolute floor.  With
+        # `max(norm0, 1.0)` the test became an absolute 1e-8 cut-off for any
+        # small-magnitude column, so the *units* of a covariate decided whether
+        # it entered the model: the same concentration in mol/L was silently
+        # dropped as "collinear" while nmol/L was kept, moving the adjusted
+        # difference by 72%.  A rank test has to be scale-invariant.
+        if norm0 <= 0.0 or norm <= norm0 * 1e-8:
+            # With nothing accepted yet there is nothing to be collinear
+            # *with*, so blaming another covariate would be a lie.
             reason = ("값이 모두 같아" if norm0 <= 0.0
-                      else "다른 공변량과 완전히 겹쳐(공선성)")
+                      else "앞서 채택된 공변량과 완전히 겹쳐(공선성)" if basis
+                      else "변동이 사실상 없어")
             design.dropped.append(f"{name}: {reason} 제외")
             continue
         basis.append([v / norm for v in work])

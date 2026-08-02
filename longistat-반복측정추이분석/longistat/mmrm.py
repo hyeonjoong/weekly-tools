@@ -67,6 +67,9 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from .basics import adjust
+from .covariates import (Covariate, complete_subjects,
+                         encode_covariates, independent_of,
+                         orthonormal_basis)
 from .dataio import Panel
 from .special import t_ppf, t_sf_two_sided
 
@@ -196,6 +199,8 @@ class MMRMResult:
     lsmeans: List[MMRMLsMean] = field(default_factory=list)
     contrasts: List[MMRMContrast] = field(default_factory=list)
     df_method: str = ""
+    # Encoded names of the extra subject-level covariates in the fixed effects.
+    covariates: List[str] = field(default_factory=list)
     notes: List[str] = field(default_factory=list)
 
     @property
@@ -385,13 +390,59 @@ def _fit_reml(subjects: Sequence[_Subject], n_cols: int, n_times: int,
 
 
 # ------------------------------------------------------------------ orchestration
-def _build(panel: Panel, baseline: int, adjusted: bool
+@dataclass
+class _CovInfo:
+    """The covariate part of the design: names, drop reasons, columns per visit."""
+
+    names: List[str] = field(default_factory=list)
+    dropped: List[str] = field(default_factory=list)
+    # visit position → one column index per encoded covariate (None = not
+    # estimable at that visit, e.g. everybody left is at the same site)
+    cols: Dict[int, List[Optional[int]]] = field(default_factory=dict)
+    # encoded covariate name → the visits where it was collinear with that
+    # visit's own cells/baseline and had to be left out
+    aliased: Dict[str, List[str]] = field(default_factory=dict)
+
+    def n_at(self, pos: int) -> int:
+        return sum(1 for c in self.cols.get(pos, ()) if c is not None)
+
+    def n_pair(self, a: int, b: int) -> int:
+        """Covariate columns that the *within-subject* a↔b contrast pays for.
+
+        The paired-difference model carries one coefficient per covariate that
+        was fitted at either visit, so a column kept at only one of the two
+        still costs a degree of freedom.
+        """
+        ca, cb = self.cols.get(a, ()), self.cols.get(b, ())
+        return sum(1 for k in range(len(self.names))
+                   if (k < len(ca) and ca[k] is not None)
+                   or (k < len(cb) and cb[k] is not None))
+
+
+def _build(panel: Panel, baseline: int, adjusted: bool,
+           covariates: Sequence[Covariate] = ()
            ) -> Tuple[List[_Subject], List[int], List[str], Dict[Tuple[int, str], int],
-                      Dict[int, int], int, int]:
+                      Dict[int, int], int, Tuple[int, int, int], "_CovInfo"]:
     """Assemble the sparse design.
 
     Returns ``(subjects, visit_indices, groups, cell_col, base_col, n_cols,
-    n_dropped)`` where *visit_indices* are positions in ``panel.times``.
+    n_dropped, cov_names)`` where *visit_indices* are positions in
+    ``panel.times``.
+
+    Extra subject-level *covariates* enter **interacted with visit** — one
+    coefficient per (covariate column, visit), the same form the baseline
+    covariate already uses.  That is what keeps the complete-data identity
+    ``MMRM ≡ per-visit ANCOVA`` exact.  Every column is mean-centred over the
+    subjects in the fit, so each cell coefficient stays an LS-mean at the
+    average covariate value.
+
+    Each visit's covariate columns are rank-checked **against that visit's own
+    cell indicators and baseline column**, not merely against each other: a site
+    factor nested in the treatment arm, or a level whose subjects have all
+    dropped out by week 8, is exactly collinear with the cells even though it
+    varies on its own.  Dropping it here (with a reason) is the difference
+    between a fitted model and a Cholesky failure reported as "too few
+    subjects".
     """
     labels = panel.group_labels() or [""]
     if adjusted:
@@ -399,13 +450,22 @@ def _build(panel: Panel, baseline: int, adjusted: bool
     else:
         visits = list(range(panel.n_times))
 
+    covs = list(covariates)
+    # A subject with no observable visit contributes nothing, so keep them out
+    # of the covariate mean as well — otherwise "centred" would be centred on a
+    # population the fit never sees.
+    eligible = [i for i in range(panel.n_subjects)
+                if not (adjusted and panel.values[i][baseline] is None)
+                and any(panel.values[i][j] is not None for j in visits)]
+    n_cov_missing = 0
+    if covs:
+        eligible, n_cov_missing = complete_subjects(covs, eligible)
+
     # Which (visit, arm) cells actually have data?  A cell with nobody in it is
     # an all-zero column and would make XᵀV⁻¹X singular.
     present: Dict[Tuple[int, str], int] = {}
-    for i in range(panel.n_subjects):
+    for i in eligible:
         lab = (panel.groups or [""] * panel.n_subjects)[i]
-        if adjusted and panel.values[i][baseline] is None:
-            continue
         for pos, j in enumerate(visits):
             if panel.values[i][j] is not None:
                 present[(pos, lab)] = present.get((pos, lab), 0) + 1
@@ -421,30 +481,73 @@ def _build(panel: Panel, baseline: int, adjusted: bool
     base_col: Dict[int, int] = {}
     base_mean = 0.0
     if adjusted:
-        bvals = [float(panel.values[i][baseline])
-                 for i in range(panel.n_subjects)
-                 if panel.values[i][baseline] is not None
-                 and any(panel.values[i][j] is not None for j in visits)]
+        bvals = [float(panel.values[i][baseline]) for i in eligible]
         base_mean = math.fsum(bvals) / len(bvals) if bvals else 0.0
         for pos, j in enumerate(visits):
-            seen = {float(panel.values[i][baseline])
-                    for i in range(panel.n_subjects)
-                    if panel.values[i][baseline] is not None
-                    and panel.values[i][j] is not None}
+            seen = {float(panel.values[i][baseline]) for i in eligible
+                    if panel.values[i][j] is not None}
             # A baseline column needs at least two distinct values at that visit,
             # otherwise it is collinear with the cell indicators.
             if len(seen) >= 2:
                 base_col[pos] = n_cols
                 n_cols += 1
 
+    cov_names: List[str] = []
+    cov_dropped: List[str] = []
+    cov_row: Dict[int, List[float]] = {}
+    if covs and eligible:
+        block = encode_covariates(covs, eligible)
+        cov_names = list(block.names)
+        cov_dropped = list(block.dropped)
+        cov_row = {s: block.columns[k] for k, s in enumerate(block.rows)}
+    # One coefficient per (covariate column, visit) — the same visit-interacted
+    # form the baseline covariate already uses.  A single visit-constant main
+    # effect would be cheaper, but it breaks the identity that makes this model
+    # checkable: with identical regressors *and* free per-visit coefficients the
+    # SUR collapses to per-visit OLS, so a complete-data fit must reproduce the
+    # covariate ANCOVA exactly (tests/test_covariates.py pins it).
+    groups_of = panel.groups or [""] * panel.n_subjects
+    cov_col: Dict[int, List[Optional[int]]] = {}
+    cov_aliased: Dict[str, List[str]] = {}
+    for pos, j in enumerate(visits):
+        here: List[Optional[int]] = []
+        rows_here = [i for i in eligible if panel.values[i][j] is not None]
+        # Seed the rank test with the columns this visit already has: one
+        # indicator per arm present, plus the baseline column if it was kept.
+        fixed: List[List[float]] = [
+            [1.0 if groups_of[i] == lab else 0.0 for i in rows_here]
+            for lab in labels if (pos, lab) in cell_col]
+        if pos in base_col:
+            fixed.append([float(panel.values[i][baseline]) - base_mean
+                          for i in rows_here])
+        basis = orthonormal_basis(fixed)
+        for k in range(len(cov_names)):
+            col = [cov_row[i][k] for i in rows_here]
+            if independent_of(col, basis):
+                here.append(n_cols)
+                n_cols += 1
+                # Accepted columns join the basis, so a second covariate that
+                # duplicates this one is caught at this visit too.
+                basis = orthonormal_basis(
+                    [list(b) for b in basis] + [col])
+            else:
+                here.append(None)
+                cov_aliased.setdefault(cov_names[k], []).append(
+                    panel.times[j])
+        cov_col[pos] = here
+
     subjects: List[_Subject] = []
-    dropped = [0, 0]          # [no baseline value, no usable visit]
+    dropped = [0, 0, n_cov_missing]   # [no baseline, no usable visit, no covariate]
+    in_fit = set(eligible)
     for i in range(panel.n_subjects):
         lab = (panel.groups or [""] * panel.n_subjects)[i]
         base = panel.values[i][baseline]
         if adjusted and base is None:
             dropped[0] += 1
             continue
+        if covs and i not in in_fit and any(
+                panel.values[i][j] is not None for j in visits):
+            continue                  # counted in dropped[2] by complete_subjects
         obs: List[int] = []
         y: List[float] = []
         rows: List[List[Tuple[int, float]]] = []
@@ -462,13 +565,19 @@ def _build(panel: Panel, baseline: int, adjusted: bool
                     entries.append((base_col[pos], float(base) - base_mean))
             else:
                 y.append(float(v))
+            for k, cval in enumerate(cov_row.get(i, ())):
+                ccol = cov_col[pos][k]
+                if ccol is not None:
+                    entries.append((ccol, cval))
             obs.append(pos)
             rows.append(entries)
         if not obs:
             dropped[1] += 1
             continue
         subjects.append(_Subject(tuple(obs), y, rows, lab))
-    return subjects, visits, labels, cell_col, base_col, n_cols, tuple(dropped)
+    return (subjects, visits, labels, cell_col, base_col, n_cols, tuple(dropped),
+            _CovInfo(names=cov_names, dropped=cov_dropped, cols=cov_col,
+                     aliased=cov_aliased))
 
 
 def _identifiable(subjects: Sequence[_Subject],
@@ -487,7 +596,8 @@ def mmrm_analysis(panel: Panel, baseline: int = 0, alpha: float = 0.05,
                   correction: str = "holm",
                   primary_time: Optional[str] = None,
                   max_iter: int = 400, tol: float = 1e-9,
-                  skipped: Optional[List[str]] = None
+                  skipped: Optional[List[str]] = None,
+                  covariates: Optional[Sequence[Covariate]] = None
                   ) -> Optional[MMRMResult]:
     """Fit an MMRM to *panel* and return LS-means plus per-visit contrasts.
 
@@ -495,6 +605,9 @@ def mmrm_analysis(panel: Panel, baseline: int = 0, alpha: float = 0.05,
     covariance — the reason is appended to *skipped* so the caller can tell the
     user *why* rather than silently omitting a section.  Raises
     :class:`ArithmeticError` when the fit itself fails.
+
+    *covariates* defaults to the panel's own subject-level covariates; pass an
+    explicit empty sequence to fit the unadjusted model.
     """
     def _skip(reason: str) -> None:
         if skipped is not None:
@@ -522,8 +635,11 @@ def mmrm_analysis(panel: Panel, baseline: int = 0, alpha: float = 0.05,
               "R mmrm·SAS PROC MIXED 를 쓰세요.")
         return None
 
-    subjects, visits, labels, cell_col, base_col, n_cols, dropped = _build(
-        panel, baseline, adjusted)
+    (subjects, visits, labels, cell_col, base_col, n_cols, dropped,
+     cov_info) = _build(
+         panel, baseline, adjusted,
+         panel.covariates if covariates is None else covariates)
+    cov_names, cov_dropped = cov_info.names, cov_info.dropped
     n_model_times = len(visits)
     if n_model_times < 1 or n_cols == 0 or not subjects:
         _skip("모형에 넣을 수 있는 관측이 없습니다.")
@@ -592,6 +708,7 @@ def mmrm_analysis(panel: Panel, baseline: int = 0, alpha: float = 0.05,
         n_here = sum(counts.get((pos, lab), 0) for lab in arms)
         q = sum(1 for lab in arms if (pos, lab) in cell_col)
         q += 1 if pos in base_col else 0
+        q += cov_info.n_at(pos)
         return float(max(n_here - q, 1))
 
     lsmeans: List[MMRMLsMean] = []
@@ -653,10 +770,14 @@ def mmrm_analysis(panel: Panel, baseline: int = 0, alpha: float = 0.05,
             # within-subject contrast, so that — not the visit's own headcount —
             # is the n that belongs next to the df.
             n_here = sum(1 for s in subjects if pos in s.obs and base_pos in s.obs)
+            # Covariate columns cost df here too.  Leaving them out made this
+            # contrast disagree with the LS-mean rows printed directly above it
+            # in the same table (those go through _df, which does subtract
+            # them), and reported a p and a CI that were both too narrow.
+            df_here = float(max(n_here - 1 - cov_info.n_pair(pos, base_pos), 1))
             contrasts.append(_contrast(
                 panel.times[j], f"{panel.times[j]} − {panel.times[baseline]}",
-                lab, lab, n_here, n_here, est, var,
-                float(max(n_here - 1, 1)), alpha,
+                lab, lab, n_here, n_here, est, var, df_here, alpha,
                 primary=(panel.times[j] == primary_time)))
 
     # Two families, each adjusted on its own.  Exempting the primary visit
@@ -669,6 +790,49 @@ def mmrm_analysis(panel: Panel, baseline: int = 0, alpha: float = 0.05,
                              adjust([c.p_raw for c in family], correction)):
             row.p_adj = padj
 
+    # Over-adjustment check.  The `n_obs <= n_cols` guard above only refuses a
+    # model with *no* residual degrees of freedom at all; a 14-subject trial
+    # with four three-level covariates squeaks past it and then reports 95% CIs
+    # on df = 1.  Those numbers are arithmetically fine and clinically
+    # worthless, so say so rather than letting them look like the others.
+    if contrasts:
+        worst = min((c.df for c in contrasts if math.isfinite(c.df)),
+                    default=float("inf"))
+        if worst < 5:
+            notes.append(
+                f"가장 작은 잔차 자유도가 {worst:.0f} 입니다 — 대상 수에 비해 "
+                "모형에 넣은 모수(시점 × 군 × 공변량)가 너무 많습니다. "
+                "신뢰구간을 그대로 인용하지 마세요 (공변량이나 시점을 줄이세요)."
+                if cov_names else
+                f"가장 작은 잔차 자유도가 {worst:.0f} 입니다 — 대상 수에 비해 "
+                "모형이 큽니다. 추정이 불안정할 수 있습니다.")
+    # A covariate that is missing for a whole arm silently removes that arm from
+    # the fit — and then there is no between-arm contrast at all, while [5]
+    # right above still shows one.  Say it out loud.
+    if panel.groups is not None and len(panel.group_labels()) > 1:
+        fitted_arms = {s.group for s in subjects}
+        gone = [lab for lab in panel.group_labels() if lab not in fitted_arms]
+        if gone:
+            notes.append(
+                f"'{', '.join(gone)}' 군은 모형에 들어간 대상이 한 명도 없어 "
+                "군간 비교를 수행하지 못했습니다 (공변량 결측이 그 군에 몰려 "
+                "있는지 확인하세요) — 아래 표는 남은 군만의 결과입니다.")
+    if cov_names:
+        notes.append("보정 공변량(시점마다 따로 추정 · 평균 중심화): "
+                     + ", ".join(cov_names)
+                     + ". LS 평균과 군간 차이는 모두 '평균 공변량 값에서의 "
+                       "추정치'입니다.")
+        for cname, where in cov_info.aliased.items():
+            notes.append(
+                f"공변량 '{cname}' 은(는) {', '.join(where)} 시점에서 그 시점의 "
+                "군 구분(또는 기저값)과 완전히 겹쳐 모형에 넣지 못했습니다 — "
+                "층화인자가 한 군에만 있거나, 그 시점에 남은 대상이 모두 같은 "
+                "수준일 때 그렇습니다. 그 시점의 추정치는 이 공변량으로 "
+                "보정되지 않았습니다.")
+    notes.extend(f"공변량 {msg}" for msg in cov_dropped)
+    if dropped[2]:
+        notes.append(f"{dropped[2]}명은 공변량 값이 없어 모형에서 제외되었습니다 "
+                     "(공변량은 대체하지 않습니다).")
     if dropped[0]:
         notes.append(f"{dropped[0]}명은 기준시점({panel.times[baseline]}) 값이 없어 "
                      "기저 보정 모형에 들어가지 못했습니다.")
@@ -689,7 +853,7 @@ def mmrm_analysis(panel: Panel, baseline: int = 0, alpha: float = 0.05,
         baseline=panel.times[baseline],
         times=[panel.times[j] for j in visits],
         grouped=grouped, adjusted=adjusted, n_subjects=used, n_obs=n_obs,
-        n_dropped=dropped[0] + dropped[1], converged=converged,
+        n_dropped=sum(dropped), covariates=cov_names, converged=converged,
         iterations=iterations,
         loglik=loglik, n_cov_params=n_cov_params, sds=sds, corr=corr,
         cov=[list(row) for row in sigma], lsmeans=lsmeans, contrasts=contrasts,
