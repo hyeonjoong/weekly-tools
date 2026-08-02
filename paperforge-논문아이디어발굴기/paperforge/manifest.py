@@ -246,6 +246,24 @@ def parse_linked_n(raw, warnings: list) -> dict:
     return out
 
 
+def _strip_controls(value) -> str:
+    """Remove terminal control characters from manifest-supplied text.
+
+    A manifest is third-party data — routinely a CSV someone exported and
+    e-mailed — and the report is printed straight to a terminal. A study name
+    containing ``\x1b[2J`` clears the reader's screen, OSC 0 rewrites the window
+    title and OSC 8 injects a clickable hyperlink, all with nothing on screen to
+    show it happened. Newlines and tabs go too: they break the Markdown table
+    the value lands in. Printable content is untouched.
+    """
+    text = str(value)
+    return "".join(
+        " " if ch in "\t\n\r" else ch
+        for ch in text
+        if ch == " " or (ch.isprintable() and ch not in "\x7f")
+    )
+
+
 def parse_manifest(data: dict) -> Manifest:
     """Validate a parsed JSON object into a :class:`Manifest`."""
     if not isinstance(data, dict):
@@ -291,7 +309,7 @@ def parse_manifest(data: dict) -> Manifest:
             raise ManifestError(f"{name}: 'variables' must be an array.")
         # Strip, drop blanks, and de-duplicate case-insensitively while keeping
         # first-seen order — exported inventories routinely repeat columns.
-        variables = _dedupe_variables(str(v) for v in variables)
+        variables = _dedupe_variables(_strip_controls(v) for v in variables)
 
         sampling = raw.get("sampling_hz")
         try:
@@ -301,17 +319,17 @@ def parse_manifest(data: dict) -> Manifest:
 
         datasets.append(
             Dataset(
-                name=str(name),
+                name=_strip_controls(name),
                 modality=canon,
-                raw_modality=str(raw_mod),
+                raw_modality=_strip_controls(raw_mod),
                 n=n,
                 variables=variables,
                 sampling_hz=sampling,
-                notes=str(raw.get("notes", "")),
+                notes=_strip_controls(raw.get("notes", "")),
             )
         )
 
-    study = str(data.get("study") or "Unnamed study")
+    study = _strip_controls(data.get("study") or "Unnamed study")
     raw_links = data.get("linked_n")
     if raw_links is None:
         raw_links = data.get("linked") or data.get("연결표본수")
@@ -403,6 +421,28 @@ def _decode_bytes(raw: bytes):
             return raw.decode(enc), None
         except UnicodeDecodeError:
             pass
+    # BOM-less UTF-16 (some exporters and most scripted conversions). ASCII-ish
+    # text in UTF-16 is half NUL bytes, and their parity tells the endianness
+    # apart; without this it fell through to CP949 and produced the same
+    # wrong-diagnosis "modality 열이 필요합니다" the BOM branch above exists to
+    # prevent. UTF-8 never contains a NUL, so this cannot shadow a valid file.
+    head = raw[:4096]
+    if b"\x00" in head:
+        even_nuls = head[0::2].count(0)
+        odd_nuls = head[1::2].count(0)
+        order = ("utf-16-le", "utf-16-be") if odd_nuls > even_nuls else (
+            "utf-16-be", "utf-16-le")
+        for enc in order:
+            try:
+                text = raw.decode(enc)
+            except (UnicodeDecodeError, ValueError):
+                continue
+            if "\x00" in text:
+                continue  # decoded, but into nonsense — keep looking
+            return text, (
+                f"파일이 BOM 없는 {enc.upper()}로 저장돼 있어 그렇게 읽었습니다 "
+                "— UTF-8 CSV로 다시 저장하는 것을 권합니다."
+            )
     for enc in ("cp949", "euc-kr"):
         try:
             text = raw.decode(enc)
@@ -419,8 +459,57 @@ def _decode_bytes(raw: bytes):
     )
 
 
+# Field separators an "CSV" export actually uses in the wild. Excel writes ';'
+# whenever the OS list separator is ';' (the default in many European locales,
+# and a common setting on Korean Windows too), and a file saved from a
+# spreadsheet as "tab delimited" is frequently still named .csv.
+_CSV_DELIMITER_CANDIDATES = (",", ";", "\t", "|")
+
+
+def _header_columns(head: str, delimiter: str):
+    """Canonical column names a header line yields under ``delimiter``."""
+    try:
+        row = next(iter(csv.reader(io.StringIO(head), delimiter=delimiter)), [])
+    except csv.Error:
+        return []
+    return [_CSV_COLUMN_ALIASES.get(h.strip().lower(), "") for h in row]
+
+
+def _sniff_delimiter(text: str) -> str:
+    """Pick the field separator whose header row actually parses.
+
+    **Comma wins outright whenever it produces a usable ``modality`` column.**
+    That rule is deliberately absolute rather than score-based: a comma header
+    whose *column name* happens to contain a ';' or a '|'
+    (``modality,비고;type;n``) scored lower than the semicolon reading and
+    silently parsed into a different manifest — different modalities, different
+    N, different feasibility verdicts — with nothing but a "구분자가 …" note to
+    show for it. Sniffing exists to rescue files that fail today, not to
+    re-interpret files that already work.
+
+    Only when ',' finds no ``modality`` do the other candidates compete, ranked
+    by (found modality, number of recognised columns).
+    """
+    head = ""
+    for line in io.StringIO(text.lstrip("﻿")):
+        if line.strip() and not line.lstrip().startswith("#"):
+            head = line
+            break
+    if not head:
+        return ","
+    if "modality" in _header_columns(head, ","):
+        return ","
+    best, best_score = ",", (0, 0)
+    for cand in _CSV_DELIMITER_CANDIDATES:
+        cols = _header_columns(head, cand)
+        score = (1 if "modality" in cols else 0, sum(1 for c in cols if c))
+        if score > best_score:
+            best, best_score = cand, score
+    return best
+
+
 def parse_csv_manifest(text: str, study: Optional[str] = None,
-                       delimiter: str = ",") -> Manifest:
+                       delimiter: Optional[str] = ",") -> Manifest:
     """Parse a CSV/TSV data inventory into a :class:`Manifest`.
 
     One row per dataset. Headers are matched case-insensitively against a set of
@@ -428,7 +517,15 @@ def parse_csv_manifest(text: str, study: Optional[str] = None,
     ``variables`` cell may list several columns separated by ``;`` or ``|``.
     A ``study`` column (first non-empty value wins) names the study; otherwise
     the ``study`` argument (typically the filename stem) is used.
+
+    ``delimiter=None`` sniffs the separator (``,`` ``;`` tab ``|``) from the
+    header row, which is what :func:`load_manifest` uses — a semicolon-separated
+    export otherwise parses as one giant column and fails with a message about a
+    missing ``modality`` column that the file plainly contains.
     """
+    sniffed = None
+    if delimiter is None:
+        delimiter = sniffed = _sniff_delimiter(text)
     stripped = text.lstrip("﻿")
     try:
         all_rows = list(csv.reader(io.StringIO(stripped), delimiter=delimiter))
@@ -446,9 +543,15 @@ def parse_csv_manifest(text: str, study: Optional[str] = None,
         if header is None:
             if not any(cell.strip() for cell in r):
                 continue  # blank line before header
-            if r and r[0].lstrip().startswith("#"):
+            cols = [_CSV_COLUMN_ALIASES.get(h.strip().lower(), "") for h in r]
+            # A '#' first cell is normally a comment — but an inventory whose
+            # first COLUMN is called "#id" or "#name" is a real header, and
+            # skipping it promoted the first data row to header and produced the
+            # misleading "modality 열이 필요합니다" about a column the file has.
+            if (r and r[0].lstrip().startswith("#")
+                    and "modality" not in cols):
                 continue  # comment line before header
-            header = [_CSV_COLUMN_ALIASES.get(h.strip().lower(), "") for h in r]
+            header = cols
             continue
         if any(cell.strip() for cell in r):  # skip fully blank data rows
             body.append(r)
@@ -506,9 +609,24 @@ def parse_csv_manifest(text: str, study: Optional[str] = None,
         record["variables"] = [v.strip() for v in variables if v.strip()]
         datasets.append(record)
 
+    # An unterminated quote makes csv swallow every following line into one
+    # field, so the rows after it vanish from the manifest. The only symptom
+    # used to be a "열 수가 다른 행" note that says nothing about quoting — and a
+    # user skimming a 500-row inventory would never notice two datasets went
+    # missing. Detect it by the newline that ends up INSIDE a parsed field.
+    swallowed = any("\n" in cell or "\r" in cell for r in body for cell in r)
+    quote_warning = None
+    if swallowed:
+        quote_warning = (
+            "따옴표(\")가 닫히지 않은 셀이 있어 그 뒤의 여러 줄이 한 칸으로 "
+            "합쳐졌습니다 — 해당 행들이 데이터셋 목록에서 빠졌을 수 있습니다. "
+            "셀 안의 따옴표를 확인하세요."
+        )
+
     if not datasets:
         raise ManifestError(
             "CSV에 유효한 데이터셋 행이 없습니다 (modality 값이 있는 행 필요)."
+            + (" " + quote_warning if quote_warning else "")
         )
 
     resolved_study = study_from_col or study or "Unnamed study"
@@ -532,6 +650,15 @@ def parse_csv_manifest(text: str, study: Optional[str] = None,
         cols = ", ".join(sorted(dup))
         manifest.warnings.insert(
             0, f"CSV 헤더에 중복된 열({cols})이 있어 마지막 값만 사용합니다."
+        )
+    if quote_warning:
+        manifest.warnings.insert(0, quote_warning)
+    if sniffed is not None and sniffed != ",":
+        name = {";": "세미콜론(;)", "\t": "탭", "|": "파이프(|)"}[sniffed]
+        manifest.warnings.insert(
+            0,
+            f"구분자가 쉼표가 아니라 {name}(으)로 보여 그렇게 읽었습니다 — "
+            "엑셀의 지역 설정에 따라 흔히 생기는 형태입니다.",
         )
     return manifest
 
@@ -570,7 +697,9 @@ def load_manifest(path: str) -> Manifest:
             raise ManifestError(f"Could not parse JSON: {exc}") from exc
 
     def _as_csv():
-        delimiter = "\t" if ext == ".tsv" else ","
+        # .tsv states its separator; anything else gets sniffed, because a file
+        # named .csv is routinely semicolon- or tab-separated in practice.
+        delimiter = "\t" if ext == ".tsv" else None
         return parse_csv_manifest(text, study=stem, delimiter=delimiter)
 
     looks_json = text.lstrip()[:1] in ("{", "[")

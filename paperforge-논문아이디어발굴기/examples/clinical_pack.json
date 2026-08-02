@@ -5,14 +5,28 @@
     {
       "id": "adherence_physio_signal",
       "title": "복약 순응도와 생리신호: 착용형 지표로 본 순응 패턴",
-      "required": ["watch", "questionnaire"],
-      "optional": ["behavior"],
+      "required": [
+        "watch",
+        "questionnaire"
+      ],
+      "optional": [
+        "behavior"
+      ],
       "hypothesis": "자기보고 복약 순응도가 낮은 참가자는 야간 HR/HRV 회복 패턴이 둔화돼 있다.",
-      "predictors": ["자기보고 순응도 점수", "복약 시점 기록"],
-      "outcomes": ["야간 HR 저하폭", "RMSSD 회복 기울기"],
+      "predictors": [
+        "자기보고 순응도 점수",
+        "복약 시점 기록"
+      ],
+      "outcomes": [
+        "야간 HR 저하폭",
+        "RMSSD 회복 기울기"
+      ],
       "analysis": "순응도(연속)와 생리지표의 부분상관 → 연령·기저 HR 보정 위계적 회귀.",
       "design": "correlational / predictive",
-      "effect": {"type": "correlation", "r": 0.25},
+      "effect": {
+        "type": "correlation",
+        "r": 0.25
+      },
       "journal": "Journal of Medical Internet Research / Patient Preference and Adherence",
       "novelty": "순응도 연구는 대부분 자기보고에 의존 — 착용형 생리지표로 객관화하면 기여가 명확.",
       "caveats": [
@@ -22,14 +36,30 @@
     {
       "id": "placebo_responder_split",
       "title": "위약 반응자 판별: 기저 생리 프로파일로 본 반응 이질성",
-      "required": ["moa", "watch"],
-      "optional": ["eeg", "questionnaire"],
+      "required": [
+        "moa",
+        "watch"
+      ],
+      "optional": [
+        "eeg",
+        "questionnaire"
+      ],
       "hypothesis": "위약군 내 반응자와 비반응자는 기저 자율신경 프로파일(HRV)에서 차이를 보인다.",
-      "predictors": ["기저 RMSSD", "기저 평균 HR", "기저 LF/HF"],
-      "outcomes": ["위약 반응 여부(이분)"],
+      "predictors": [
+        "기저 RMSSD",
+        "기저 평균 HR",
+        "기저 LF/HF"
+      ],
+      "outcomes": [
+        "위약 반응 여부(이분)"
+      ],
       "analysis": "두 군 비교(Welch t / Mann–Whitney + Hedges g) → 로지스틱 회귀 + ROC; 부트스트랩 내부검증.",
       "design": "two-group comparison",
-      "effect": {"type": "two_group", "d": 0.45, "allocation": 0.35},
+      "effect": {
+        "type": "two_group",
+        "d": 0.45,
+        "allocation": 0.35
+      },
       "journal": "Contemporary Clinical Trials / Journal of Psychosomatic Research",
       "novelty": "위약 반응 이질성은 임상시험 설계에 직접 영향 — 사전 층화 근거가 됨.",
       "caveats": [
@@ -40,14 +70,28 @@
     {
       "id": "dose_response_within",
       "title": "용량-반응 within-subject 검증: 조건별 생리 변화",
-      "required": ["eeg", "watch"],
-      "optional": ["respiration", "questionnaire"],
+      "required": [
+        "eeg",
+        "watch"
+      ],
+      "optional": [
+        "respiration",
+        "questionnaire"
+      ],
       "hypothesis": "동일 참가자 내에서 용량/조건이 올라갈수록 각성 관련 생리지표가 단조적으로 변한다.",
-      "predictors": ["용량/조건 수준"],
-      "outcomes": ["EEG 베타/알파 비", "HR/HRV 변화량"],
+      "predictors": [
+        "용량/조건 수준"
+      ],
+      "outcomes": [
+        "EEG 베타/알파 비",
+        "HR/HRV 변화량"
+      ],
       "analysis": "반복측정 혼합효과모형(조건 고정효과, 참가자 랜덤절편) + 선형 추세 대비; 다중비교 보정.",
       "design": "within-subject (반복측정)",
-      "effect": {"type": "paired", "d": 0.45},
+      "effect": {
+        "type": "paired",
+        "d": 0.45
+      },
       "journal": "Psychopharmacology / British Journal of Clinical Pharmacology",
       "novelty": "within-subject 교차설계는 적은 표본으로도 검정력이 높아 초기 탐색에 적합.",
       "caveats": [
@@ -58,15 +102,30 @@
     {
       "id": "biomarker_response_rate",
       "title": "바이오마커 양성군의 반응률 차이(이분 종점)",
-      "required": ["clinical", "lab"],
-      "optional": ["imaging"],
+      "required": [
+        "clinical",
+        "lab"
+      ],
+      "optional": [
+        "imaging"
+      ],
       "hypothesis": "기저 바이오마커 양성군은 음성군보다 임상 반응률(반응/무반응)이 높다.",
-      "predictors": ["바이오마커 양성 여부", "기저 임상변수"],
-      "outcomes": ["객관적 반응 여부(이분)"],
+      "predictors": [
+        "바이오마커 양성 여부",
+        "기저 임상변수"
+      ],
+      "outcomes": [
+        "객관적 반응 여부(이분)"
+      ],
       "analysis": "두 비율 비교(카이제곱/Fisher) → 층화 로지스틱 회귀로 기저 공변량 보정; 위험차·위험비·오즈비를 신뢰구간과 함께 보고.",
       "design": "two-group comparison (binary endpoint)",
       "analysis_unit": "subject",
-      "effect": {"type": "two_proportion", "p1": 0.30, "p2": 0.50, "allocation": 0.5},
+      "effect": {
+        "type": "two_proportion",
+        "p1": 0.3,
+        "p2": 0.5,
+        "allocation": 0.5
+      },
       "journal": "Clinical Cancer Research / BMC Cancer (바이오마커 예측)",
       "novelty": "반응 예측 바이오마커는 층화 설계의 근거가 되어 후속 시험 설계에 직접 쓰임.",
       "caveats": [
@@ -77,21 +136,145 @@
     {
       "id": "biomarker_survival",
       "title": "바이오마커·영상 지표와 무진행 생존(시간-사건 종점)",
-      "required": ["clinical", "lab"],
-      "optional": ["imaging"],
+      "required": [
+        "clinical",
+        "lab"
+      ],
+      "optional": [
+        "imaging"
+      ],
       "hypothesis": "기저 바이오마커 고발현군은 저발현군보다 무진행 생존이 짧다(HR≠1).",
-      "predictors": ["바이오마커 발현 수준(고/저)", "영상 기반 종양 부담"],
-      "outcomes": ["무진행 생존기간(PFS)", "전체 생존기간(OS)"],
+      "predictors": [
+        "바이오마커 발현 수준(고/저)",
+        "영상 기반 종양 부담"
+      ],
+      "outcomes": [
+        "무진행 생존기간(PFS)",
+        "전체 생존기간(OS)"
+      ],
       "analysis": "Kaplan–Meier + 로그순위검정 → Cox 비례위험모형(공변량 보정); 비례위험 가정은 Schoenfeld 잔차로 점검.",
       "design": "time-to-event (survival)",
       "analysis_unit": "subject",
-      "effect": {"type": "survival", "hr": 0.70, "event_rate": 0.60, "allocation": 0.5},
+      "effect": {
+        "type": "survival",
+        "hr": 0.7,
+        "event_rate": 0.6,
+        "allocation": 0.5
+      },
       "journal": "Annals of Oncology / Journal of Clinical Oncology (예후 바이오마커)",
       "novelty": "예후 바이오마커는 층화·중간분석 설계의 근거가 되며 기존 코호트 재분석으로도 가능.",
       "caveats": [
         "검정력을 결정하는 것은 등록 인원이 아니라 사건 수입니다(HR=0.70 → 247건). 추적기간이 짧으면 등록을 늘려도 부족할 수 있습니다.",
         "사건 발생률 60%는 관찰기간 종료 시점 기준 가정입니다 — 본인 코호트의 실제 성숙도로 바꾸세요.",
         "Schoenfeld 근사는 비례위험을 가정합니다. 위험이 교차하면 RMST 등 대안 지표를 고려하세요."
+      ]
+    },
+    {
+      "id": "dose_ranging_omnibus",
+      "title": "용량군 간 반응 차이(용량-반응 탐색, 일원배치 ANOVA)",
+      "required": [
+        "clinical",
+        "lab"
+      ],
+      "optional": [
+        "questionnaire"
+      ],
+      "hypothesis": "위약·저용량·고용량 3개 군에서 일차 연속 종점의 평균이 서로 다르다(적어도 한 군이 다름).",
+      "predictors": [
+        "배정 용량군(위약/저용량/고용량)"
+      ],
+      "outcomes": [
+        "일차 연속 종점의 투여 후 값",
+        "변화량"
+      ],
+      "analysis": "일원배치 분산분석(one-way ANOVA) 옴니버스 F → 유의 시 사전 지정한 대조(Dunnett: 각 용량군 vs 위약)로 사후비교; 정규성·등분산 위반 시 Welch ANOVA/Kruskal–Wallis.",
+      "design": "parallel-group, k arms (dose ranging)",
+      "analysis_unit": "subject",
+      "effect": {
+        "type": "anova",
+        "f": 0.25,
+        "k_groups": 3
+      },
+      "journal": "Clinical Pharmacology & Therapeutics / British Journal of Clinical Pharmacology",
+      "novelty": "2군 비교로만 계획된 초기 시험을 용량-반응 구조로 재설계하면 용량 선택 근거를 한 시험에서 확보할 수 있음.",
+      "caveats": [
+        "권장 N은 '군간 차이가 존재하는가'를 묻는 옴니버스 F 기준입니다. 실제 관심이 '고용량 vs 위약' 한 쌍이라면 그 쌍에 대한 two_group 사이징이 더 적절하며, 대개 더 큰 N이 필요합니다.",
+        "사후 쌍별 비교를 계획한다면 --n-tests 로 비교 횟수를 넣어 보정된 N을 함께 확인하세요.",
+        "가정 f=0.25(중간 효과)는 관례적 기준값입니다 — 용량-반응이 단조 증가라면 추세검정(Jonckheere–Terpstra, 대조 추세)이 같은 N에서 더 높은 검정력을 줍니다."
+      ]
+    },
+    {
+      "id": "baseline_adjusted_endpoint",
+      "title": "기저값 보정 일차 종점(ANCOVA) — 무작위배정 2군 시험",
+      "required": [
+        "clinical"
+      ],
+      "optional": [
+        "lab",
+        "questionnaire"
+      ],
+      "hypothesis": "시험군은 대조군보다 일차 연속 종점이 우수하며, 기저값을 공변량으로 보정해도 그 차이가 유지된다.",
+      "predictors": [
+        "배정군(시험/대조)",
+        "종점의 기저값(공변량)"
+      ],
+      "outcomes": [
+        "일차 연속 종점의 투여 후 값"
+      ],
+      "analysis": "ANCOVA: 투여 후 값을 종속변수, 배정군을 요인, 기저값을 공변량으로 투입(변화량 t검정 대신). 기저값×군 상호작용은 사전 지정한 민감도 분석으로만 확인.",
+      "design": "randomised parallel-group, baseline-adjusted",
+      "analysis_unit": "subject",
+      "effect": {
+        "type": "ancova",
+        "d": 0.4,
+        "r_covariate": 0.6,
+        "k_covariates": 1,
+        "allocation": 0.5
+      },
+      "journal": "Trials / Contemporary Clinical Trials / 해당 질환 임상 저널",
+      "novelty": "기저값 보정은 ICH E9·EMA 지침이 권고하는 기본 분석인데도 표본수는 보정 없는 t검정으로 계산되는 경우가 많아, 같은 검정력에서 필요 N이 과대 산정됨.",
+      "caveats": [
+        "d는 '보정 전' 표준화 평균차입니다 — ρ는 효과를 키우는 것이 아니라 같은 효과를 더 정밀하게 추정하게 해줍니다.",
+        "ρ=0.60은 가정입니다. 파일럿에서 기저-종점 상관을 확인하고 바꾸세요. ρ를 과대평가하면 표본이 부족해집니다(ρ=0.3이면 필요 N이 약 1.4배).",
+        "이 감소분을 주장하려면 ANCOVA를 사전에 분석계획서의 일차 분석으로 명시해야 합니다. 사후에 바꾸면 인정되지 않습니다.",
+        "Borm 등(2007) 근사이며 정규성·선형성·기울기 동일성을 가정합니다."
+      ]
+    },
+    {
+      "id": "ni_response_rate",
+      "title": "비열등성 시험: 신규 요법의 반응률이 표준요법보다 마진 이상 나쁘지 않음",
+      "required": [
+        "clinical"
+      ],
+      "optional": [
+        "lab"
+      ],
+      "hypothesis": "신규 요법의 반응률은 표준요법 대비 사전에 정한 비열등성 마진(10%p)보다 더 나쁘지 않다.",
+      "predictors": [
+        "배정군(신규/표준)"
+      ],
+      "outcomes": [
+        "객관적 반응 여부(이분)"
+      ],
+      "analysis": "두 비율의 위험차와 단측 97.5% 신뢰구간 하한을 마진과 비교(비열등성 판정) → 민감도로 per-protocol·ITT 양쪽 분석. 우월성으로의 전환은 사전에 계층적 검정 절차로 명시.",
+      "design": "randomised, non-inferiority (비열등성)",
+      "analysis_unit": "subject",
+      "effect": {
+        "type": "two_proportion",
+        "design": "noninferiority",
+        "p1": 0.7,
+        "p2": 0.7,
+        "margin": 0.1,
+        "higher_is_better": true,
+        "allocation": 0.5
+      },
+      "journal": "Trials / Journal of Clinical Oncology / 해당 질환 임상 저널",
+      "novelty": "동등 효능·더 나은 안전성/편의성을 주장하는 시험은 비열등성으로 설계해야 하며, 우월성 공식으로 계산한 표본수로는 심사에서 근거가 되지 않음.",
+      "caveats": [
+        "마진 10%p는 예시입니다. 마진은 통계가 아니라 임상적 판단이며, 규제기관이 가장 먼저 근거를 묻는 값입니다(과거 대조군 대비 효과의 일부만 잠식하도록 정하는 것이 관례).",
+        "가정한 실제 차이는 0(두 군이 동일)입니다. 신규 요법이 조금이라도 열등할 것으로 본다면 p2를 낮추세요 — 마진을 갉아먹어 필요 N이 빠르게 늘어납니다.",
+        "비열등성 시험에서는 탈락·프로토콜 위반이 두 군을 비슷하게 만들어 비열등성 쪽으로 편향됩니다. ITT와 per-protocol을 모두 보고하고 --dropout 으로 모집 목표를 함께 확인하세요.",
+        "단측 α/2 규약(ICH E9/E10)으로 계산되므로 --one-sided 는 적용되지 않습니다."
       ]
     }
   ]

@@ -52,6 +52,8 @@ _EFFECT_SCHEMA = {
     "correlation": (("r",), ()),
     "two_group": (("d",), ("allocation",)),
     "paired": (("d",), ()),
+    "anova": (("f", "k_groups"), ()),
+    "ancova": (("d",), ("r_covariate", "k_covariates", "allocation")),
     "regression": (("f2",), ("k",)),
     "regression_change": (("f2", "k_tested", "k_control"), ()),
     "two_proportion": (("p1", "p2"), ("allocation",)),
@@ -67,6 +69,15 @@ _NI_MARGIN_KEY = {
     "two_proportion": "margin",
     "survival": "margin_hr",
 }
+
+
+# Effect families whose N is a headcount by construction, so declaring them
+# observation-level would ask --repeats/--icc to shrink the sample. A log-rank
+# test counts events in distinct subjects, a two-proportion test counts subjects
+# classified responder/non-responder, and the two parallel-group families below
+# randomise each subject to exactly one arm — measuring someone four times
+# yields no extra events, no extra responders and no extra arms.
+_SUBJECT_ONLY_TYPES = ("survival", "two_proportion", "anova", "ancova")
 
 
 class TemplateError(ValueError):
@@ -149,6 +160,43 @@ def validate_effect(effect, where: str) -> dict:
                 effect["allocation"], "allocation", where, upper=1.0
             )
             out["allocation"] = alloc
+    elif etype == "anova":
+        out["f"] = _require_number(effect.get("f"), "f", where)
+        k_groups = _require_number(
+            effect.get("k_groups"), "k_groups", where, integer=True
+        )
+        if k_groups < 2:
+            raise TemplateError(
+                f"{where}: effect.k_groups must be >= 2 (a one-way ANOVA needs "
+                "at least two arms; use type 'two_group' for exactly two means)."
+            )
+        if k_groups > 1000:
+            raise TemplateError(f"{where}: effect.k_groups must be <= 1000.")
+        out["k_groups"] = k_groups
+    elif etype == "ancova":
+        out["d"] = _require_number(effect.get("d"), "d", where)
+        # rho is a *measurement* property (how well baseline predicts endpoint),
+        # so its sign is irrelevant and 0 is legitimate — it just means the
+        # covariate buys nothing. |rho| = 1 would imply a zero-variance residual.
+        rho = _require_number(
+            effect.get("r_covariate", 0.0), "r_covariate", where,
+            positive=False,
+        )
+        if not -1.0 < rho < 1.0:
+            raise TemplateError(
+                f"{where}: effect.r_covariate must satisfy -1 < rho < 1."
+            )
+        out["r_covariate"] = rho
+        k_cov = _require_number(
+            effect.get("k_covariates", 1), "k_covariates", where, integer=True
+        )
+        if k_cov > 1000:
+            raise TemplateError(f"{where}: effect.k_covariates must be <= 1000.")
+        out["k_covariates"] = k_cov
+        if "allocation" in effect:
+            out["allocation"] = _require_number(
+                effect["allocation"], "allocation", where, upper=1.0
+            )
     elif etype == "regression":
         out["f2"] = _require_number(effect.get("f2"), "f2", where)
         if "k" in effect:
@@ -286,7 +334,7 @@ def validate_template(raw, where: str) -> dict:
     # declaring it observation-level would ask --repeats/--icc to shrink the
     # sample. Reject at load rather than silently ignoring the field.
     if (t.get("analysis_unit") == "observation"
-            and t["effect"]["type"] in ("survival", "two_proportion")):
+            and t["effect"]["type"] in _SUBJECT_ONLY_TYPES):
         raise TemplateError(
             f"{where}: effect type {t['effect']['type']!r} is always measured "
             "per subject; 'analysis_unit' cannot be 'observation'."
@@ -361,4 +409,32 @@ def merge_templates(builtin: list, packs: list, include_builtin: bool = True):
             "사용할 템플릿이 없습니다 (--no-builtin 을 썼다면 --templates 로 "
             "최소 1개 팩을 지정하세요)."
         )
+    warnings.extend(_misplaced_ni_warnings(merged))
     return merged, warnings
+
+
+# A template carries TWO 'design' fields: a free-text one at the top level
+# ("randomised parallel-group") and an optional switch inside `effect` that
+# actually changes the arithmetic. Putting "noninferiority" in the free-text one
+# is the obvious mistake — and it used to be silent, sizing an NI trial as a
+# superiority trial and reporting the result as a confident number. Say so.
+_NI_TEXT_MARKERS = ("noninferior", "non-inferior", "비열등")
+
+
+def _misplaced_ni_warnings(templates: list) -> list:
+    """Warn when the free-text design says NI but the effect spec doesn't."""
+    out = []
+    for t in templates:
+        text = str(t.get("design", "")).lower()
+        if not any(marker in text for marker in _NI_TEXT_MARKERS):
+            continue
+        if t.get("effect", {}).get("design") == "noninferiority":
+            continue
+        out.append(
+            f"템플릿 '{t['id']}'의 design 문구는 비열등성인데 effect 안에 "
+            '"design": "noninferiority" 가 없어 **우월성(superiority) 기준**으로 '
+            "표본수를 계산했습니다. 비열등성 마진(margin_d/margin/margin_hr)과 "
+            "함께 effect 안에 넣으세요 — 그러지 않으면 필요 표본이 크게 "
+            "달라집니다."
+        )
+    return out

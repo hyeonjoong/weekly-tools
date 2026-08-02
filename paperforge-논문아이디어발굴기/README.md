@@ -44,6 +44,9 @@ paperforge examples/sleep_moa_manifest.json
 # 상위 5개만, 마크다운 파일과 CSV/JSON으로 저장
 paperforge examples/sleep_moa_manifest.json --top 5 --out ideas.md --csv ideas.csv --json ideas.json
 
+# 브라우저에서 열고 PDF로 인쇄해 PI/공동연구자에게 돌릴 HTML 리포트
+paperforge examples/sleep_moa_manifest.json --html ideas.html
+
 # 검정력 기준 바꾸기 (alpha/power는 0~1 사이 임의 값)
 paperforge examples/sleep_moa_manifest.json --power 0.90 --alpha 0.025
 
@@ -87,10 +90,11 @@ paperforge examples/sleep_moa_manifest.json --effect-scale 0.7
 | `--out PATH` | Markdown 리포트 저장 (미지정 시 stdout) |
 | `--csv PATH` | CSV 매트릭스 저장 |
 | `--json PATH` | 구조화 JSON 저장 (프로그램 연동용, 전 필드 포함) |
+| `--html PATH` | HTML 리포트 저장 (단일 파일, 스크립트·외부 리소스 없음 — 브라우저에서 PDF 인쇄) |
 | `--alpha` / `--power` | 검정력 기준 — **0과 1 사이 임의 값**(기본 0.05 / 0.80) |
 | `--dropout p` | 예상 중도탈락 비율(0≤p<1). 권장 모집 N=⌈권장 N/(1−p)⌉ 로 표시 |
 | `--effect-scale S` | 가정 효과크기 배율(>0, 기본 1.0). `<1`이면 더 작은 효과를 가정해 권장 N↑ |
-| `--one-sided` | 단측검정 기준으로 사이징 (상관·평균차에만 적용, ΔR²/F는 무관) |
+| `--one-sided` | 단측검정 기준으로 사이징 (상관·평균차·ANCOVA·비율·생존에 적용; 옴니버스 F·ΔR²는 무관) |
 | `--n-tests K` | 아이디어당 주요 비교 K회 → alpha/K (Bonferroni)로 표본수·검정력 재계산 |
 | `--repeats M` / `--icc RHO` | 피험자당 반복 관측 M회, 급내상관 RHO → 설계효과 보정 |
 | `--max-n N` | 현실적으로 모집 가능한 최대 표본수 → 초과 아이디어에 "도달 불가" 경고 |
@@ -162,9 +166,16 @@ study,name,modality,n,variables,notes
 - 헤더는 한/영 별칭을 인식합니다: `modality`/`모달리티`/`종류`, `n`/`표본수`, `variables`/`변수`,
   `sampling_hz`/`샘플링`, `name`/`이름`, `notes`/`비고`, `study`/`연구명`. **`modality` 열만 필수.**
 - 한 셀에 여러 변수는 **`;` 또는 `|`** 로 구분합니다(쉼표는 CSV 구분자라 사용 불가).
+- **열 구분자(field separator)는 자동으로 알아냅니다** — 쉼표뿐 아니라 **세미콜론(`;`)·탭·
+  파이프(`|`)** 로 저장된 파일도 그대로 읽습니다. 엑셀은 OS의 목록 구분자 설정에 따라 `;`로
+  내보내는 일이 흔한데, 예전에는 이런 파일이 "`modality` 열이 필요합니다"라는 엉뚱한 오류로
+  거부됐습니다. 쉼표가 아닌 구분자를 쓰면 리포트 경고에 표시됩니다.
+  판정은 **헤더 행에서 `modality` 열이 실제로 잡히는 구분자**를 고르고, 동점이면 쉼표가
+  우선입니다 — 그래서 셀 안의 `|`(변수 구분)나 따옴표 안의 쉼표에 속지 않습니다.
+  `.tsv` 확장자는 탭으로 고정입니다.
 - `study` 열의 첫 값이 연구명이 됩니다(없으면 파일명). 빈 `n`/`variables` 셀은 "미제공"으로 처리.
-- 인코딩은 UTF-8을 권장하지만, 엑셀에서 자주 나오는 **CP949/EUC-KR** 파일도 자동 감지해
-  읽습니다(경고 표시). `#`로 시작하는 줄과 빈 줄은 건너뜁니다.
+- 인코딩은 UTF-8을 권장하지만, 엑셀에서 자주 나오는 **CP949/EUC-KR**(및 UTF-16 "유니코드
+  텍스트") 파일도 자동 감지해 읽습니다(경고 표시). `#`로 시작하는 줄과 빈 줄은 건너뜁니다.
 
 ### 현재 표본의 검정력 (신규)
 
@@ -222,11 +233,17 @@ paperforge --list-templates --templates examples/clinical_pack.json
 ```
 
 - `effect.type` 은 `correlation`(`r`) / `two_group`(`d`, 선택 `allocation`) /
-  `paired`(`d`) / `regression`(`f2`, 선택 `k`) /
+  `paired`(`d`) / `anova`(`f`, `k_groups`) /
+  `ancova`(`d`, 선택 `r_covariate`·`k_covariates`·`allocation`) /
+  `regression`(`f2`, 선택 `k`) /
   `regression_change`(`f2`, `k_tested`, `k_control`) /
   `two_proportion`(`p1`, `p2`, 선택 `allocation`) /
   `survival`(`hr`, `event_rate`, 선택 `allocation`) / `exploratory` 중 하나입니다
-  (아래 "임상 종점" 절 참고).
+  (아래 "임상 종점"·"다군 설계(ANOVA)와 기저값 보정(ANCOVA)" 절 참고).
+- 템플릿에는 **`design` 필드가 두 개**입니다: 최상위의 `design`은 리포트에 그대로
+  찍히는 자유 문구이고, 표본수 계산을 바꾸는 스위치는 **`effect` 안의 `design`**입니다.
+  비열등성 설계는 아래 절대로 `effect` 안에 넣어야 합니다(최상위에 적으면 우월성 기준으로
+  계산되며, 이 경우 리포트 경고에 그 사실이 표시됩니다).
 - 모달리티는 문서화된 별칭만 허용합니다 — 오타는 **로드 시점에 실패**합니다(조용히 매칭되지
   않는 템플릿이 생기지 않도록).
 - 내장 템플릿과 `id`가 같으면 **그 자리에서 교체**됩니다(효과크기 가정만 우리 랩 값으로
@@ -267,6 +284,65 @@ paperforge examples/clinical_manifest.json --templates examples/clinical_pack.js
   단순 곱셈이 아니라는 점이 중요합니다.
 - 비례위험이 깨지거나(위험 교차) 기대빈도가 5 미만인 칸이 있으면 각각 RMST·Fisher 정확검정을
   권하는 주석이 함께 나갑니다.
+
+### 다군 설계(ANOVA)와 기저값 보정(ANCOVA) (신규)
+
+임상 1차 종점이 연속형일 때 실제로 쓰이는 두 설계입니다. 둘 다 2군 t검정으로 우회 계산하면
+표본수가 틀립니다 — 한쪽은 **모자라게**, 다른 쪽은 **과하게**.
+
+| 설계 | `effect` 스펙 | 사용 공식 | 검산값 |
+|------|---------------|-----------|--------|
+| 용량-반응 등 k군 비교 | `{"type":"anova","f":0.25,"k_groups":3}` | 비중심 F 옴니버스 (분자 df = k−1, λ = f²N) | f=0.25 → **총 159명(군당 53명)**, k=4면 180, k=5면 200 |
+| 기저값 보정 2군 비교 | `{"type":"ancova","d":0.40,"r_covariate":0.60,"k_covariates":1}` | Borm 등(2007): (1−ρ²) 분산 감소 + 공변량 자유도 보정 | d=0.40·ρ=0.60 → **총 128명**(보정 없으면 198명) |
+
+- **ANOVA**: 옴니버스 F는 분자 자유도를 k−1개 쓰므로, 같은 f라도 군이 늘면 N이 늘어납니다
+  (159 → 180 → 200). 값은 G*Power "ANOVA: Fixed effects, omnibus, one-way"와 일치하며,
+  군이 균형을 이루도록 **k의 배수로 올림**합니다. 옴니버스는 "어느 두 군이 다른지"를 말해
+  주지 않으므로, 사후 쌍별 비교를 계획한다면 `--n-tests` 로 그 횟수를 함께 넣으세요.
+  탐지가능 최소효과는 Cohen's f로 표시됩니다(`f≥0.20`; 0.10/0.25/0.40 = 작음/중간/큼).
+- **ANCOVA**: `d` 는 **보정 전** 표준화 평균차이고, `r_covariate`(ρ)는 공변량(대개 종점의
+  기저값)과 종점의 상관입니다. ρ는 효과를 키우는 게 아니라 같은 효과를 더 정밀하게 추정하게
+  해 주며, 잔차분산이 (1−ρ²)배로 줄어 필요 N이 그만큼 감소합니다. ρ=0이면 2군 t검정 결과에
+  공변량 자유도(`k_covariates + 1`명)만 더한 값이 나옵니다 — 검산하기 쉬운 성질입니다.
+  생성되는 프로토콜 문장은 **보정하지 않았을 때의 N도 함께** 적고, 이 감소를 주장하려면
+  ANCOVA를 사전에 분석계획서의 일차 분석으로 명시해야 한다는 단서를 붙입니다.
+- ρ를 과대평가하면 표본이 부족해집니다(ρ=0.6 대신 실제 0.3이면 필요 N이 약 1.4배). 파일럿의
+  기저-종점 상관을 넣고, `--effect-scale` 로 함께 확인하세요.
+- 두 설계 모두 **표본 단위가 피험자**이므로 `--repeats/--icc` 로 나눠지지 않습니다
+  (한 사람을 3번 재도 시험군이 늘지는 않습니다).
+
+바로 실행해 볼 수 있는 템플릿이 예시 팩에 들어 있습니다
+(`dose_ranging_omnibus`, `baseline_adjusted_endpoint`):
+
+```bash
+paperforge examples/clinical_manifest.json --templates examples/clinical_pack.json --no-builtin
+```
+
+### 비열등성(non-inferiority) 설계
+
+"더 좋다"가 아니라 "정해 둔 마진보다 나쁘지는 않다"를 보이는 설계입니다. 귀무가설이
+0이 아니라 **마진**이고, 관례상 **단측 α/2**로 검정하므로 우월성 공식으로 계산하면
+표본수가 크게 틀립니다. `effect` **안에** `"design": "noninferiority"` 와 해당 마진 키를
+넣으면 이 공식으로 계산됩니다.
+
+| 종점 | `effect` 스펙 | 검산값(α=0.05, power=0.80) |
+|------|---------------|---------------------------|
+| 연속 | `{"type":"two_group","design":"noninferiority","d":0.0,"margin_d":0.30}` | 총 **349명** |
+| 이분 | `{"type":"two_proportion","design":"noninferiority","p1":0.70,"p2":0.70,"margin":0.10,"higher_is_better":true}` | 총 **660명** |
+| 시간-사건 | `{"type":"survival","design":"noninferiority","hr":1.0,"margin_hr":1.30,"event_rate":0.60}` | **457 사건** · 등록 **762명** |
+
+- `d`/`p2`/`hr` 는 **가정한 실제 차이**입니다. 관례적 계획값은 "두 군이 같다"(d=0,
+  p2=p1, hr=1.0)이며, 불리한 쪽으로 두면 마진을 갉아먹어 표본이 늘어납니다.
+- `higher_is_better` 는 종점의 방향입니다(반응률이면 true, AE 발생률이면 false).
+- 마진이 실제 차이만큼(또는 그보다) 작으면 비열등성을 보일 수 없으므로 **로드 시점에
+  거부**됩니다.
+- `--one-sided` 는 적용되지 않습니다 — NI는 이미 단측 α/2 규약으로 계산됩니다
+  (생성되는 프로토콜 문장에 "단측 유의수준 α=0.025(양측 0.05 상당)"로 명시됩니다).
+- `--effect-scale` 은 **마진**을 움직입니다(NI에서 계획 회의가 다투는 값이 마진이므로).
+  `<1`이면 더 엄격한 마진 → 더 큰 N.
+- `anova`·`ancova` 는 "임상적으로 무의미할 만큼만 나쁘다"가 정의되지 않아 NI를 선언하면
+  **로드 시점에 실패**합니다.
+- 예시 템플릿: `examples/clinical_pack.json` 의 `ni_response_rate`.
 
 ### 표본수 산출 근거 문장(프로토콜/IRB) (신규)
 

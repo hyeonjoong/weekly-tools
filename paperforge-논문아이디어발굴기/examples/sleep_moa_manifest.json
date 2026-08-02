@@ -1,5 +1,5 @@
 {
-  "study": "수면 MoA 코호트 (예시 데이터)",
+  "study": "수면 MoA 코호트 (예시 데이터 — 실제 참가자 데이터가 아닙니다)",
   "datasets": [
     {
       "name": "MoA EEG",
