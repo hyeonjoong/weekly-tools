@@ -34,7 +34,8 @@ __all__ = ["normal_cdf", "wilcoxon_signed_rank", "paired_summary",
            "wilcoxon_ci", "holm_adjust", "benjamini_hochberg",
            "mannwhitney_null_counts", "mann_whitney_u", "pairwise_differences",
            "hodges_lehmann_2sample", "mann_whitney_ci", "unpaired_summary",
-           "inversion_counts", "mann_kendall"]
+           "inversion_counts", "mann_kendall", "betainc", "student_t_cdf",
+           "student_t_sf2", "student_t_ppf", "pearson_r", "ols_slope_test"]
 
 # 정확 검정을 쓰는 최대 표본 수. n=25 → 2^25 경우의 수를 DP로 세지만 상태
 # 공간은 n(n+1)/2+1 = 326 개뿐이라 즉시 계산됩니다.
@@ -297,6 +298,174 @@ def wilcoxon_ci(diffs: Sequence[float], alpha: float = 0.05) -> Dict[str, float]
     out["ci_high"] = walsh[m - 1 - k]
     out["ci_k"] = k
     out["ci_method"] = method
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# 분포 함수 — Student t (방법비교/Bland–Altman 신뢰구간용)
+#
+# 여기서만 모수적(정규 이론) 구간을 씁니다. 짝지은/독립 2군 검정은 비모수인데
+# Bland–Altman 의 편의(bias) 신뢰구간과 비례편의 회귀 검정은 정의 자체가 정규
+# 이론이라, 원 논문(Bland & Altman 1986/1999)과 같은 식을 그대로 씁니다.
+# 표본이 작을 때 z 대신 t 를 쓰는 것이 원 논문 권고이자 실제로 중요합니다
+# (n=10 이면 t=2.262 vs z=1.96 — 구간이 15% 좁게 나와 과신하게 됩니다).
+# --------------------------------------------------------------------------- #
+def _betacf(a: float, b: float, x: float) -> float:
+    """정칙 불완전베타의 연분수 (Lentz 알고리즘, Numerical Recipes 형태)."""
+    tiny = 1e-30
+    qab, qap, qam = a + b, a + 1.0, a - 1.0
+    c = 1.0
+    d = 1.0 - qab * x / qap
+    if abs(d) < tiny:
+        d = tiny
+    d = 1.0 / d
+    h = d
+    for m in range(1, 301):
+        m2 = 2 * m
+        aa = m * (b - m) * x / ((qam + m2) * (a + m2))
+        d = 1.0 + aa * d
+        if abs(d) < tiny:
+            d = tiny
+        c = 1.0 + aa / c
+        if abs(c) < tiny:
+            c = tiny
+        d = 1.0 / d
+        h *= d * c
+        aa = -(a + m) * (qab + m) * x / ((a + m2) * (qap + m2))
+        d = 1.0 + aa * d
+        if abs(d) < tiny:
+            d = tiny
+        c = 1.0 + aa / c
+        if abs(c) < tiny:
+            c = tiny
+        d = 1.0 / d
+        delta = d * c
+        h *= delta
+        if abs(delta - 1.0) < 3e-16:
+            break
+    return h
+
+
+def betainc(a: float, b: float, x: float) -> float:
+    """정칙 불완전베타 함수 I_x(a, b). a,b>0, 0≤x≤1."""
+    if not (a > 0.0 and b > 0.0):
+        raise ValueError("betainc: a와 b는 양수여야 합니다.")
+    if x <= 0.0:
+        return 0.0
+    if x >= 1.0:
+        return 1.0
+    lbeta = math.lgamma(a + b) - math.lgamma(a) - math.lgamma(b)
+    front = math.exp(lbeta + a * math.log(x) + b * math.log1p(-x))
+    if x < (a + 1.0) / (a + b + 2.0):
+        return front * _betacf(a, b, x) / a
+    return 1.0 - front * _betacf(b, a, 1.0 - x) / b
+
+
+def student_t_cdf(t: float, df: float) -> float:
+    """Student t 분포의 누적분포 P(T ≤ t)."""
+    if df <= 0:
+        raise ValueError("student_t_cdf: 자유도는 양수여야 합니다.")
+    if t != t:
+        return float("nan")
+    if math.isinf(t):
+        return 1.0 if t > 0 else 0.0
+    x = df / (df + t * t)
+    tail = 0.5 * betainc(0.5 * df, 0.5, x)
+    return tail if t <= 0.0 else 1.0 - tail
+
+
+def student_t_sf2(t: float, df: float) -> float:
+    """양측 p값 = P(|T| ≥ |t|)."""
+    if t != t or df <= 0:
+        return float("nan")
+    return 2.0 * (1.0 - student_t_cdf(abs(t), df))
+
+
+def student_t_ppf(p: float, df: float) -> float:
+    """t 분위수 — cdf 를 이분법으로 역산 (표준 라이브러리만).
+
+    구간을 정규 근사에서 출발해 넓혀 잡고 100회 이분하면 배정도 한계까지
+    수렴합니다. scipy 없이도 t 임계값이 필요한 곳(Bland–Altman CI)에 씁니다.
+    """
+    if not (0.0 < p < 1.0):
+        raise ValueError("student_t_ppf: p는 (0,1) 이어야 합니다.")
+    if df <= 0:
+        raise ValueError("student_t_ppf: 자유도는 양수여야 합니다.")
+    lo, hi = -1.0, 1.0
+    for _ in range(200):
+        if student_t_cdf(lo, df) < p:
+            break
+        lo *= 2.0
+    for _ in range(200):
+        if student_t_cdf(hi, df) > p:
+            break
+        hi *= 2.0
+    for _ in range(200):
+        mid = 0.5 * (lo + hi)
+        if student_t_cdf(mid, df) < p:
+            lo = mid
+        else:
+            hi = mid
+        if hi - lo < 1e-12 * max(1.0, abs(mid)):
+            break
+    return 0.5 * (lo + hi)
+
+
+def pearson_r(x: Sequence[float], y: Sequence[float]) -> float:
+    """Pearson 상관계수. 표준편차가 0이면 정의되지 않으므로 NaN."""
+    n = len(x)
+    if n != len(y) or n < 2:
+        return float("nan")
+    mx, my = sum(x) / n, sum(y) / n
+    sxy = sum((a - mx) * (b - my) for a, b in zip(x, y))
+    sxx = sum((a - mx) ** 2 for a in x)
+    syy = sum((b - my) ** 2 for b in y)
+    if sxx <= 0.0 or syy <= 0.0:
+        return float("nan")
+    return sxy / math.sqrt(sxx * syy)
+
+
+def ols_slope_test(x: Sequence[float], y: Sequence[float]) -> Dict[str, float]:
+    """y = a + b·x 최소제곱 적합과 기울기의 t 검정 (H0: b = 0).
+
+    Bland–Altman 의 **비례편의(proportional bias)** 검정에 씁니다: 차이(y)를
+    두 방법의 평균(x)에 회귀했을 때 기울기가 0과 다르면, 편의가 측정값 크기에
+    따라 달라진다는 뜻이라 단일 LoA 로 요약하면 안 됩니다.
+
+    반환: slope, intercept, se_slope, t, p, df, r2. n<3 이면 전부 NaN.
+    """
+    nan = float("nan")
+    n = len(x)
+    out = {"slope": nan, "intercept": nan, "se_slope": nan, "t": nan,
+           "p": nan, "df": 0, "r2": nan}
+    if n != len(y) or n < 3:
+        return out
+    mx, my = sum(x) / n, sum(y) / n
+    sxx = sum((a - mx) ** 2 for a in x)
+    if sxx <= 0.0:            # x가 전부 같은 값 → 기울기 정의 불가
+        return out
+    sxy = sum((a - mx) * (b - my) for a, b in zip(x, y))
+    slope = sxy / sxx
+    intercept = my - slope * mx
+    resid = [b - (intercept + slope * a) for a, b in zip(x, y)]
+    sse = sum(r * r for r in resid)
+    df = n - 2
+    syy = sum((b - my) ** 2 for b in y)
+    out["slope"] = slope
+    out["intercept"] = intercept
+    out["df"] = df
+    out["r2"] = (1.0 - sse / syy) if syy > 0.0 else nan
+    if sse <= 0.0:
+        # 잔차가 0 — 완전 적합. 표준오차 0 은 t=±inf 를 뜻하므로 p=0 으로 두되
+        # 기울기가 정확히 0 이면 검정할 것이 없습니다.
+        out["se_slope"] = 0.0
+        out["t"] = 0.0 if slope == 0.0 else math.copysign(float("inf"), slope)
+        out["p"] = 1.0 if slope == 0.0 else 0.0
+        return out
+    se = math.sqrt((sse / df) / sxx)
+    out["se_slope"] = se
+    out["t"] = slope / se
+    out["p"] = student_t_sf2(slope / se, df)
     return out
 
 
