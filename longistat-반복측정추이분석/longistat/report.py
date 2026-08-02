@@ -352,6 +352,37 @@ def _rows_sensitivity(a: Analysis) -> List[List[str]]:
             for r in rows]
 
 
+_TIP_STATUS = {
+    "tipped": "뒤집힘",
+    "robust": "견고",
+    "already_ns": "이미 비유의",
+    "no_imputed": "대체값 없음",
+}
+
+
+def _rows_tipping(a: Analysis) -> List[List[str]]:
+    if a.tipping is None:
+        return []
+    order = {t: j for j, t in enumerate(a.panel.times)}
+    rows = sorted(a.tipping.rows,
+                  key=lambda r: (order.get(r.time, len(order)), r.contrast))
+    out: List[List[str]] = []
+    for r in rows:
+        if r.status == "tipped":
+            delta = fmt(r.delta, 3)
+            scale = ("—" if r.per_mcid is None and r.per_sd is None else
+                     (f"MCID×{r.per_mcid:.2f}" if r.per_mcid is not None
+                      else f"SD×{r.per_sd:.2f}"))
+        elif r.status == "robust":
+            delta, scale = f"> {fmt(r.searched_to, 3)}", "—"
+        else:
+            delta, scale = "—", "—"
+        out.append([r.time, r.contrast, r.arm, str(r.n_imputed),
+                    fmt(r.estimate0), fmt_p_cell(r.p0), delta, scale,
+                    _TIP_STATUS.get(r.status, r.status)])
+    return out
+
+
 def _rows_responder(a: Analysis) -> List[List[str]]:
     if a.responder is None:
         return []
@@ -900,6 +931,28 @@ def render_text(a: Analysis, full: bool = False, brief: bool = False) -> str:
                 "권장 트랙(순위검정) 결과이므로 '관측값' 열과 숫자가 다릅니다.")
         for note in s.notes:
             add(f"    ※ {note}")
+    if a.tipping is not None:
+        t = a.tipping
+        add("")
+        add("  [5d] 기울점(tipping point) — 탈락자가 얼마나 더 나빴어야 "
+            "결론이 바뀌는가")
+        add("    δ* = 대체된 값에만 더하는 '악화 벌점'. 이만큼 나빴다면 그 "
+            "시점의 유의성이 사라집니다.")
+        L.extend("    " + ln for ln in table(
+            ["시점", "대비" if t.grouped else "그룹", "벌점 적용 군", "대체 셀",
+             "δ=0 추정치", "δ=0 p", "δ*", "환산", "판정"],
+            _rows_tipping(a),
+            ["left", "left", "left", "right", "right", "right", "right",
+             "left", "left"]))
+        fragile = t.fragile()
+        for line in fragile:
+            add(f"    ⚠ {line}")
+        if not fragile and any(r.status in ("tipped", "robust")
+                               for r in t.rows):
+            add("    → 임상적으로 무시할 만한 크기의 가정 위배로는 결론이 "
+                "바뀌지 않습니다.")
+        for note in t.notes:
+            add(f"    ※ {note}")
     add("")
 
     if not brief:
@@ -1083,6 +1136,14 @@ def render_markdown(a: Analysis, full: bool = False, brief: bool = False) -> str
           ["시점", "대비" if a.sensitivity and a.sensitivity.grouped else "그룹",
            "분석", "n", "대체 셀", "추정치", "95% CI", "p"],
           _rows_sensitivity(a))
+    block("기울점 (tipping point, δ* = 대체값에만 더하는 악화 벌점)",
+          ["시점", "대비" if a.tipping and a.tipping.grouped else "그룹",
+           "벌점 적용 군", "대체 셀", "δ=0 추정치", "δ=0 p", "δ*", "환산", "판정"],
+          _rows_tipping(a))
+    if a.tipping is not None:
+        for note in a.tipping.notes:
+            add(f"> {note}")
+        add("")
     if not brief:
         block("시점 간 사후비교",
               ["그룹", "비교", "n", "평균차", "95% CI", "raw p", "보정 p",
@@ -1157,6 +1218,7 @@ def render_json(a: Analysis) -> str:
         "mmrm_error": a.mmrm_error,
         "trend": _clean(a.trend),
         "sensitivity": _clean(a.sensitivity),
+        "tipping": _clean(a.tipping),
         "responder": _clean(a.responder),
         "rci": _clean(a.rci),
         "apa": apa_sentences(a),
@@ -1298,6 +1360,21 @@ def render_csv(a: Analysis) -> str:
             row("sensitivity", "parametric", r.contrast, r.time,
                 KIND_LABEL[r.kind], r.n, r.estimate, "", r.ci_low, r.ci_high,
                 r.imputed, r.p, "", "", "", "")
+    if a.tipping is not None:
+        # Two rows per contrast rather than one, so every value lands in a
+        # column that means what its header says: the δ=0 state is an estimate
+        # with a p-value, and δ* is a separate quantity with its own.
+        for t in a.tipping.rows:
+            row("tipping_delta0", "parametric", t.contrast, t.time,
+                f"MAR 대체 (벌점 적용 예정: {t.arm})", t.n_imputed, t.estimate0,
+                "", "", "", "", t.p0, "", "", "", "")
+            row("tipping_point", "parametric", t.contrast, t.time,
+                f"δ* — {_TIP_STATUS.get(t.status, t.status)} "
+                f"(탐색 상한 {t.searched_to:.4g})", t.n_imputed,
+                t.delta if t.status in ("tipped", "already_ns") else "",
+                "", "", "", t.estimate_at_delta, t.p_at_delta, "",
+                t.per_mcid if t.per_mcid is not None else "",
+                t.per_sd if t.per_sd is not None else "", "")
     if a.responder is not None:
         for x in a.responder.rates:
             row("responder_rate", "", x.group, x.time, "rate", x.n, x.rate, "",

@@ -23,7 +23,8 @@ from typing import Dict, List, Optional, Sequence
 
 from . import __version__
 from .analyze import Options, analyze
-from .dataio import DataError, clean_label, load_long, load_wide
+from .dataio import (DataError, clean_label, is_xlsx, load_long,
+                     load_wide, sheet_names)
 from .report import render_csv, render_json, render_markdown, render_text
 
 __all__ = ["main", "build_parser"]
@@ -33,6 +34,7 @@ _EPILOG = """\
   longistat isi.csv --id id --time visit --value isi
   longistat isi.csv --id id --time visit --value isi --group arm --mcid 6 --direction lower
   longistat wide.csv --wide --id id --columns base,wk4,wk8 --format json -o out.json
+  longistat 증례기록.xlsx --sheet 원자료 --id id --time visit --value isi --group arm
 
 출력 해석
   · [1] 결측     = CONSORT 흐름도에 넣을 군별·시점별 관측 수와 탈락 패턴
@@ -44,6 +46,8 @@ _EPILOG = """\
                    Kenward–Roger 가 아닌 근사)
   · [5] 변화량   = 기저 대비 변화 + 군간 차이 + 기저값 보정(ANCOVA)
                    + 결측 대체 민감도(LOCF·BOCF)
+  · [5d] 기울점  = 탈락자가 δ 만큼 더 나빴다고 가정했을 때 결론이 뒤집히는
+                   최소 δ* (MNAR 스트레스 검사, ICH E9(R1))
   · [8] 반응자   = MCID 이상 좋아진 사람의 비율과 군간 차이(RD/RR/OR/NNT)
   · [9] RCI      = 개인 수준에서 '측정오차보다 큰 변화'인지 (Jacobson-Truax)
 
@@ -61,7 +65,7 @@ def build_parser() -> argparse.ArgumentParser:
                     "변화량·반응자(MCID)·RCI·논문용 문장.",
         epilog=_EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("csv", help="입력 CSV 파일 경로")
+    p.add_argument("csv", help="입력 파일 경로 (CSV/TSV 또는 엑셀 .xlsx)")
 
     fmt = p.add_argument_group("자료 형식")
     fmt.add_argument("--wide", action="store_true",
@@ -77,7 +81,13 @@ def build_parser() -> argparse.ArgumentParser:
                      help="(긴 형식) 시점 순서를 직접 지정 (쉼표 구분). "
                           "지정하지 않으면 숫자면 숫자순, 아니면 파일 등장 순서")
     fmt.add_argument("--baseline", help="기준(기저) 시점 이름 (기본: 첫 시점)")
-    fmt.add_argument("--delimiter", help="구분자 직접 지정 (기본: 자동 인식)")
+    fmt.add_argument("--delimiter", help="구분자 직접 지정 (기본: 자동 인식). "
+                                         "CSV 전용 — 엑셀 파일에는 쓰지 않습니다")
+    fmt.add_argument("--sheet", metavar="이름|번호",
+                     help="(엑셀 .xlsx) 읽을 시트 이름 또는 1부터 세는 번호 "
+                          "(기본: 첫 번째 보이는 시트)")
+    fmt.add_argument("--list-sheets", action="store_true",
+                     help="(엑셀 .xlsx) 시트 이름만 출력하고 종료")
     fmt.add_argument("--covariate", metavar="나이,성별,기관",
                      help="대상마다 값이 하나인 공변량 열 (쉼표 구분). "
                           "[4c] MMRM 과 [5b] ANCOVA 의 보정에 함께 넣습니다 — "
@@ -125,6 +135,13 @@ def build_parser() -> argparse.ArgumentParser:
                       metavar="auto|none|locf,bocf",
                       help="결측 대체 민감도 분석 (기본 auto: 결측이 있으면 "
                            "LOCF·BOCF 를 함께 계산해 결론이 흔들리는지 확인)")
+    stat.add_argument("--no-tipping", action="store_true",
+                      help="[5d] 기울점(tipping point) 구획을 생략. 기본은 수행 — "
+                           "'탈락자가 얼마나 더 나빴어야 결론이 바뀌는가(δ*)'를 "
+                           "계산하는 MNAR 스트레스 검사입니다 (ICH E9(R1))")
+    stat.add_argument("--tipping-max", type=float, metavar="점수",
+                      help="기울점 탐색의 δ 상한 (기본: 관측 변화량 SD의 4배). "
+                           "'견고'로 나왔는데 더 극단까지 확인하고 싶을 때 올리세요")
     stat.add_argument("--no-mmrm", action="store_true",
                       help="[4c] MMRM(혼합모형 반복측정, REML·비구조화 공분산) "
                            "구획을 생략. 기본은 수행 — 부분 관측 대상을 버리지 "
@@ -296,6 +313,15 @@ def _validate(args: argparse.Namespace) -> None:
     if args.no_trend and (args.time_values or args.time_unit):
         raise DataError("--no-trend 와 --time-values/--time-unit 은 함께 쓸 수 "
                         "없습니다 (추세를 끄면 간격이 쓰이지 않습니다).")
+    if args.tipping_max is not None:
+        _finite(args.tipping_max, "--tipping-max")
+        if args.tipping_max <= 0:
+            raise DataError("--tipping-max 는 0보다 커야 합니다.")
+        if args.no_tipping:
+            raise DataError("--no-tipping 과 --tipping-max 는 함께 쓸 수 "
+                            "없습니다 (기울점을 끄면 상한이 쓰이지 않습니다).")
+    if args.sheet is not None and not args.sheet.strip():
+        raise DataError("--sheet 에 시트 이름이나 번호를 적으세요.")
     if args.categorical and not args.covariate:
         raise DataError("--categorical 은 --covariate 와 함께 쓰세요 "
                         "(공변량 중 어느 것을 범주로 볼지 지정하는 옵션입니다).")
@@ -394,6 +420,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
+        if args.list_sheets:
+            if not is_xlsx(args.csv):
+                raise DataError(
+                    "--list-sheets 는 엑셀(.xlsx) 파일에만 쓸 수 있습니다.")
+            for i, name in enumerate(sheet_names(args.csv), 1):
+                print(f"{i}. {name}")
+            return 0
         _validate(args)
         notes: List[str] = []
         cov_cols = _split_names(args.covariate, "--covariate")
@@ -405,7 +438,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                               delimiter=args.delimiter,
                               duplicates=args.duplicates,
                               covariate_cols=cov_cols,
-                              categorical_cols=cat_cols, notes=notes)
+                              categorical_cols=cat_cols, notes=notes,
+                              sheet=args.sheet)
         else:
             order = ([t.strip() for t in args.time_order.split(",")]
                      if args.time_order else None)
@@ -413,7 +447,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                               group_col=args.group, delimiter=args.delimiter,
                               time_order=order, duplicates=args.duplicates,
                               covariate_cols=cov_cols,
-                              categorical_cols=cat_cols, notes=notes)
+                              categorical_cols=cat_cols, notes=notes,
+                              sheet=args.sheet)
         opt = Options(
             alpha=args.alpha, alpha_norm=args.alpha_norm,
             correction=args.correction, sphericity=args.sphericity,
@@ -429,7 +464,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             time_values=_parse_time_values(args.time_values),
             time_unit=(args.time_unit or "").strip(),
             trend=not args.no_trend, sensitivity=args.sensitivity,
-            mmrm=not args.no_mmrm)
+            mmrm=not args.no_mmrm, tipping=not args.no_tipping,
+            tipping_max=args.tipping_max)
         result = analyze(panel, opt)
         if args.format == "json":
             text = render_json(result)

@@ -24,7 +24,8 @@ __version__ = "1.0.0"
 
 from .analyze import Analysis, Options, analyze
 from .anova import RMAnovaResult, rm_anova
-from .dataio import DataError, Panel, load_long, load_wide
+from .dataio import (DataError, Panel, load_long, load_wide,
+                     sheet_names)
 from .describe import describe, profile_missing
 from .mmrm import MMRMContrast, MMRMLsMean, MMRMResult, mmrm_analysis
 from .nonparam import friedman
@@ -32,18 +33,23 @@ from .report import render_csv, render_json, render_text
 from .responder import rci_analysis, responder_analysis
 from .sensitivity import (SensitivityResult, impute_panel,
                           sensitivity_analysis)
+from .tipping import (TippingResult, TippingRow, mar_impute,
+                      tipping_analysis)
 from .trend import (SlopeRow, TrendResult, orthogonal_polynomials,
                     trend_analysis)
+from .xlsx import XlsxError, is_xlsx, read_xlsx
 
 __all__ = [
     "__version__",
     "Analysis", "Options", "analyze",
     "Panel", "DataError", "load_long", "load_wide",
+    "sheet_names", "is_xlsx", "read_xlsx", "XlsxError",
     "RMAnovaResult", "rm_anova",
     "describe", "profile_missing", "friedman",
     "MMRMResult", "MMRMLsMean", "MMRMContrast", "mmrm_analysis",
     "responder_analysis", "rci_analysis",
     "TrendResult", "SlopeRow", "trend_analysis", "orthogonal_polynomials",
     "SensitivityResult", "sensitivity_analysis", "impute_panel",
+    "TippingResult", "TippingRow", "tipping_analysis", "mar_impute",
     "render_text", "render_json", "render_csv",
 ]

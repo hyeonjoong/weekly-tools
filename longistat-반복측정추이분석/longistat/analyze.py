@@ -26,6 +26,7 @@ from .posthoc import (ChangeAnalysis, GroupComparison, PairComparison,
                       between_at_time, change_analysis, pairwise_times)
 from .responder import RCIResult, ResponderResult, rci_analysis, responder_analysis
 from .sensitivity import SensitivityResult, sensitivity_analysis
+from .tipping import TippingResult, tipping_analysis
 from .trend import TrendResult, trend_analysis
 
 __all__ = ["Analysis", "NormalityRow", "Options", "analyze"]
@@ -67,6 +68,8 @@ class Options:
     trend: bool = True                          # polynomial trend contrasts
     sensitivity: str = "auto"                   # auto | none | locf,bocf
     mmrm: bool = True                           # REML mixed model (MAR-valid),...
+    tipping: bool = True                        # delta-adjusted MNAR stress test
+    tipping_max: Optional[float] = None          # δ search ceiling (data units)
 
 
 @dataclass
@@ -90,6 +93,7 @@ class Analysis:
     mmrm_error: Optional[str]
     trend: Optional[TrendResult]
     sensitivity: Optional[SensitivityResult]
+    tipping: Optional[TippingResult]
     responder: Optional[ResponderResult]
     rci: Optional[RCIResult]
     recommended: str                       # "parametric" | "nonparametric"
@@ -355,6 +359,21 @@ def analyze(panel: Panel, options: Optional[Options] = None) -> Analysis:
                         " 확증적 분석이라면 MMRM(R mmrm·nlme, SAS PROC MIXED)을 "
                         "쓰세요.")))
 
+    # ---- tipping point: how far from MAR before the answer changes? -------
+    tipping: Optional[TippingResult] = None
+    if opt.tipping:
+        try:
+            tipping = tipping_analysis(panel, baseline, opt.alpha, opt.welch,
+                                       opt.mcid, opt.tipping_max)
+        except (ArithmeticError, ValueError) as exc:
+            warnings.append(f"기울점(tipping point) 분석을 수행하지 못했습니다: {exc}")
+        if tipping is not None:
+            fragile = tipping.fragile()
+            if fragile:
+                warnings.append(
+                    "결측 가정이 조금만 어긋나도 결론이 뒤집힙니다 (기울점 δ* 가 "
+                    "작음) — " + " / ".join(fragile))
+
     # ---- responder / RCI -------------------------------------------------
     responder: Optional[ResponderResult] = None
     rci: Optional[RCIResult] = None
@@ -471,7 +490,7 @@ def analyze(panel: Panel, options: Optional[Options] = None) -> Analysis:
         friedman=fried, pairwise_param=pair_param, pairwise_rank=pair_rank,
         between=between, change_param=change_param, change_rank=change_rank,
         ancova=ancova, mmrm=mmrm, mmrm_error=mmrm_error,
-        trend=trend, sensitivity=sens, responder=responder,
+        trend=trend, sensitivity=sens, tipping=tipping, responder=responder,
         rci=rci, recommended=recommended,
         recommendation_reason=reason, correction_used=correction_used,
         warnings=warnings)
