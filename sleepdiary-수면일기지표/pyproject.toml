@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sleepdiary"
+version = "0.1.0"
+description = "수면일기(sleep diary) CSV → 표준 수면지표 계산기 — Consensus Sleep Diary 정의로 TIB/SPT/TST/SE/SOL/WASO/기상후침대체류(TWAK)/입면시각/수면중앙시각을 계산하고, 자정을 넘는 시각은 원형(circular) 통계로 다루며, 대상자별→집단 2단계 집계(분석단위=사람)와 시기 간 대응표본 비교(t검정·Wilcoxon·Cohen's dz·신뢰구간), 논문용 문장·마크다운 표·JSON·밤별 CSV를 출력. 손으로 쓴 지저분한 임상 CSV(cp949/BOM/세미콜론/12시간제/한글 시각표기)를 그대로 읽고 무엇을 왜 제외했는지 보고합니다 (표준 라이브러리만)"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "hyeonjoong", email = "hyeonjoongk@gmail.com" }]
+keywords = ["sleep-diary", "sleep", "insomnia", "sleep-efficiency", "actigraphy",
+            "consensus-sleep-diary", "cbt-i", "chronotype", "midsleep",
+            "circular-statistics", "clinical", "pharma", "csv"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Medical Science Apps.",
+]
+
+# 외부 의존성 없음 — t분포·Wilcoxon 정확분포·원형통계까지 표준 라이브러리로 구현.
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+sleepdiary = "sleepdiary.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["sleepdiary*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

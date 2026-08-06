@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 
 MINUTES_PER_DAY = 24 * 60
@@ -19,6 +20,10 @@ _COMPACT = re.compile(r"^(\d{3,4})$")
 
 _AM_TOKENS = ("am", "a.m.", "오전", "새벽", "아침")
 _PM_TOKENS = ("pm", "p.m.", "오후", "저녁", "밤")
+# "11:15p" 처럼 한 글자로 끝나는 표기 (뒤에 다른 글자가 없을 때만)
+_BARE_MERIDIEM = re.compile(r"\d\s*([ap])\.?m?\.?\s*$")
+# "밤 12시", "새벽 12시" 는 정오가 아니라 자정을 뜻한다
+_MIDNIGHT_WORDS = ("밤", "새벽", "한밤")
 
 
 class TimeParseError(ValueError):
@@ -30,6 +35,14 @@ def _apply_meridiem(hour: int, text: str) -> int:
     low = text.lower()
     is_pm = any(tok in low for tok in _PM_TOKENS)
     is_am = any(tok in low for tok in _AM_TOKENS)
+    bare = _BARE_MERIDIEM.search(low)
+    if bare and not (is_pm or is_am):
+        is_pm = bare.group(1) == "p"
+        is_am = bare.group(1) == "a"
+    # 한국어 구어에서 "밤 12시"는 정오가 아니라 자정이다. 12시간제 규칙을
+    # 그대로 적용하면 12시간 어긋난 밤이 조용히 만들어진다.
+    if hour == 12 and any(word in text for word in _MIDNIGHT_WORDS):
+        return 0
     if is_pm and is_am:
         raise TimeParseError(f"오전/오후가 동시에 표기됨: {text!r}")
     if is_pm:
@@ -108,9 +121,14 @@ def parse_duration_minutes(value: str) -> float:
         return hours * 60.0 + mins
 
     try:
-        return float(text)
+        number = float(text)
     except ValueError as exc:
         raise TimeParseError(f"소요시간으로 해석할 수 없음: {value!r}") from exc
+    # float()은 "nan"/"inf"/"Infinity"도 받아들인다. 그대로 통과시키면
+    # 평균·SD가 전부 NaN이 되면서도 밤은 '유효'로 남는다.
+    if not math.isfinite(number):
+        raise TimeParseError(f"수가 아닌 값입니다: {value!r}")
+    return number
 
 
 def forward_minutes(start: float, end: float) -> float:
@@ -123,13 +141,17 @@ def forward_minutes(start: float, end: float) -> float:
 
 
 def fmt_clock(minute_of_day: float) -> str:
-    """자정 기준 분 → "HH:MM" (반올림)."""
+    """자정 기준 분 → "HH:MM" (반올림). 수가 아니면 "—"."""
+    if minute_of_day is None or not math.isfinite(minute_of_day):
+        return "—"
     total = int(round(minute_of_day)) % MINUTES_PER_DAY
     return f"{total // 60:02d}:{total % 60:02d}"
 
 
 def fmt_hm(minutes: float) -> str:
-    """분 → "7h 12m" 형태 (음수도 표기)."""
+    """분 → "7h 12m" 형태 (음수도 표기). 수가 아니면 "—"."""
+    if minutes is None or not math.isfinite(minutes):
+        return "—"
     sign = "-" if minutes < 0 else ""
     total = int(round(abs(minutes)))
     return f"{sign}{total // 60}h {total % 60:02d}m"
