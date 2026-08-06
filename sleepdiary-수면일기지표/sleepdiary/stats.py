@@ -67,6 +67,10 @@ def quantile(values: Sequence[float], q: float) -> float:
 
 _PERIOD = 1440.0
 
+# 결과벡터 R이 이보다 작으면 "평균 방향"도 "원형 SD"도 의미가 없다.
+# (완전 균등분포의 R은 0이고, 균등에 가까운 표본은 R ≈ 0.05 아래로 떨어진다.)
+R_FLOOR = 1e-3
+
 
 def _resultant(minutes: Sequence[float]) -> tuple[float, float]:
     """평균 방향(라디안)과 결과벡터 길이 R을 돌려준다."""
@@ -87,19 +91,36 @@ def circular_mean(minutes: Sequence[float]) -> float:
     if r < 1e-12:
         # 완전히 상쇄된 경우(예: 06:00과 18:00) 평균 방향이 정의되지 않는다.
         raise ValueError("원형 평균이 정의되지 않습니다 (값들이 정반대로 분산)")
-    return (ang * _PERIOD / (2 * math.pi)) % _PERIOD
+    value = (ang * _PERIOD / (2 * math.pi)) % _PERIOD
+    # ang이 -1e-14 같은 아주 작은 음수면 % 연산이 1440.0으로 올림된다.
+    # 계약(0 ≤ x < 1440)을 지키기 위해 되돌린다.
+    return 0.0 if value >= _PERIOD else value
 
 
 def circular_sd(minutes: Sequence[float]) -> Optional[float]:
     """원형 표준편차(분). sqrt(-2 ln R) 정의. n<2면 None.
 
     취침 중앙시각의 규칙성(불규칙할수록 큰 값) 지표로 쓴다.
+
+    주의: 이 정의는 n으로 나누는 **모집단** 표준편차에 대응한다. 값이 뭉쳐
+    있을 때 `sd()`(표본, n-1)보다 sqrt((n-1)/n) 배만큼 작게 나오며, 이는
+    원형통계의 관례를 따른 것이다 (Fisher, Statistical Analysis of
+    Circular Data, 1993).
+
+    값들이 시계 전체에 흩어져 결과벡터 R이 사실상 0이 되면(`R < R_FLOOR`)
+    이 통계량은 임의로 커져 "28시간" 같은 무의미한 수가 나온다. 그런
+    경우에는 수치를 지어내지 않고 None을 돌려준다. 참고로 하루가 완전히
+    균등하게 분포하면 약 416분(1440/√12)이므로, 그보다 큰 값은
+    "규칙적인 패턴이 사실상 없음"으로 읽어야 한다.
     """
     if len(minutes) < 2:
         return None
     _, r = _resultant(minutes)
-    r = min(max(r, 1e-12), 1.0)
-    return math.sqrt(-2.0 * math.log(r)) * _PERIOD / (2 * math.pi)
+    if r < R_FLOOR:
+        return None
+    r = min(r, 1.0)
+    # R=1(완전히 동일한 값)일 때 -2*log(1) = -0.0 이라 sqrt가 -0.0을 낸다.
+    return abs(math.sqrt(-2.0 * math.log(r))) * _PERIOD / (2 * math.pi)
 
 
 def circular_diff(a: float, b: float) -> float:
@@ -172,10 +193,23 @@ def student_t_sf(t: float, df: float) -> float:
 
 
 def t_ppf(p: float, df: float) -> float:
-    """t분포의 분위수 (이분법). 0<p<1."""
+    """t분포의 분위수 (이분법). 0<p<1.
+
+    구간을 고정폭(±1e4)으로 두면 자유도가 1이고 신뢰수준이 0.9999 같은
+    극단에서 분위수가 구간 밖에 있는데도 경계값을 조용히 돌려준다
+    (신뢰구간이 실제보다 훨씬 좁아 보인다). 그래서 실제로 p를 감쌀 때까지
+    구간을 넓힌 뒤 이분법을 돌린다.
+    """
     if not 0.0 < p < 1.0:
         raise ValueError("p는 0과 1 사이여야 합니다")
-    lo, hi = -1e4, 1e4
+    hi = 1.0
+    for _ in range(400):
+        if 1.0 - student_t_sf(hi, df) >= p and student_t_sf(-hi, df) >= 1.0 - p:
+            break
+        hi *= 4.0
+        if math.isinf(hi):
+            raise ValueError(f"t 분위수를 계산할 수 없습니다 (p={p}, df={df})")
+    lo = -hi
     for _ in range(200):
         mid = 0.5 * (lo + hi)
         if 1.0 - student_t_sf(mid, df) < p:
@@ -219,7 +253,10 @@ def paired_ttest(diffs: Sequence[float], conf: float = 0.95) -> PairedResult:
     """차이값 벡터에 대한 대응표본 t검정(양측) + 평균차 신뢰구간 + Cohen's dz.
 
     dz = 평균차 / 차이의 표준편차 (대응표본 효과크기).
-    차이의 분산이 0이면 t/p/dz는 None으로 둔다 (0으로 나누지 않는다).
+
+    차이의 분산이 0이면 t/p/dz뿐 아니라 **신뢰구간도 None**으로 둔다.
+    모든 대상자의 변화량이 똑같다는 것은 모평균에 대한 정보가 없다는 뜻이므로,
+    폭이 0인 구간을 돌려주면 확실성을 크게 과장하게 된다.
     """
     n = len(diffs)
     if n < 2:
@@ -228,7 +265,7 @@ def paired_ttest(diffs: Sequence[float], conf: float = 0.95) -> PairedResult:
     s = sd(diffs)
     df = n - 1
     if s is None or s == 0.0:
-        return PairedResult(n, md, s, 0.0, None, df, None, md, md, None)
+        return PairedResult(n, md, s, 0.0, None, df, None, None, None, None)
     se = s / math.sqrt(n)
     t = md / se
     p = 2.0 * student_t_sf(abs(t), df)
@@ -290,11 +327,20 @@ def wilcoxon_signed_rank(diffs: Sequence[float]) -> WilcoxonResult:
     """양측 Wilcoxon 부호순위검정.
 
     - 0인 차이는 제외한다 (scipy 기본 zero_method='wilcox'와 동일).
-    - 0/동점이 없고 남은 n ≤ 25면 정확분포, 아니면 동점보정 정규근사.
-    - 통계량은 min(R+, R-), 효과크기 r = |z| / sqrt(n_used) (정규근사일 때만).
+    - 0을 뺀 뒤 동점이 없고 남은 n ≤ 25면 정확분포, 아니면 동점보정 정규근사.
+    - 통계량은 min(R+, R-).
+    - 효과크기 r = |z| / sqrt(n_used). 여기서 n_used는 **쌍의 수**이다
+      (Rosenthal의 r을 관측치 수 2n으로 나누는 관례도 있으므로, 다른 값과
+      비교할 때는 어느 쪽인지 확인해야 한다).
+      정확분포를 쓸 때도 z는 정규근사식으로 따로 계산해 r을 채운다 —
+      그러지 않으면 우연히 동점이 하나 생겼는지에 따라 효과크기가 나왔다
+      안 나왔다 한다.
     """
-    nonzero = [d for d in diffs if d != 0.0]
-    n_zero = len(diffs) - len(nonzero)
+    # NaN은 d > 0 도 d < 0 도 아니어서 순위에는 안 들어가는데 n만 키운다
+    # (검정통계량의 기대값·분산이 틀어져 p가 조용히 잘못 나온다). 먼저 버린다.
+    finite = [d for d in diffs if math.isfinite(d)]
+    nonzero = [d for d in finite if d != 0.0]
+    n_zero = len(finite) - len(nonzero)
     n = len(nonzero)
     if n == 0:
         return WilcoxonResult(0, n_zero, None, None, "none", None, None)
@@ -305,11 +351,15 @@ def wilcoxon_signed_rank(diffs: Sequence[float]) -> WilcoxonResult:
     r_minus = math.fsum(r for r, d in zip(ranks, nonzero) if d < 0)
     stat = min(r_plus, r_minus)
 
+    mn = n * (n + 1) / 4.0
+
     has_ties = len(set(abs_vals)) != n
     if not has_ties and n <= 25:
-        return WilcoxonResult(n, n_zero, stat, _signed_rank_exact_p(stat, n), "exact", None, None)
+        # p는 정확분포로, z/r은 효과크기 보고용으로 정규근사에서 얻는다.
+        z_approx = (stat - mn) / math.sqrt(n * (n + 1) * (2 * n + 1) / 24.0)
+        return WilcoxonResult(n, n_zero, stat, _signed_rank_exact_p(stat, n),
+                              "exact", z_approx, abs(z_approx) / math.sqrt(n))
 
-    mn = n * (n + 1) / 4.0
     se_sq = n * (n + 1) * (2 * n + 1) / 24.0
     # 동점 보정: 같은 |d| 묶음 크기 t마다 (t^3 - t)/48 을 뺀다.
     tie_groups: dict[float, int] = {}
@@ -341,14 +391,17 @@ def summarize(values: Sequence[float]) -> dict:
 
 
 def mean_ci(values: Sequence[float], conf: float = 0.95) -> tuple[Optional[float], Optional[float]]:
-    """평균의 t 기반 신뢰구간. n<2면 (None, None)."""
+    """평균의 t 기반 신뢰구간. n<2이거나 분산이 0이면 (None, None).
+
+    분산이 0일 때 폭 0인 구간을 돌려주면 (예: 세 사람의 값이 모두 같을 때
+    "95% CI [7.0, 7.0]") 표본이 말해 주지 않는 확실성을 주장하게 된다.
+    """
     n = len(values)
     if n < 2:
         return (None, None)
     s = sd(values)
     if s is None or s == 0.0:
-        m = mean(values)
-        return (m, m)
+        return (None, None)
     se = s / math.sqrt(n)
     crit = t_ppf(0.5 + conf / 2.0, n - 1)
     m = mean(values)
