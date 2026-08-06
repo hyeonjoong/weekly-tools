@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "metapool"
-version = "1.0.0"
+version = "1.1.0"
 description = "메타분석 CLI — 효과크기 합성(고정·변량), 이질성·예측구간, 하위군, 민감도, 출판편향, 논문 문장 (외부 의존성 0)"
 readme = "README.md"
 requires-python = ">=3.9"

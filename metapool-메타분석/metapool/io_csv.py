@@ -12,7 +12,7 @@ import os
 import re
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from .effects import MEASURES, REQUIRED_COLUMNS
+from .effects import MEASURES, REQUIRED_COLUMNS, _clip, _strip_control
 
 __all__ = ["read_table", "detect_measure", "CANONICAL_ALIASES", "TableError", "canonical_columns"]
 
@@ -31,7 +31,10 @@ CANONICAL_ALIASES: Dict[str, Tuple[str, ...]] = {
                "lowerlimit", "하한"),
     "ci_high": ("cihigh", "ciupper", "ciub", "upper", "upperci", "ucl", "ul", "high", "ci95high",
                 "upperlimit", "상한"),
-    "n": ("n", "ntotal", "total", "totaln", "표본수"),
+    "n": ("n", "ntotal", "total", "totaln", "nsample", "samplesize", "표본수", "대상자수"),
+    "r": ("r", "ri", "cor", "corr", "correlation", "pearsonr", "rho", "상관", "상관계수"),
+    "events": ("events", "event", "cases", "case", "nevents", "numerator", "responders",
+               "success", "successes", "xi", "사건수", "발생수"),
     "n1": ("n1", "n1i", "ne", "nexp", "nexperimental", "ntreat", "ntreatment", "nt", "nintervention",
            "group1n", "n1group", "실험군n", "처치군n", "실험군수", "처치군수", "실험군표본수"),
     "mean1": ("mean1", "m1", "m1i", "meane", "meanexp", "meantreat", "mean1group", "실험군평균"),
@@ -52,6 +55,28 @@ _CELL_FORM = ("a", "b", "c", "d")
 
 class TableError(ValueError):
     """CSV를 읽거나 해석할 수 없는 경우."""
+
+
+#: 오류 메시지에 실을 열 이름의 최대 개수와 각 이름의 최대 길이.
+#: 헤더 행도 사용자 입력이다 — 잘못 저장된 임상 CSV 는 환자 식별자가 통째로
+#: 헤더에 들어가 있기도 하고, ANSI 이스케이프가 섞이면 이미 출력한 숫자를
+#: 덮어써 다른 값처럼 보이게 만들 수 있다.
+_MAX_ECHO_COLUMNS = 20
+_MAX_ECHO_NAME = 40
+
+
+def _safe_name(name: str) -> str:
+    """열 이름 하나를 메시지에 실을 수 있게 정화·절단한다."""
+    return _clip(_strip_control(name or ""), _MAX_ECHO_NAME) or "(빈 이름)"
+
+
+def _safe_header(header: Sequence[str]) -> str:
+    """헤더 전체를 메시지용 한 줄로. 개수·길이를 모두 제한한다."""
+    names = [_safe_name(h) for h in header[:_MAX_ECHO_COLUMNS]]
+    extra = len(header) - len(names)
+    if extra > 0:
+        names.append("… 외 %d개" % extra)
+    return ", ".join(names) if names else "(없음)"
 
 
 def _compact(name: str) -> str:
@@ -103,6 +128,19 @@ def _decode(path: str) -> "Tuple[str, List[str]]":
         raise TableError("파일이 비어 있습니다: %s" % path)
 
     warnings: List[str] = []
+    # 엑셀 통합문서(.xlsx = zip)·구형 .xls·PDF 를 CSV 로 착각해 넘기는 일이 잦다.
+    # 널 바이트 휴리스틱에 걸려 "UTF-16이 깨졌다"고 하면 원인을 못 찾는다.
+    _SIGNATURES = (
+        (b"PK\x03\x04", "엑셀 통합문서(.xlsx)로 보입니다"),
+        (b"\xd0\xcf\x11\xe0", "구형 엑셀 파일(.xls)로 보입니다"),
+        (b"%PDF-", "PDF 로 보입니다"),
+    )
+    for sig, what in _SIGNATURES:
+        if raw.startswith(sig):
+            raise TableError(
+                "%s — CSV 가 아닙니다. 엑셀에서 '다른 이름으로 저장 → CSV UTF-8'로 "
+                "변환한 뒤 다시 시도하세요: %s" % (what, path)
+            )
     head = raw[:1000]
     looks_utf16 = raw[:2] in (b"\xff\xfe", b"\xfe\xff") or (
         head.count(b"\x00") > 0.2 * len(head)   # BOM 없는 UTF-16: 널 바이트가 절반 가까이
@@ -186,7 +224,7 @@ def read_table(
         if canon in used:
             warnings.append(
                 "열 '%s'와 '%s'가 모두 '%s'로 해석되어 앞의 열만 사용합니다."
-                % (header[used[canon]], name, canon)
+                % (_safe_name(header[used[canon]]), _safe_name(name), canon)
             )
             continue
         used[canon] = i
@@ -196,19 +234,25 @@ def read_table(
     if unused_map:
         warnings.append(
             "--map 에 적은 열이 파일에 없습니다: %s (파일의 열: %s)"
-            % (", ".join(unused_map), ", ".join(header))
+            % (", ".join(_safe_name(u) for u in unused_map[:_MAX_ECHO_COLUMNS]),
+               _safe_header(header))
         )
 
     if label_column and label_column not in header:
         raise TableError("--label 로 지정한 열 '%s'이 파일에 없습니다. (있는 열: %s)"
-                         % (label_column, ", ".join(header)))
+                         % (_safe_name(label_column), _safe_header(header)))
     if subgroup_column and subgroup_column not in header:
         raise TableError("--subgroup 으로 지정한 열 '%s'이 파일에 없습니다. (있는 열: %s)"
-                         % (subgroup_column, ", ".join(header)))
+                         % (_safe_name(subgroup_column), _safe_header(header)))
 
     # a/b/c/d 2x2 형식 지원 (사건수 열이 따로 없을 때만)
     cell_idx = {c: i for i, name in enumerate(header) for c in _CELL_FORM if _compact(name) == c}
     cell_form = len(cell_idx) == 4 and "events1" not in used
+    if cell_form and ("n1" in used or "n2" in used):
+        warnings.append(
+            "a,b,c,d 형식(2×2 칸 빈도)으로 읽었습니다 — 표본수는 a+b, c+d 로 다시 계산하며 "
+            "파일의 n1/n2 열은 쓰지 않습니다."
+        )
 
     records: List[Dict[str, str]] = []
     ncols = len(header)
@@ -257,6 +301,10 @@ def detect_measure(records: Sequence[Dict[str, str]], header: Sequence[str]) -> 
         return "or"
     if has(REQUIRED_COLUMNS["smd"]):
         return "smd"
+    if has(REQUIRED_COLUMNS["cor"]):
+        return "cor"
+    if has(REQUIRED_COLUMNS["prop"]):
+        return "prop"
     if "effect" in present and ("se" in present or {"ci_low", "ci_high"} <= present):
         return "generic"
     raise TableError(
@@ -267,8 +315,10 @@ def detect_measure(records: Sequence[Dict[str, str]], header: Sequence[str]) -> 
         "    · 이미 계산된 효과크기: effect + se (또는 ci_low, ci_high)\n"
         "    · 연속형 2군: n1, mean1, sd1, n2, mean2, sd2\n"
         "    · 이분형 2군: events1, n1, events2, n2\n"
+        "    · 상관계수: r, n\n"
+        "    · 단일군 비율: events, n\n"
         "  열 이름이 다르면 --map 원본열=표준열 로 알려주세요 (예: --map 실험군수=n1)."
-        % (", ".join(sorted(present - {"__row__"})) or "(없음)", ", ".join(header))
+        % (", ".join(sorted(present - {"__row__"})) or "(없음)", _safe_header(header))
     )
 
 

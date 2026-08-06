@@ -1,9 +1,9 @@
 """효과크기 합성(pooling)·이질성·하위군 분석.
 
 - 고정효과(fixed-effect): 역분산 가중
-- 변량효과(random-effects): DerSimonian–Laird 또는 Paule–Mandel로 tau^2 추정
+- 변량효과(random-effects): DerSimonian–Laird / Paule–Mandel / REML / Sidik–Jonkman
 - Hartung–Knapp(–Sidik–Jonkman) 보정 신뢰구간 (연구 수가 적을 때 1종 오류 억제)
-- 이질성: Q, I^2, H^2, tau^2, 95% 예측구간
+- 이질성: Q, I^2, H^2, tau^2, 95% 예측구간, tau^2·I^2 의 Q-profile 신뢰구간
 - 하위군: 하위군별 변량효과 + Q_between (혼합효과 Wald 검정)
 """
 
@@ -13,7 +13,7 @@ import math
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence
 
-from .distributions import chi2_sf, normal_ppf, normal_sf, t_ppf, t_sf
+from .distributions import chi2_ppf, chi2_sf, normal_ppf, normal_sf, t_ppf, t_sf
 from .effects import Study
 
 __all__ = [
@@ -25,12 +25,20 @@ __all__ = [
     "heterogeneity",
     "tau2_dersimonian_laird",
     "tau2_paule_mandel",
+    "tau2_reml",
+    "tau2_reml_converged",
+    "_reml_score",
+    "tau2_sidik_jonkman",
+    "tau2_ci_qprofile",
+    "typical_within_variance",
     "prediction_interval",
     "subgroup_analysis",
     "MetaError",
 ]
 
-TAU2_METHODS = ("DL", "PM")
+#: tau^2 추정법. DL=DerSimonian–Laird, PM=Paule–Mandel(=경험적 베이즈),
+#: REML=제한최대가능도(metafor 기본값), SJ=Sidik–Jonkman.
+TAU2_METHODS = ("DL", "PM", "REML", "SJ")
 
 
 class MetaError(ValueError):
@@ -79,6 +87,12 @@ class Heterogeneity:
     tau2: float
     tau: float
     tau2_method: str
+    #: tau^2 의 Q-profile(Viechtbauer 2007) 신뢰구간. 연구 2편 미만이면 None.
+    tau2_ci: Optional["tuple[float, float]"] = None
+    #: 위 tau^2 구간에서 유도한 I^2(백분율) 신뢰구간.
+    i2_ci: Optional["tuple[float, float]"] = None
+    #: 구간을 계산한 신뢰수준
+    ci_conf: float = 0.95
 
 
 @dataclass
@@ -159,6 +173,44 @@ def tau2_dersimonian_laird(studies: Sequence[Study]) -> float:
     return max(0.0, (q - (k - 1)) / c)
 
 
+def generalized_q(studies: Sequence[Study], tau2: float) -> float:
+    """일반화 Q(tau^2) = sum 1/(v_i+tau^2) * (y_i - mu(tau^2))^2.
+
+    tau^2 에 대해 단조감소한다. Paule–Mandel 추정과 Q-profile 신뢰구간이
+    모두 이 함수의 역함수를 푸는 문제라서 한 곳에 모아 둔다.
+    """
+    w = [1.0 / (s.vi + tau2) for s in studies]
+    sw = math.fsum(w)
+    mu = math.fsum(wi * s.yi for wi, s in zip(w, studies)) / sw
+    return math.fsum(wi * (s.yi - mu) ** 2 for wi, s in zip(w, studies))
+
+
+def _solve_gen_q(studies: Sequence[Study], target: float, tol: float = 1e-10,
+                 max_iter: int = 200) -> float:
+    """generalized_q(tau^2) = target 을 만족하는 tau^2 (>=0). 없으면 0."""
+    if generalized_q(studies, 0.0) <= target:
+        return 0.0
+    hi = max(tau2_dersimonian_laird(studies), 1e-8)
+    for _ in range(200):  # 상한 확장
+        if generalized_q(studies, hi) <= target:
+            break
+        hi *= 2.0
+        if not math.isfinite(hi):  # pragma: no cover - 도달 불가
+            return math.inf
+    else:  # pragma: no cover - 수치적으로 도달하기 어려운 경로
+        return hi
+    lo = 0.0
+    for _ in range(max_iter):
+        mid = 0.5 * (lo + hi)
+        if generalized_q(studies, mid) > target:
+            lo = mid
+        else:
+            hi = mid
+        if hi - lo < tol * max(1.0, hi):
+            break
+    return 0.5 * (lo + hi)
+
+
 def tau2_paule_mandel(studies: Sequence[Study], tol: float = 1e-10, max_iter: int = 200) -> float:
     """Paule–Mandel tau^2: sum w_i(tau^2)*(y_i - mu(tau^2))^2 = k-1 을 만족하는 tau^2.
 
@@ -169,32 +221,139 @@ def tau2_paule_mandel(studies: Sequence[Study], tol: float = 1e-10, max_iter: in
     k = len(studies)
     if k < 2:
         return 0.0
+    return _solve_gen_q(studies, float(k - 1), tol=tol, max_iter=max_iter)
 
-    def gen_q(t2: float) -> float:
-        w = [1.0 / (s.vi + t2) for s in studies]
-        sw = math.fsum(w)
-        mu = math.fsum(wi * s.yi for wi, s in zip(w, studies)) / sw
-        return math.fsum(wi * (s.yi - mu) ** 2 for wi, s in zip(w, studies))
 
-    target = float(k - 1)
-    if gen_q(0.0) <= target:
-        return 0.0
-    lo, hi = 0.0, max(tau2_dersimonian_laird(studies), 1e-8)
-    for _ in range(100):  # 상한 확장
-        if gen_q(hi) <= target:
+#: 마지막 REML 호출이 수렴했는지. random_effects/heterogeneity 가 읽어 경고로 올린다.
+#: (순수 함수 서명을 유지하면서 수렴 실패를 숨기지 않기 위한 최소한의 장치)
+def _reml_score(studies: Sequence[Study], tau2: float) -> float:
+    """REML 로그가능도의 tau^2 미분(양수 배수).
+
+    l_R 를 미분하고 w_i = 1/(v_i+tau^2) 로 정리하면
+        S(tau^2) = sum w_i^2 (y_i-mu)^2 - sum w_i + (sum w_i^2)/(sum w_i)
+    가 된다 (sum w_i^2 v_i + tau^2 sum w_i^2 = sum w_i 를 이용). S 의 근이 REML 해다.
+    """
+    w = [1.0 / (s.vi + tau2) for s in studies]
+    sw = math.fsum(w)
+    sw2 = math.fsum(wi * wi for wi in w)
+    mu = math.fsum(wi * s.yi for wi, s in zip(w, studies)) / sw
+    return math.fsum(wi * wi * (s.yi - mu) ** 2 for wi, s in zip(w, studies)) - sw + sw2 / sw
+
+
+def tau2_reml_converged(studies: Sequence[Study], tol: float = 1e-12,
+                        max_iter: int = 200) -> "tuple[float, bool]":
+    """REML tau^2 와 수렴 여부.
+
+    고정점 반복(tau2 <- ...)은 스텝이 극단적으로 작아질 수 있어 (연구 하나만
+    아주 정밀한 흔한 배치에서) 500회를 돌려도 해 근처에 못 간다 —
+    그러면 "수렴하지 않은 값"이 그대로 통합 추정치·p값·논문 문장에 실린다.
+    그래서 고정점 대신 **점수함수 S(tau^2)의 부호 변화를 이분법으로** 잡는다.
+    S 는 tau^2 가 커지면 감소하므로 S(0) <= 0 이면 해는 0(경계)이다.
+    """
+    _require(studies)
+    k = len(studies)
+    if k < 2:
+        return 0.0, True
+    if _reml_score(studies, 0.0) <= 0.0:
+        return 0.0, True
+    hi = max(tau2_dersimonian_laird(studies), max(s.vi for s in studies), 1e-8)
+    for _ in range(200):  # 부호가 바뀔 때까지 상한 확장
+        if _reml_score(studies, hi) <= 0.0:
             break
         hi *= 2.0
+        if not math.isfinite(hi):  # pragma: no cover - 도달 불가
+            return math.inf, False
     else:  # pragma: no cover - 수치적으로 도달하기 어려운 경로
-        return hi
+        return hi, False
+    lo = 0.0
     for _ in range(max_iter):
         mid = 0.5 * (lo + hi)
-        if gen_q(mid) > target:
+        if _reml_score(studies, mid) > 0.0:
             lo = mid
         else:
             hi = mid
-        if hi - lo < tol * max(1.0, hi):
-            break
-    return 0.5 * (lo + hi)
+        if hi - lo <= tol * max(1.0, hi):
+            return 0.5 * (lo + hi), True
+    return 0.5 * (lo + hi), False  # pragma: no cover - 200회 이분법이면 항상 수렴
+
+
+def tau2_reml(studies: Sequence[Study], tol: float = 1e-12, max_iter: int = 200) -> float:
+    """제한최대가능도(REML) tau^2 — R ``metafor::rma`` 의 기본 추정법.
+
+    REML 점수함수의 근을 이분법으로 구한다. 수렴 여부까지 필요하면
+    :func:`tau2_reml_converged` 를 쓴다 (분석 파이프라인이 그쪽을 써서
+    수렴 실패를 경고로 올린다).
+    """
+    return tau2_reml_converged(studies, tol=tol, max_iter=max_iter)[0]
+
+
+def tau2_sidik_jonkman(studies: Sequence[Study]) -> float:
+    """Sidik–Jonkman tau^2 (모형오차 분산 추정).
+
+    비가중 분산으로 초기값을 잡고 r_i = (v_i + tau0^2)/tau0^2 로 재가중한다.
+    구조상 항상 0보다 커서, DL이 0으로 절단되는 상황에서도 보수적인
+    (=더 넓은) 신뢰구간을 준다.
+    """
+    _require(studies)
+    k = len(studies)
+    if k < 2:
+        return 0.0
+    ybar = math.fsum(s.yi for s in studies) / k
+    tau0 = math.fsum((s.yi - ybar) ** 2 for s in studies) / k
+    if tau0 <= 0:
+        # 모든 효과크기가 같다 — Sidik–Jonkman 권고대로 아주 작은 값으로 대체
+        tau0 = 0.01 * math.fsum(s.vi for s in studies) / k
+        if tau0 <= 0:  # pragma: no cover - vi>0 이 보장되므로 도달 불가
+            return 0.0
+    r = [(s.vi + tau0) / tau0 for s in studies]
+    inv = [1.0 / ri for ri in r]
+    sinv = math.fsum(inv)
+    mu = math.fsum(ii * s.yi for ii, s in zip(inv, studies)) / sinv
+    return math.fsum(ii * (s.yi - mu) ** 2 for ii, s in zip(inv, studies)) / (k - 1)
+
+
+def typical_within_variance(studies: Sequence[Study]) -> float:
+    """Higgins–Thompson의 "전형적" 연구내 분산 s^2.
+
+    s^2 = (k-1) * sum(w) / (sum(w)^2 - sum(w^2)),  w_i = 1/v_i.
+    I^2 = tau^2 / (tau^2 + s^2) 관계로 tau^2 구간을 I^2 구간으로 옮길 때 쓴다.
+    """
+    _require(studies)
+    k = len(studies)
+    if k < 2:
+        return 0.0
+    w = [1.0 / s.vi for s in studies]
+    sw = math.fsum(w)
+    sw2 = math.fsum(wi * wi for wi in w)
+    denom = sw * sw - sw2
+    if denom <= 0:
+        return 0.0
+    return (k - 1) * sw / denom
+
+
+def tau2_ci_qprofile(studies: Sequence[Study], conf: float = 0.95):
+    """tau^2 의 Q-profile(일반화 Q 통계량) 신뢰구간 — Viechtbauer(2007).
+
+    generalized_q(tau^2) 는 tau^2 에 대해 단조감소하고 귀무가설 아래
+    자유도 k-1 의 카이제곱을 따른다. 그래서
+        하한: generalized_q(tau^2) = chi2_{1-a/2}(k-1)
+        상한: generalized_q(tau^2) = chi2_{a/2}(k-1)
+    를 각각 풀면 된다. 어느 쪽이든 tau^2=0 에서 이미 임계값 아래면 0으로 둔다.
+    연구 2편 미만이면 None.
+    """
+    _require(studies)
+    k = len(studies)
+    if k < 2:
+        return None
+    alpha = 1.0 - conf
+    df = float(k - 1)
+    q_hi_crit = chi2_ppf(1.0 - alpha / 2.0, df)
+    q_lo_crit = chi2_ppf(alpha / 2.0, df)
+    low = _solve_gen_q(studies, q_hi_crit)
+    high = _solve_gen_q(studies, q_lo_crit)
+    if high < low:  # pragma: no cover - 수치오차 방어
+        low, high = high, low
+    return (low, high)
 
 
 def _tau2(studies, method: str) -> float:
@@ -203,6 +362,10 @@ def _tau2(studies, method: str) -> float:
         return tau2_dersimonian_laird(studies)
     if method == "PM":
         return tau2_paule_mandel(studies)
+    if method == "REML":
+        return tau2_reml(studies)
+    if method == "SJ":
+        return tau2_sidik_jonkman(studies)
     raise MetaError("알 수 없는 tau^2 추정법: %r (가능: %s)" % (method, ", ".join(TAU2_METHODS)))
 
 
@@ -277,19 +440,36 @@ def random_effects(
     )
 
 
-def heterogeneity(studies: Sequence[Study], tau2_method: str = "DL") -> Heterogeneity:
-    """Cochran Q, I^2, H^2, tau^2."""
+def heterogeneity(studies: Sequence[Study], tau2_method: str = "DL",
+                  conf: float = 0.95) -> Heterogeneity:
+    """Cochran Q, I^2, H^2, tau^2 와 tau^2·I^2 의 Q-profile 신뢰구간."""
     _require(studies)
     k = len(studies)
     df = k - 1
     if df < 1:
-        return Heterogeneity(0.0, 0, 1.0, 0.0, 1.0, 0.0, 0.0, tau2_method.upper())
+        return Heterogeneity(0.0, 0, 1.0, 0.0, 1.0, 0.0, 0.0, tau2_method.upper(),
+                             None, None, conf)
     q, _, _ = _q_statistic(studies)
     p = chi2_sf(q, df) if q > 0 else 1.0
-    i2 = max(0.0, (q - df) / q) * 100.0 if q > 0 else 0.0
-    h2 = q / df if df > 0 else 1.0
     tau2 = _tau2(studies, tau2_method)
-    return Heterogeneity(q, df, p, i2, max(h2, 1.0), tau2, math.sqrt(tau2), tau2_method.upper())
+    # I^2·H^2 는 **선택한 tau^2 추정법과 같은 척도**로 계산해야 한다
+    #   I^2 = tau^2 / (tau^2 + s^2),   H^2 = (tau^2 + s^2) / s^2
+    # DL 에서는 이 식이 (Q-df)/Q, Q/df 와 대수적으로 동일하므로 기존 값이 그대로
+    # 나오고, PM/REML/SJ 에서는 metafor 와 같은 값을 준다. (예전처럼 Q 기반으로
+    # 두면 점추정이 자기 신뢰구간 밖으로 나가는 일이 실제로 생겼다.)
+    s2 = typical_within_variance(studies)
+    if s2 > 0:
+        i2 = 100.0 * tau2 / (tau2 + s2)
+        h2 = (tau2 + s2) / s2
+    else:  # pragma: no cover - vi>0 이 보장되면 s2>0
+        i2 = max(0.0, (q - df) / q) * 100.0 if q > 0 else 0.0
+        h2 = q / df if df > 0 else 1.0
+    tau2_ci = tau2_ci_qprofile(studies, conf=conf)
+    i2_ci = None
+    if tau2_ci is not None and s2 > 0:
+        i2_ci = tuple(100.0 * t / (t + s2) for t in tau2_ci)
+    return Heterogeneity(q, df, p, i2, max(h2, 1.0), tau2, math.sqrt(tau2),
+                         tau2_method.upper(), tau2_ci, i2_ci, conf)
 
 
 def prediction_interval(pooled: Pooled, conf: float = 0.95):
@@ -335,7 +515,7 @@ def subgroup_analysis(
         pooled = random_effects(
             members, conf=conf, tau2_method=tau2_method, knapp_hartung=knapp_hartung and len(members) >= 2
         )
-        het = heterogeneity(members, tau2_method=tau2_method) if len(members) >= 2 else None
+        het = heterogeneity(members, tau2_method=tau2_method, conf=conf) if len(members) >= 2 else None
         results.append(SubgroupResult(name=name, pooled=pooled, het=het, k=len(members)))
 
     # Q_between에는 HK 보정 표준오차가 아니라 모형기반 표준오차를 써야 한다.
