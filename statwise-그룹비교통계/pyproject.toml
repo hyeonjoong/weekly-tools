@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "statwise"
-version = "0.4.0"
+version = "0.5.0"
 description = "그룹 비교 통계 자동 선택기 — 정규성/등분산 점검 후 t-검정·Welch·Mann-Whitney·ANOVA·Welch-ANOVA·Kruskal-Wallis(+대응표본)를 골라 실행하고, 이진 결과(RD·RR·OR·NNT + χ²·Fisher)·등가성(TOST)/비열등성·다중 엔드포인트 보정·공변량 보정(ANCOVA: 보정평균·보정된 군간 차이·기울기 동질성 점검)까지 처리해 효과크기·정확 p값·논문용 문장·JSON/CSV로 출력 (표준 라이브러리만)"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -16,6 +16,7 @@ keywords = ["statistics", "t-test", "anova", "welch-anova", "mann-whitney",
             "fisher-exact", "chi-square", "risk-difference", "odds-ratio",
             "number-needed-to-treat", "multiple-endpoints", "clinical-trial",
             "ancova", "covariate-adjustment", "least-squares-means",
+            "mcnemar", "paired-binary", "cohens-kappa", "crossover",
             "adjusted-means", "ich-e9"]
 
 # No third-party dependencies — everything (distribution CDFs, Shapiro-Wilk,

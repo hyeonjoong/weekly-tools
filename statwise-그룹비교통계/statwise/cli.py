@@ -19,6 +19,11 @@ Paired / repeated-measures (pre vs post on the same subjects):
 Binary (yes/no) endpoint:
     statwise data.csv --binary --value responder --group arm --reference placebo
 
+Paired binary -- the same subjects measured twice (McNemar):
+    statwise data.csv --binary --paired --value responder --group time \
+            --id subject --baseline pre
+    statwise agreement.csv --binary --paired --wide --columns rapid_test,pcr
+
 Equivalence / non-inferiority:
     statwise data.csv --value score --group arm --equivalence-margin 1.5
     statwise data.csv --value score --group arm --ni-margin 3 \
@@ -52,14 +57,17 @@ from .ancova import AncovaRecord, run_ancova
 from .binary import compare_binary
 from .dataio import (load_ancova_long, load_binary_counts,
                      load_binary_long, load_binary_wide, load_long,
-                     load_multi_long, load_paired_long, load_paired_wide,
-                     load_wide, screen_group_labels, screen_values,
-                     summarize_values)
+                     load_multi_long, load_paired_binary_long,
+                     load_paired_binary_wide, load_paired_long,
+                     load_paired_wide, load_wide, screen_group_labels,
+                     screen_values, summarize_values)
 from .endpoints import run_endpoints
 from .equivalence import parse_margin
+from .mcnemar import compare_paired_binary
 from .report import (render_ancova_json, render_ancova_text,
                      render_binary_json, render_binary_text, render_csv,
-                     render_json, render_multi_csv, render_multi_json,
+                     render_json, render_mcnemar_json, render_mcnemar_text,
+                     render_multi_csv, render_multi_json,
                      render_multi_text, render_text)
 
 
@@ -70,7 +78,9 @@ def _build_parser() -> argparse.ArgumentParser:
                     "Welch·Mann-Whitney·ANOVA·Welch-ANOVA·Kruskal-Wallis를 골라 "
                     "실행하고(+대응표본 paired), 효과크기와 논문용 문장까지 "
                     "출력합니다. 이진(yes/no) 결과(--binary: RD·RR·OR·NNT + "
-                    "χ²/Fisher), 등가성·비열등성(--equivalence-margin/--ni-margin: "
+                    "χ²/Fisher), 같은 대상을 두 번 잰 이진 결과"
+                    "(--binary --paired: McNemar + 대응 위험차·조건부 오즈비·"
+                    "Cohen's kappa), 등가성·비열등성(--equivalence-margin/--ni-margin: "
                     "TOST), 여러 엔드포인트 동시 분석(--values), 공변량 "
                     "보정(--covariate/--adjust-factor: ANCOVA 보정평균·보정된 "
                     "군간 차이)도 같은 명령으로 처리합니다.",
@@ -104,7 +114,8 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="(wide 형식) 사용할 열들, 쉼표로 구분 (미지정 시 전체 열)")
     p.add_argument("--paired", action="store_true",
                    help="대응 표본(paired) 분석: 같은 대상의 두 조건(예: 전/후) 비교. "
-                        "long이면 --id 필요, wide면 2개 열(--columns)")
+                        "long이면 --id 필요, wide면 2개 열(--columns). "
+                        "--binary 와 함께 쓰면 대응 이진(McNemar) 분석입니다.")
     p.add_argument("--id",
                    help="(paired long) 대상 식별자(subject id) 열 이름")
     p.add_argument("--reference", metavar="GROUP",
@@ -124,7 +135,9 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="3그룹 이상에서 사후검정(post-hoc)을 하지 않음")
     p.add_argument("--binary", action="store_true",
                    help="이진(yes/no) 결과 분석: 반응률·위험차(RD)·위험비(RR)·"
-                        "오즈비(OR)·NNT + 카이제곱/Fisher 정확검정")
+                        "오즈비(OR)·NNT + 카이제곱/Fisher 정확검정. "
+                        "--paired 를 함께 주면 같은 대상을 두 번 잰 자료로 보고 "
+                        "McNemar 검정을 합니다(전/후 반응 여부, 두 검사 비교).")
     p.add_argument("--event-value", metavar="VALUE",
                    help="(--binary) '사건(event)'으로 셀 값. 미지정 시 1/0, Y/N, "
                         "yes/no, 유/무 등을 자동 인식")
@@ -145,10 +158,13 @@ def _build_parser() -> argparse.ArgumentParser:
                         "등분산을 먼저 검정해 고르지만, 그 자체가 자료 의존적 "
                         "선택이라 SAP에 사전 지정하려면 welch 등을 직접 고르세요.")
     p.add_argument("--binary-test",
-                   choices=["auto", "chisq", "chisq-yates", "fisher"],
+                   choices=["auto", "chisq", "chisq-yates", "fisher",
+                            "exact", "mcnemar", "mcnemar-cc"],
                    default="auto",
-                   help="(--binary) 검정 선택: auto(기본, 기대빈도<5면 Fisher), "
-                        "chisq, chisq-yates, fisher")
+                   help="(--binary) 검정 선택. 독립 2군: auto(기본, 기대빈도<5면 "
+                        "Fisher), chisq, chisq-yates, fisher. 대응(--paired): "
+                        "auto(기본, 불일치쌍<25면 정확검정), exact, mcnemar, "
+                        "mcnemar-cc(연속성 보정)")
     p.add_argument("--equivalence-margin", metavar="Δ|low,high",
                    help="등가성(TOST) 검정 마진. '1.5'면 ±1.5, '-1.0,2.0'이면 "
                         "비대칭 구간. 평균차(A−B) 단위이며 임상적으로 정해야 합니다.")
@@ -208,8 +224,10 @@ def _split_columns(spec: Optional[str], flag: str = "--columns"
 
 def _equivalence_spec(args: argparse.Namespace) -> Optional[EquivalenceSpec]:
     """Build an EquivalenceSpec from the CLI flags (None when not requested)."""
+    if args.delimiter is not None and args.delimiter == "":
+        raise ValueError(
+            "--delimiter 에 빈 값이 들어왔습니다. 값을 지정하거나 옵션을 빼세요.")
     for flag, val in (("--equivalence-margin", args.equivalence_margin),
-                      ("--delimiter", args.delimiter),
                       ("--reference", args.reference),
                       ("--baseline", args.baseline),
                       ("--event-value", args.event_value),
@@ -305,13 +323,45 @@ def _run_multi(args: argparse.Namespace, delim: Optional[str],
     return 0
 
 
+def _run_paired_binary(args: argparse.Namespace, delim: Optional[str],
+                       notes: List[str]) -> int:
+    """Paired binary pipeline (McNemar): same subjects measured twice."""
+    if args.equivalence_margin or args.ni_margin is not None:
+        raise ValueError(
+            "--binary --paired 는 등가/비열등성 마진 옵션을 아직 지원하지 "
+            "않습니다 (대응 비율 차이에 대한 TOST는 미구현).")
+    missing: Dict[str, int] = {}
+    if args.wide or (not args.value and not args.group):
+        cond_a, cond_b = load_paired_binary_wide(
+            args.csv, _split_columns(args.columns), args.event_value, delim,
+            notes, baseline=args.baseline, missing_out=missing)
+    else:
+        if not args.value or not args.group or not args.id:
+            raise ValueError(
+                "대응 이진 long 형식에는 --value, --group, --id 를 모두 지정해야 "
+                "합니다. (또는 --binary --paired --wide --columns a,b)")
+        cond_a, cond_b = load_paired_binary_long(
+            args.csv, args.value, args.group, args.id, args.event_value, delim,
+            notes, baseline=args.baseline, missing_out=missing)
+    screen_group_labels([cond_a[0], cond_b[0]], notes)
+    result = compare_paired_binary(cond_a, cond_b, alpha=args.alpha,
+                                   test=args.binary_test,
+                                   event_is=args.event_is, missing=missing)
+    result.warnings.extend(notes)
+    if args.format == "json":
+        _write(render_mcnemar_json(result), args)
+    elif args.format == "csv":
+        _write(render_csv(result), args)
+    else:
+        _write(render_mcnemar_text(result), args)
+    return 0
+
+
 def _run_binary(args: argparse.Namespace, delim: Optional[str],
                 notes: List[str]) -> int:
     """Binary-endpoint pipeline: load counts, compare rates, print."""
     if args.paired:
-        raise ValueError(
-            "--binary 와 --paired 는 아직 함께 쓸 수 없습니다. 대응 이진 자료는 "
-            "McNemar 검정이 필요하며 현재 지원하지 않습니다.")
+        return _run_paired_binary(args, delim, notes)
     if args.equivalence_margin or args.ni_margin is not None:
         raise ValueError(
             "--binary 는 등가/비열등성 마진 옵션(--equivalence-margin, "
@@ -384,7 +434,8 @@ def _run_paired(args: argparse.Namespace, delim: Optional[str],
     screen_values(cond_a[0], cond_a[1], notes)
     screen_values(cond_b[0], cond_b[1], notes)
     screen_values(f"{cond_a[0]}−{cond_b[0]} 차이",
-                  [x - y for x, y in zip(cond_a[1], cond_b[1])], notes)
+                  [x - y for x, y in zip(cond_a[1], cond_b[1])], notes,
+                  derived=True)
     result = analyze_paired(cond_a, cond_b, alpha=args.alpha,
                             alpha_norm=args.alpha_norm,
                             equivalence=args.eq_spec, missing=missing)
@@ -499,6 +550,44 @@ def _reject_inapplicable_flags(args: argparse.Namespace) -> None:
             "분석됩니다).")
     if args.binary_test != "auto" and not args.binary:
         raise ValueError("--binary-test 는 --binary 와 함께만 쓸 수 있습니다.")
+    # The two binary designs have disjoint test menus, and quietly running a
+    # chi-square on matched pairs (or McNemar on independent arms) is exactly
+    # the mistake this mode exists to prevent.
+    _PAIRED_ONLY = ("exact", "mcnemar", "mcnemar-cc")
+    _INDEP_ONLY = ("chisq", "chisq-yates", "fisher")
+    if args.binary and args.paired and args.binary_test in _INDEP_ONLY:
+        raise ValueError(
+            f"--binary-test {args.binary_test} 는 독립 2군 비교용입니다. "
+            f"대응(--paired) 이진 자료에는 exact / mcnemar / mcnemar-cc 를 "
+            f"쓰세요 (같은 대상을 독립 표본처럼 검정하면 p값이 실제보다 "
+            f"작아집니다).")
+    if args.binary_test in _PAIRED_ONLY and not (args.binary and args.paired):
+        raise ValueError(
+            f"--binary-test {args.binary_test} 는 --binary --paired "
+            f"(대응 이진) 분석에서만 쓸 수 있습니다.")
+    if args.binary and args.paired:
+        for flag, val in (("--events-col", args.events_col),
+                          ("--n-col", args.n_col)):
+            if val:
+                raise ValueError(
+                    f"{flag} 은(는) 집계 표 입력용이라 대응(--paired) 이진 "
+                    f"분석에 쓸 수 없습니다 — McNemar 검정은 짝지어진 개별 "
+                    f"관측치가 있어야 계산할 수 있습니다.")
+        # A two-condition McNemar has no post-hoc table and no multiplicity
+        # family, so these would do nothing -- and a user who passes
+        # `--correction bh` believes an FDR correction was applied.
+        if args.no_posthoc:
+            raise ValueError(
+                "--no-posthoc 는 대응(--paired) 이진 분석에 적용되지 않습니다 "
+                "(두 조건 비교라 사후검정 자체가 없습니다).")
+        if args.correction != "holm":
+            raise ValueError(
+                "--correction 은 대응(--paired) 이진 분석에 적용되지 않습니다 "
+                "(비교가 하나뿐이라 보정할 다중비교 패밀리가 없습니다).")
+        if args.alpha_norm != 0.05:
+            raise ValueError(
+                "--alpha-norm 은 정규성/등분산 판정용이라 대응 이진 분석에는 "
+                "적용되지 않습니다 (McNemar는 정규성 가정을 쓰지 않습니다).")
     if args.endpoint_correction != "holm" and not args.values:
         raise ValueError(
             "--endpoint-correction 은 --values 와 함께만 의미가 있습니다.")
