@@ -1,0 +1,37 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.venv/
+venv/
+.DS_Store
+.coverage
+
+# 진짜 원고와 진짜 환자 데이터가 실수로 커밋되는 일을 막습니다.
+# 이 툴이 읽는 포맷과 그 옆에 함께 두게 되는 파일들을 통째로 무시하고,
+# 번들 예제만 '이름으로' 다시 허용합니다. (`!examples/*.docx` 같은 포괄 허용은
+# examples/ 에 떨어뜨린 진짜 원고를 그대로 통과시키므로 쓰지 않습니다.)
+*.[Dd][Oo][Cc]*
+*.[Rr][Tt][Ff]
+*.[Pp][Dd][Ff]
+*.[Cc][Ss][Vv]*
+*.[Tt][Ss][Vv]*
+*.[Xx][Ll][Ss]*
+*.txt
+*.tex
+*.bib
+*.json
+*.zip
+~$*
+
+# 점검 산출물(--out-dir)
+점검_*/
+draftcheck_out*/
+
+!examples/manuscript_clean.docx
+!examples/manuscript_flawed.docx
+!examples/journals/sleepmed.json
+!examples/journals/plos-one.json

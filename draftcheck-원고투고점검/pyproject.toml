@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "draftcheck"
+version = "0.1.0"
+description = "투고 직전 원고(.docx/.md/.tex/.txt)의 자기 정합성 점검 — 본문 인용↔참고문헌 교차 대조(누락·미인용·번호 순서), 그림/표 번호 정합(미언급·유령 번호·건너뜀), 초록↔본문 표본수 불일치, 통계 보고 완결성(p=0.000·임계값만·효과크기/CI 누락·표기 혼재), 약어 정의, 저널 분량 한도 대조를 줄번호가 붙은 한국어 수정 목록으로 뱉습니다. 인용 표기나 참고문헌 목록을 인식하지 못하면 '이상 없음'이 아니라 '점검 불가'로 크게 보고합니다. 완전 오프라인·읽기 전용(원본 원고를 수정하지 않음), 표준 라이브러리만 사용"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "hyeonjoong", email = "hyeonjoongk@gmail.com" }]
+keywords = ["manuscript", "submission", "checklist", "citations", "references",
+            "vancouver", "figures", "tables", "consistency", "docx", "latex",
+            "statistical-reporting", "abbreviations", "word-count", "peer-review",
+            "clinical-trial", "offline"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Text Processing :: Markup",
+    "Environment :: Console",
+    "Natural Language :: Korean",
+]
+
+# 외부 의존성 없음 — .docx 는 표준 라이브러리 zipfile + xml.etree 로 직접 읽습니다.
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.scripts]
+draftcheck = "draftcheck.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["draftcheck*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
