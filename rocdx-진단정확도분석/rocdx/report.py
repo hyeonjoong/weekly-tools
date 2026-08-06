@@ -88,6 +88,12 @@ def auc_grade(auc: float, ci: Optional[Tuple[float, float]] = None) -> str:
     if ci is not None and ci[0] <= 0.5 <= ci[1]:
         return ("판별력을 입증하지 못했습니다 — 신뢰구간이 0.5(우연)를 포함합니다 "
                 "(CI includes chance)")
+    if ci is None:
+        # No interval at all (n = 1 per group, or a zero DeLong SE). Awarding a
+        # band here contradicted the same report's draft sentence, which correctly
+        # said discrimination was not demonstrated.
+        return ("등급을 매길 수 없습니다 — 신뢰구간을 계산할 수 없는 표본입니다 "
+                "(no interval: too few cases per group to grade)")
     if auc < 0.6:
         band = "판별력 거의 없음 (no useful discrimination)"
     elif auc < 0.7:
@@ -233,6 +239,52 @@ def _metric_lines(an: Analysis, sp: SelectedPoint) -> List[str]:
     return out
 
 
+def _ni_lines(an: Analysis, cmp_, ni) -> List[str]:
+    """The non-inferiority verdict, written so it cannot be over-read."""
+    lvl = conf_level(an.alpha)
+    out = [
+        f"      ▸ 비열등성 검정 (한계 {_f(ni.margin, 3)} AUC, 단측 α = "
+        f"{_g(ni.alpha_one_sided, 4)})",
+        f"         H0: {cmp_.label_a} − {cmp_.label_b} ≤ −{_f(ni.margin, 3)} → "
+        f"단측 p {_p(ni.p_value)}   (z = {_f(ni.z, 3)})",
+    ]
+    if ni.noninferior is None:
+        out.append("         → 분산을 추정할 수 없어 판정할 수 없습니다.")
+        return out
+    if len(an.comparisons) > 1:
+        out.append("         (주의: 비열등성 단측 p는 다중비교 보정 대상이 아닙니다 — "
+                   "비교가 여러 건이면 α를 사전에 분배하세요)")
+    out.append(f"         차이의 {lvl} CI 하한 = {_f(ni.lower_limit)}  "
+               f"(한계 −{_f(ni.margin, 3)} 와 비교)")
+    if ni.superior:
+        out.append(f"         → 비열등을 넘어 우월합니다 (하한이 0보다 큼). "
+                   f"단, 한계 {_f(ni.margin, 3)}은 임상적 근거로 사전에 정해야 하며 "
+                   f"이 도구가 검증할 수 없습니다.")
+    elif ni.noninferior:
+        out.append(f"         → 비열등성이 성립합니다 (하한 > −{_f(ni.margin, 3)}). "
+                   f"우월하다는 뜻은 아니며, 한계는 사전에 임상적으로 정해져 있어야 "
+                   f"합니다 (사후에 고른 한계로는 아무 의미가 없습니다).")
+    else:
+        out.append(f"         → 비열등성을 입증하지 못했습니다 (하한이 "
+                   f"−{_f(ni.margin, 3)} 이하). 열등하다는 증명도 아닙니다.")
+    return out
+
+
+class _Counter:
+    """Running section number, so an omitted section cannot leave a gap.
+
+    With ``--no-curve`` the report used to number its sections 1, 2, 4 — which
+    reads as a missing page.
+    """
+
+    def __init__(self) -> None:
+        self._n = 0
+
+    def next(self) -> int:
+        self._n += 1
+        return self._n
+
+
 # --- full report --------------------------------------------------------------
 
 def format_report(an: Analysis, show_curve: bool = True) -> str:
@@ -244,16 +296,24 @@ def format_report(an: Analysis, show_curve: bool = True) -> str:
     L.append("=" * 74)
     L.append(f"  검사값 (index test)  : {ds.score_name}")
     L.append(f"  기준 진단 (reference): {ds.truth_name} "
-             f"[양성 = '{ds.positive_label}', 음성 = '{ds.negative_label}']")
+             # "질환군/비질환군", not "양성/음성": in a pathology column 양성 means
+             # *benign*, so "[양성 = '악성']" read as a contradiction.
+             f"[질환군 = '{ds.positive_label}', 비질환군 = '{ds.negative_label}']")
     dir_txt = ("값이 낮을수록 질환 (lower = diseased)" if an.flipped
                else "값이 높을수록 질환 (higher = diseased)")
     src = "사용자 지정" if an.direction_source == "user" else "데이터에서 자동 판정"
     L.append(f"  방향                 : {dir_txt}  [{src}]")
     if ds.encoding or ds.delimiter:
         L.append(f"  입력 파일 해석       : 인코딩 {ds.encoding}, 구분자 {ds.delimiter!r}")
-    L.append(f"  분석 대상            : 입력 {ds.n_rows_in}행 중 {len(ds.scores)}명 "
+    # With a cluster column the unit of analysis is a row, not necessarily a
+    # person — saying "명" there would over-count the subjects.
+    unit = "행" if ds.cluster_name else "명"
+    L.append(f"  분석 대상            : 입력 {ds.n_rows_in}행 중 {len(ds.scores)}{unit} "
              f"(질환군 {ds.n_pos}, 비질환군 {ds.n_neg}, 표본 유병률 "
              f"{ds.n_pos / max(1, len(ds.scores)) * 100:.1f}%)")
+    if ds.cluster_name:
+        L.append(f"  독립 단위 (cluster)  : {ds.cluster_name} — {ds.n_clusters}개 "
+                 f"(최대 {ds.max_cluster_size}행/단위)")
     if ds.n_dropped:
         L.append(f"  제외된 행            : {ds.n_dropped} / {ds.n_rows_in}")
         for reason, cnt in sorted(ds.drop_reasons.items(), key=lambda kv: -kv[1]):
@@ -263,7 +323,8 @@ def format_report(an: Analysis, show_curve: bool = True) -> str:
 
     L.append("")
     L.append("─" * 74)
-    L.append("  1. 곡선아래면적 (AUC / c-statistic)")
+    step = _Counter()
+    L.append(f"  {step.next()}. 곡선아래면적 (AUC / c-statistic)")
     L.append("─" * 74)
     a = an.auc
     ci_name = "logit 변환" if a.ci_method == "logit" else "Wald"
@@ -276,6 +337,36 @@ def format_report(an: Analysis, show_curve: bool = True) -> str:
     L.append(f"  해석: 무작위로 고른 질환자 1명의 검사값이 비질환자 1명보다 {side} 확률이 "
              f"{_pct(a.auc)}입니다 (동점은 절반으로 셈).")
 
+    if an.curve_boot is not None and an.curve_boot.auc_ci is not None:
+        b = an.curve_boot
+        if b.kind == "cluster":
+            L.append(f"  군집 보정 AUC {lvl} CI {_ci(b.auc_ci)}  "
+                     f"(군집 {b.n_clusters}개 재표본, 최대 {b.max_cluster_size}행/군집, "
+                     f"{b.n_effective}/{b.n_boot}회, seed {b.seed})")
+            L.append("     → 같은 대상의 여러 행을 한 덩어리로 재표본한 구간입니다. "
+                     "위의 DeLong 구간보다 넓으면 그 차이가 행 간 상관의 크기입니다.")
+        else:
+            L.append(f"  부트스트랩 AUC {lvl} CI {_ci(b.auc_ci)}  "
+                     f"({b.n_effective}/{b.n_boot}회, 층화 재표본, seed {b.seed})")
+
+    if an.pauc is not None:
+        pa = an.pauc
+        L.append("")
+        L.append(f"  ▸ 부분 AUC (pAUC) — 특이도 {_g(pa.spec_low, 6)} ~ {_g(pa.spec_high, 6)} 구간만")
+        boot_tag = ""
+        if pa.ci is not None:
+            kind = ("군집 부트스트랩 백분위" if pa.ci_source == "cluster-bootstrap"
+                    else "부트스트랩 백분위")
+            boot_tag = f"  ({kind}, {pa.n_effective}회)"
+        L.append(f"      표준화 pAUC (McClish) = {_f(pa.standardized)}  {lvl} CI "
+                 f"{_ci(pa.ci)}{boot_tag if pa.ci else '  (--bootstrap 필요)'}")
+        L.append(f"      원시 면적 = {_f(pa.area, 4)} {_ci(pa.area_ci, 4)}  "
+                 f"(같은 구간에서 우연 = {_f(pa.chance_area, 4)}, 완벽 = {_f(pa.max_area, 4)})")
+        L.append("      해석: 표준화 pAUC는 그 구간 안에서만 0.5=우연, 1.0=완벽이 되도록 "
+                 "환산한 값입니다. 전체 AUC와 크기를 직접 비교하지 마세요.")
+        L.append("      * 이 구간은 해석적 공식이 아니라 재표본 백분위 구간입니다 "
+                 "(pAUC에는 DeLong 같은 해석적 분산 공식을 쓰지 않습니다).")
+
     for cmp_ in an.comparisons:
         L.append("")
         L.append(f"  ▸ 두 검사 비교 (DeLong, {'짝지은 동일 대상' if cmp_.paired else '독립 표본'})")
@@ -285,6 +376,14 @@ def format_report(an: Analysis, show_curve: bool = True) -> str:
                  f"{cmp_.label_b}: AUC {_f(cmp_.auc_b)}{dir_b}")
         L.append(f"      차이 = {_f(cmp_.diff)}  {lvl} CI {_ci(cmp_.ci)}  "
                  f"z = {_f(cmp_.z, 3)}  p {_p(cmp_.p_value)}")
+        p_adj = an.comparison_p_adjusted.get(cmp_.label_b)
+        if an.comparison_p_adjusted:
+            L.append(f"      다중비교 보정 p (Holm, 검정 가능한 비교 "
+                     f"{an.holm_family_size}건) "
+                     f"{_p(p_adj)}"
+                     + ("" if p_adj is None else
+                        ("  → 보정 후에도 유의" if p_adj < an.alpha
+                         else "  → 보정 후에는 유의하지 않음")))
         if cmp_.p_value is None:
             L.append("      → 분산을 추정할 수 없어 검정이 정의되지 않습니다 "
                      "(예: 비교 검사값이 모두 동일). 차이의 크기만 보고하세요.")
@@ -292,10 +391,13 @@ def format_report(an: Analysis, show_curve: bool = True) -> str:
             L.append("      → 차이가 통계적으로 유의합니다")
         else:
             L.append("      → 차이가 유의하지 않습니다 (같다는 증명은 아닙니다)")
+        ni = an.noninferiority.get(cmp_.label_b)
+        if ni is not None:
+            L.extend(_ni_lines(an, cmp_, ni))
 
     L.append("")
     L.append("─" * 74)
-    L.append("  2. 절단점별 진단 성능")
+    L.append(f"  {step.next()}. 절단점별 진단 성능")
     L.append("─" * 74)
     for sp in an.selected:
         L.append("")
@@ -306,6 +408,11 @@ def format_report(an: Analysis, show_curve: bool = True) -> str:
             continue
         L.extend(_metric_lines(an, sp))
 
+    if ds.cluster_name and ds.n_clusters < len(ds.scores):
+        L.append("")
+        L.append(f"  ※ 위 절단점 블록의 민감도·특이도 Wilson 구간과 부트스트랩은 행끼리")
+        L.append(f"     독립이라고 가정합니다 — 군집 보정은 AUC·부분 AUC 구간에만")
+        L.append(f"     적용되었습니다 ({ds.cluster_name} 기준 {ds.n_clusters}개 단위).")
     if any(sp.data_chosen for sp in an.selected):
         L.append("")
         L.append("  ※ '데이터에서 선택'한 절단점의 민감도·특이도는 같은 데이터에서 고른 만큼")
@@ -315,7 +422,7 @@ def format_report(an: Analysis, show_curve: bool = True) -> str:
     if show_curve:
         L.append("")
         L.append("─" * 74)
-        L.append("  3. ROC 곡선 (* 곡선, . 우연선, Y = Youden 절단점)")
+        L.append(f"  {step.next()}. ROC 곡선 (* 곡선, . 우연선, Y = Youden 절단점)")
         L.append("─" * 74)
         marks = [(sp.metrics.point, "Y") for sp in an.selected
                  if sp.key == "youden" and sp.feasible]
@@ -324,14 +431,14 @@ def format_report(an: Analysis, show_curve: bool = True) -> str:
     if an.warnings:
         L.append("")
         L.append("─" * 74)
-        L.append("  경고 / caveats")
+        L.append(f"  {step.next()}. 경고 / caveats")
         L.append("─" * 74)
         for w in an.warnings:
             L.append(f"  ! {w}")
 
     L.append("")
     L.append("─" * 74)
-    L.append("  4. 논문용 문장 초안 (숫자를 확인하고, 주의 문장은 지우지 마세요)")
+    L.append(f"  {step.next()}. 논문용 문장 초안 (숫자를 확인하고, 주의 문장은 지우지 마세요)")
     L.append("─" * 74)
     L.append(paper_sentence(an))
     L.append("")
@@ -351,17 +458,28 @@ def paper_sentence(an: Analysis) -> str:
     ci = f"{_f(a.ci[0])}–{_f(a.ci[1])}" if a.ci else _NA
     best = next((sp for sp in an.selected if sp.key == "youden" and sp.feasible), None)
     tiny = min(ds.n_pos, ds.n_neg) < 10
+    # Clustered data: the unit of analysis is not a person, so the draft must not
+    # call the rows "명" — a reviewer reading "92명" would count 92 subjects.
+    if ds.cluster_name and ds.n_clusters < len(ds.scores):
+        head = (f"  총 {ds.n_rows_in}건 중 분석 가능한 {len(ds.scores)}건"
+                f"({ds.cluster_name} 기준 {ds.n_clusters}개 단위; 질환군 {ds.n_pos}건, "
+                f"비질환군 {ds.n_neg}건)을 대상으로 ")
+    else:
+        head = (f"  총 {ds.n_rows_in}명 중 분석 가능한 {len(ds.scores)}명"
+                f"(질환군 {ds.n_pos}명, 비질환군 {ds.n_neg}명)을 대상으로 ")
     lines = [
-        f"  총 {ds.n_rows_in}명 중 분석 가능한 {len(ds.scores)}명"
-        f"(질환군 {ds.n_pos}명, 비질환군 {ds.n_neg}명)을 대상으로 "
-        f"{ds.score_name}의 진단 성능을 평가하였다. AUC는 {_f(a.auc)}"
+        head + f"{ds.score_name}의 진단 성능을 평가하였다. AUC는 {_f(a.auc)}"
         f"({lvl} CI {ci}, p {_p(a.p_value)})였다.",
     ]
     if not _proven(an):
+        # The *reason* has to match the data: with one case per group there is no
+        # interval at all, and saying "the interval includes 0.5" would be false.
+        reason = ("AUC의 신뢰구간을 계산할 수 없어(한쪽 군의 사례가 너무 적음)"
+                  if an.auc.ci is None else "AUC의 신뢰구간이 0.5를 포함하므로")
         lines.append(
-            "  AUC의 신뢰구간이 0.5를 포함하므로 본 자료만으로는 이 검사의 판별력을 "
-            "입증하지 못하였다. 아래 절단점의 민감도·특이도는 참고용이며 진단 성능의 "
-            "근거로 인용해서는 안 된다."
+            f"  {reason} 본 자료만으로는 이 검사의 판별력을 입증하지 못하였다. "
+            f"아래 절단점의 민감도·특이도는 참고용이며 진단 성능의 근거로 인용해서는 "
+            f"안 된다."
         )
     elif tiny:
         lines.append(
@@ -370,13 +488,16 @@ def paper_sentence(an: Analysis) -> str:
         )
     if best is not None and _proven(an) and not tiny:
         m = best.metrics
-        lr = ""
+        lr = "다"
         if math.isfinite(m.plr) and math.isfinite(m.nlr):
-            lr = f", 양성우도비 {_f(m.plr, 2)}, 음성우도비 {_f(m.nlr, 2)}"
+            lr = (f"으며, 양성우도비는 {_f(m.plr, 2)}, 음성우도비는 "
+                  f"{_f(m.nlr, 2)}이었다")
+        else:
+            lr = "다"
         lines.append(
             f"  Youden 지수를 최대화하는 절단점({cutoff_text(an, m.point)})에서 민감도는 "
             f"{_pct(m.sens)}({_ci(m.sens_ci, 1, pct=True)}), 특이도는 "
-            f"{_pct(m.spec)}({_ci(m.spec_ci, 1, pct=True)})였다{lr}."
+            f"{_pct(m.spec)}({_ci(m.spec_ci, 1, pct=True)})였{lr}."
         )
         lines.append(
             "  절단점은 본 자료에서 선택되었으므로 외부 자료에서의 성능은 이보다 낮을 수 "
@@ -388,20 +509,85 @@ def paper_sentence(an: Analysis) -> str:
     if an.prevalence_user is not None:
         lines.append(f"  PPV/NPV는 유병률 {_g(an.prevalence_user, 6)}을 가정하여 베이즈 "
                      f"정리로 산출하였다.")
+    if an.pauc is not None and math.isfinite(an.pauc.standardized) \
+            and an.pauc.n_observed_fprs < 3:
+        pa = an.pauc
+        lines.append(
+            f"  특이도 {_g(pa.spec_low, 6)}~{_g(pa.spec_high, 6)} 구간에는 실제로 관측된 "
+            f"위양성률이 {pa.n_observed_fprs}가지뿐이어서(비질환군 {an.dataset.n_neg}명) "
+            f"부분 AUC가 사실상 보간값이다. 이 구간의 부분 AUC는 보고하지 않는 편이 "
+            f"정직하다."
+        )
+    elif an.pauc is not None and math.isfinite(an.pauc.standardized) \
+            and an.pauc.standardized < 0.5:
+        pa = an.pauc
+        lines.append(
+            f"  특이도 {_g(pa.spec_low, 6)}~{_g(pa.spec_high, 6)} 구간으로 제한하면 "
+            f"표준화 부분 AUC가 {_f(pa.standardized)}로 우연(0.5)보다 낮았다. 즉 이 "
+            f"구간에서는 판별력이 확인되지 않았으며, 부분 AUC를 성능의 근거로 인용해서는 "
+            f"안 된다."
+        )
+    elif an.pauc is not None and math.isfinite(an.pauc.standardized):
+        pa = an.pauc
+        ci_txt = f", {lvl} CI {_ci(pa.ci)}" if pa.ci else ""
+        lines.append(
+            f"  임상적으로 사용 가능한 구간(특이도 {_g(pa.spec_low, 6)}~"
+            f"{_g(pa.spec_high, 6)})으로 제한한 부분 AUC는 표준화 값 "
+            f"{_f(pa.standardized)}{ci_txt}였다(McClish 표준화; 원시 면적 "
+            f"{_f(pa.area, 4)})."
+        )
+    if an.curve_boot is not None and an.curve_boot.kind == "cluster" \
+            and an.curve_boot.auc_ci is not None:
+        b = an.curve_boot
+        lines.append(
+            f"  같은 대상에서 반복 측정된 자료임을 고려해 군집({an.dataset.cluster_name}) "
+            f"단위 부트스트랩({b.n_clusters}개 군집, {b.n_effective}회)으로 산출한 AUC의 "
+            f"{lvl} 신뢰구간은 {_ci(b.auc_ci)}였다."
+        )
     for cmp_ in an.comparisons:
+        adj = ""
+        if an.comparison_p_adjusted:
+            adj = (f", Holm 보정 p {_p(an.comparison_p_adjusted.get(cmp_.label_b))}"
+                   f"({an.holm_family_size}개 비교 보정)")
         lines.append(
             f"  {cmp_.label_a}의 AUC({_f(cmp_.auc_a)})는 {cmp_.label_b}"
             f"({_f(cmp_.auc_b)})와 비교하여 차이 {_f(cmp_.diff)}"
-            f"({lvl} CI {_ci(cmp_.ci)}, DeLong p {_p(cmp_.p_value)})였다."
+            f"({lvl} CI {_ci(cmp_.ci)}, DeLong p {_p(cmp_.p_value)}{adj})였다."
         )
-    en = (f"  EN: Of {ds.n_rows_in} records, {len(ds.scores)} were analysable "
-          f"({ds.n_pos} cases, {ds.n_neg} controls). The AUC of {ds.score_name} was "
-          f"{_f(a.auc)} ({lvl} CI {ci}, p {_p(a.p_value)}).")
+        ni = an.noninferiority.get(cmp_.label_b)
+        if ni is None or ni.noninferior is None:
+            continue
+        if ni.noninferior:
+            lines.append(
+                f"  사전에 정한 비열등성 한계 {_f(ni.margin, 3)} AUC를 기준으로, 차이의 "
+                f"{lvl} 신뢰구간 하한({_f(ni.lower_limit)})이 −{_f(ni.margin, 3)}보다 "
+                f"높아 비열등성이 확인되었"
+                + ("고, 하한이 0보다 높아 우월성도 확인되었다."
+                   if ni.superior else ".")
+            )
+        else:
+            lines.append(
+                f"  사전에 정한 비열등성 한계 {_f(ni.margin, 3)} AUC 기준으로는 차이의 "
+                f"{lvl} 신뢰구간 하한({_f(ni.lower_limit)})이 −{_f(ni.margin, 3)}을 "
+                f"넘지 못하여 비열등성을 입증하지 못하였다."
+            )
+    cluster_en = ""
+    if ds.cluster_name and ds.n_clusters < len(ds.scores):
+        cluster_en = (f" from {ds.n_clusters} independent units ({ds.cluster_name}), "
+                      f"which the reported AUC interval accounts for only when "
+                      f"--cluster was used")
+    en = (f"  EN: Of {ds.n_rows_in} records, {len(ds.scores)} were analysable"
+          f"{cluster_en} ({ds.n_pos} cases, {ds.n_neg} controls). The AUC of "
+          f"{ds.score_name} was {_f(a.auc)} ({lvl} CI {ci}, p {_p(a.p_value)}).")
     if best is not None and _proven(an) and not tiny:
         en += (f" At the Youden-optimal cut-off ({cutoff_text(an, best.metrics.point)}), "
                f"sensitivity was {_pct(best.metrics.sens)} and specificity "
                f"{_pct(best.metrics.spec)}; because the cut-off was chosen on these "
                f"data, external performance may be lower.")
+    elif an.auc.ci is None:
+        en += (" No confidence interval could be computed (too few cases in one "
+               "group), so discrimination was not demonstrated; operating-point "
+               "figures are exploratory only.")
     else:
         en += (" The interval includes 0.5, so discrimination was not demonstrated in "
                "this sample; operating-point figures are exploratory only.")
@@ -420,11 +606,29 @@ def markdown_report(an: Analysis) -> str:
     lines = [
         f"### 진단정확도 — {ds.score_name} (기준: {ds.truth_name})",
         "",
-        f"- 입력 {ds.n_rows_in}행 중 분석 {len(ds.scores)}명 "
-        f"(질환군 {ds.n_pos} / 비질환군 {ds.n_neg}), "
+        f"- 입력 {ds.n_rows_in}행 중 분석 {len(ds.scores)}"
+        f"{'행' if ds.cluster_name else '명'}"
+        + (f" ({ds.cluster_name} 기준 {ds.n_clusters}개 단위)"
+           if ds.cluster_name and ds.n_clusters < len(ds.scores) else "")
+        + f" (질환군 {ds.n_pos} / 비질환군 {ds.n_neg}), "
         f"방향: {'낮을수록 질환' if an.flipped else '높을수록 질환'}",
         f"- **AUC {_f(a.auc)}** ({lvl} CI {_ci(a.ci)}), p {_p(a.p_value)} (H0: AUC=0.5)",
         f"- 판별력: {auc_grade(a.auc, a.ci)}",
+    ]
+    if an.curve_boot is not None and an.curve_boot.auc_ci is not None:
+        b = an.curve_boot
+        kind = (f"군집 보정 부트스트랩 (군집 {b.n_clusters}개)" if b.kind == "cluster"
+                else "층화 부트스트랩")
+        lines.append(f"- {kind} AUC {lvl} CI {_ci(b.auc_ci)} "
+                     f"({b.n_effective}/{b.n_boot}회, seed {b.seed})")
+    if an.pauc is not None:
+        pa = an.pauc
+        lines.append(
+            f"- **부분 AUC** (특이도 {_g(pa.spec_low, 6)}–{_g(pa.spec_high, 6)}): "
+            f"표준화 {_f(pa.standardized)} ({lvl} CI {_ci(pa.ci)}), "
+            f"원시 면적 {_f(pa.area, 4)} (우연 {_f(pa.chance_area, 4)} / "
+            f"완벽 {_f(pa.max_area, 4)}) — 전체 AUC와 직접 비교하지 마세요")
+    lines += [
         "",
         f"| 절단점 기준 | Cut-off | 민감도 ({lvl} CI) | 특이도 ({lvl} CI) | "
         f"PPV{prev_tag} | NPV{prev_tag} | LR+ | LR- | Youden J |",
@@ -443,10 +647,30 @@ def markdown_report(an: Analysis) -> str:
         )
     for cmp_ in an.comparisons:
         lines.append("")
+        extra = ""
+        if an.comparison_p_adjusted:
+            extra = (f", Holm 보정 p {_p(an.comparison_p_adjusted.get(cmp_.label_b))} "
+                     f"(검정 가능한 비교 {an.holm_family_size}건)")
         lines.append(f"- DeLong 비교: {cmp_.label_a} {_f(cmp_.auc_a)} vs "
                      f"{cmp_.label_b} {_f(cmp_.auc_b)}, 차이 {_f(cmp_.diff)} "
-                     f"{_ci(cmp_.ci)}, p {_p(cmp_.p_value)}")
+                     f"{_ci(cmp_.ci)}, p {_p(cmp_.p_value)}{extra}")
+        ni = an.noninferiority.get(cmp_.label_b)
+        if ni is not None:
+            verdict = ("판정 불가" if ni.noninferior is None else
+                       ("**우월**" if ni.superior else
+                        ("**비열등 성립**" if ni.noninferior else "비열등 입증 실패")))
+            lines.append(f"  - 비열등성(한계 {_f(ni.margin, 3)}): {verdict}, "
+                         f"차이 {lvl} CI 하한 {_f(ni.lower_limit)}, "
+                         f"단측 p {_p(ni.p_value)} — 한계는 사전에 임상적으로 정해야 합니다")
     lines.append("")
+    if an.pauc is not None and an.pauc.ci is None:
+        lines.append("> **주의**: 부분 AUC에는 해석적 신뢰구간이 없습니다 — "
+                     "`--bootstrap` 을 함께 지정하세요.")
+    if an.dataset.cluster_name and an.dataset.n_clusters < len(an.dataset.scores) \
+            and (an.curve_boot is None or an.curve_boot.kind != "cluster"):
+        lines.append(f"> **주의**: `{an.dataset.cluster_name}` 가 중복됩니다 "
+                     f"(행 {len(an.dataset.scores)} / 단위 {an.dataset.n_clusters}). "
+                     f"위 신뢰구간은 실제보다 좁습니다 — `--cluster --bootstrap 2000`.")
     if any(sp.data_chosen for sp in an.selected):
         lines.append("> **주의**: `[데이터에서 선택]` 절단점의 민감도·특이도는 같은 자료에서 "
                      "고른 만큼 낙관적으로 부풀려져 있습니다. 독립 검증 표본에서 확인하세요.")

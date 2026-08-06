@@ -9,7 +9,7 @@ third-party dependencies and stays reproducible on any Python 3.9+ machine.
 from __future__ import annotations
 
 import math
-from typing import List, Sequence, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 __all__ = [
     "norm_cdf",
@@ -21,6 +21,7 @@ __all__ = [
     "mean",
     "var_ddof1",
     "cov_ddof1",
+    "holm_adjust",
 ]
 
 
@@ -120,6 +121,32 @@ def cov_ddof1(xs: Sequence[float], ys: Sequence[float]) -> float:
         return 0.0
     mx, my = mean(xs), mean(ys)
     return math.fsum((x - mx) * (y - my) for x, y in zip(xs, ys)) / (n - 1)
+
+
+def holm_adjust(pvalues: Sequence[Optional[float]]) -> List[Optional[float]]:
+    """Holm-Bonferroni adjusted p-values, in the input order.
+
+    Used when several markers are compared against the same reference test: the
+    unadjusted DeLong p-values would give one false positive in twenty *per
+    comparison*. Holm is uniformly more powerful than Bonferroni and needs no
+    independence assumption, which matters because comparisons sharing a
+    reference marker are strongly correlated. ``None`` entries (a comparison
+    whose variance was not estimable) stay ``None`` and are excluded from the
+    family size, since a test that was never performed cannot be corrected.
+    """
+    idx = [i for i, p in enumerate(pvalues)
+           if p is not None and not math.isnan(p)]
+    out: List[Optional[float]] = [None] * len(pvalues)
+    m = len(idx)
+    if m == 0:
+        return out
+    order = sorted(idx, key=lambda i: pvalues[i])  # type: ignore[index,return-value]
+    running = 0.0
+    for rank, i in enumerate(order):
+        adj = (m - rank) * float(pvalues[i])  # type: ignore[arg-type]
+        running = max(running, min(1.0, adj))  # enforce monotonicity
+        out[i] = running
+    return out
 
 
 def wilson_ci(k: int, n: int, alpha: float = 0.05) -> Tuple[float, float]:
