@@ -7,8 +7,8 @@ echo "=================================================================="
 echo "  두 집단(또는 여러 집단)의 CSV를 넣으면 정규성·등분산을 점검한 뒤"
 echo "  알맞은 검정(t / Welch / Mann-Whitney / ANOVA / Kruskal-Wallis)을"
 echo "  자동으로 골라 실행하고, 효과크기와 논문용 문장까지 출력합니다."
-echo "  이진(예/아니오) 결과, 등가성·비열등성(TOST), 여러 엔드포인트 동시"
-echo "  분석, 기저값 보정(ANCOVA)까지 한 도구에서 처리합니다."
+echo "  이진(예/아니오) 결과, 같은 대상의 이진 결과(McNemar), 등가성·비열등성"
+echo "  (TOST), 여러 엔드포인트 동시 분석, 기저값 보정(ANCOVA)까지 처리합니다."
 echo ""
 echo "  내 데이터로 실행:"
 echo "    python3 -m statwise.cli 내파일.csv --value 값열 --group 그룹열"
@@ -56,6 +56,18 @@ echo "### 예제 4) 반응자 비율 — 이진 결과 (RD / RR / OR / NNT + 카
 echo "\$ statwise examples/responder_two_arm.csv --binary --value responder --group arm --reference sham"
 echo ""
 run examples/responder_two_arm.csv --binary --value responder --group arm --reference sham
+
+echo ""
+echo "### 예제 4-1) 같은 대상의 반응자 전/후 — 대응 이진 (McNemar + 대응 RD·kappa)"
+echo "\$ statwise examples/responder_pre_post_paired.csv --binary --paired --value responder --group time --id subject --baseline pre --event-is benefit"
+echo ""
+run examples/responder_pre_post_paired.csv --binary --paired --value responder --group time --id subject --baseline pre --event-is benefit
+
+echo ""
+echo "### 예제 4-2) 신속검사 vs PCR — 같은 검체 두 검사의 일치도(kappa)와 McNemar"
+echo "\$ statwise examples/diagnostic_agreement_paired.csv --binary --paired --wide --columns rapid_test,pcr"
+echo ""
+run examples/diagnostic_agreement_paired.csv --binary --paired --wide --columns rapid_test,pcr
 
 echo ""
 echo "### 예제 5) 등가성 검정(TOST) — '차이가 없다'가 아니라 '임상적으로 같다'"

@@ -6,16 +6,20 @@ import csv
 import io
 import json
 import math
+import unicodedata
 from typing import Any, Dict, List
 
 from .analyze import AnalysisResult
 from .ancova import AncovaResult
 from .binary import BinaryResult
 from .endpoints import CORRECTION_LABELS
+from .mcnemar import PairedBinaryResult
 
 __all__ = ["render_text", "render_json", "result_to_dict",
            "render_binary_text", "render_binary_json",
            "binary_to_dict", "binary_sentence",
+           "render_mcnemar_text", "render_mcnemar_json", "mcnemar_to_dict",
+           "mcnemar_sentence",
            "render_multi_text", "render_multi_json", "multi_to_dict",
            "render_csv", "render_multi_csv",
            "render_ancova_text", "render_ancova_json", "ancova_to_dict"]
@@ -31,6 +35,9 @@ _INTEGRITY_MARKERS = (
     "대소문자/공백만 다른 그룹 라벨",
     "non-responder imputation",
     "해석할 수 없습니다",
+    # no discordant pairs: p = 1.000 is "cannot judge", not "no difference",
+    # and the sentence would state the reading the warning forbids
+    "판단 불가",
 )
 
 
@@ -984,6 +991,200 @@ def render_binary_json(res: BinaryResult, indent: int = 2) -> str:
 
 
 # ==========================================================================
+# paired binary (McNemar)
+# ==========================================================================
+
+def _dwidth(text: str) -> int:
+    """Terminal columns ``text`` occupies (CJK characters take two).
+
+    The matched-pair table is the one place a *user-supplied* label sits inside
+    a grid next to Korean header text, and ``len()`` counts '사건' as 2 where a
+    terminal draws 4 — enough to shear every column of the table apart.
+    """
+    return sum(2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+               for ch in text)
+
+
+def _dpad(text: str, width: int, right: bool = False) -> str:
+    pad = " " * max(0, width - _dwidth(text))
+    return (pad + text) if right else (text + pad)
+
+
+def _mcnemar_estimate_line(est, conf_pct: int) -> str:
+    if est.name.startswith("Risk difference"):
+        shown = _pct(est.value)
+        ci = ("" if est.ci_low is None else
+              f"  [{conf_pct}% CI {_pct(est.ci_low)}, {_pct(est.ci_high)}]")
+    elif "NNT" in est.name or est.name.startswith("Number needed"):
+        shown = _ratio(est.value, 1)
+        ci = ("" if est.ci_low is None else
+              f"  [{conf_pct}% CI {_ratio(est.ci_low, 1)}, "
+              f"{_ratio(est.ci_high, 1)}]")
+    else:
+        shown = _ratio(est.value)
+        ci = ("" if est.ci_low is None else
+              f"  [{conf_pct}% CI {_ratio(est.ci_low)}, {_ratio(est.ci_high)}]")
+    mag = f"  ({est.magnitude})" if est.magnitude else ""
+    return f"    {est.name} = {shown}{ci}{mag}"
+
+
+def render_mcnemar_text(res: PairedBinaryResult) -> str:
+    """Human-readable report for a paired binary (McNemar) comparison."""
+    lines: List[str] = []
+    L = lines.append
+    t = res.table
+    conf_pct = int(round((1.0 - res.alpha) * 100))
+    a = _elide(t.label_a, 22)
+    b = _elide(t.label_b, 22)
+
+    L("=" * 66)
+    L("  statwise — 대응 이진 결과 리포트 / Paired binary (McNemar) report")
+    L("=" * 66)
+    L("")
+    L("[1] 짝지어진 2x2 표 / Matched-pair table")
+    L(f"    (행 = {a}, 열 = {b}; 같은 대상 {t.n}쌍)")
+    rows = [("", f"{b}: 사건", f"{b}: 비사건", "합계"),
+            (f"{a}: 사건", t.both, t.a_only, t.events_a),
+            (f"{a}: 비사건", t.b_only, t.neither, t.n - t.events_a),
+            ("합계", t.events_b, t.n - t.events_b, t.n)]
+    w0 = max(_dwidth(str(r[0])) for r in rows) + 2
+    cw = [max(_dwidth(str(r[j])) for r in rows) + 3 for j in (1, 2, 3)]
+    for r in rows:
+        L("    " + _dpad(str(r[0]), w0)
+          + "".join(_dpad(str(r[j + 1]), cw[j], right=True) for j in range(3)))
+    L("")
+    L(f"    {a} 사건률 = {t.events_a}/{t.n} ({_pct(t.prop_a)}), "
+      f"{b} 사건률 = {t.events_b}/{t.n} ({_pct(t.prop_b)})")
+    L(f"    불일치(discordant) 쌍 = {t.n_discordant}개 "
+      f"({a}만 {t.a_only}, {b}만 {t.b_only}) — 검정은 이 쌍들만 사용합니다.")
+    if any(res.missing.values()):
+        miss = ", ".join(f"{k}={v}" for k, v in res.missing.items() if v)
+        L(f"    (제외된 관측치: {miss} — 짝이 없거나 값이 결측/해석 불가)")
+
+    L("")
+    L("[2] 선택된 검정 / Selected test")
+    L(f"    → {res.test_name}")
+    L(f"      (근거: {res.reason})")
+    if res.statistic is not None and res.statistic == res.statistic:
+        L(f"      χ²={_num(res.statistic)}, df={_fmt_df(res.df)}, "
+          f"p={_fmt_p(res.pvalue)}")
+    else:
+        L(f"      p={_fmt_p(res.pvalue)}")
+    sig = "통계적으로 유의함" if res.significant else "유의하지 않음"
+    adj = res.pvalue_adj
+    if adj is not None and adj != res.pvalue:
+        cmp = '<' if adj == adj and adj < res.alpha else '≥'
+        L(f"      유의수준 α={res.alpha}: {sig} "
+          f"(보정 전 p={_fmt_p(res.pvalue)}, 보정 후 "
+          f"p(adj)={_fmt_p(adj)} {cmp} {res.alpha})")
+    else:
+        cmp = '<' if res.pvalue == res.pvalue and res.pvalue < res.alpha else '≥'
+        L(f"      유의수준 α={res.alpha}: {sig} (p{cmp}{res.alpha})")
+
+    if res.estimates:
+        L("")
+        L("[3] 효과 크기 / Effect measures")
+        for est in res.estimates:
+            L(_mcnemar_estimate_line(est, conf_pct))
+            if est.method:
+                L(f"      방법: {est.method}")
+            if est.note:
+                L(f"      주: {est.note}")
+        L(f"    (기준 reference = {b}: 위험차 = p({a}) − p({b}))")
+        L("    (조건부 오즈비는 **불일치 쌍만**의 비율입니다 — 두 사건률의 "
+          "주변부 오즈비와 다르며 그렇게 인용하면 안 됩니다.)")
+
+    if res.warnings:
+        L("")
+        L("[!] 주의 / Warnings")
+        for warn in res.warnings:
+            L(f"    - {warn}")
+
+    _render_sentence(res, L, mcnemar_sentence(res) + _adjusted_phrase(res))
+    L("")
+    return "\n".join(lines)
+
+
+def mcnemar_sentence(res: PairedBinaryResult) -> str:
+    """APA-ish sentence for a paired binary comparison."""
+    t = res.table
+    adjusted = (res.pvalue_adj is not None and res.pvalue_adj != res.pvalue)
+    label = "unadjusted p" if adjusted else "p"
+    psign = (f"{label} < 0.001" if res.pvalue == res.pvalue
+             and res.pvalue < 0.001 else f"{label} = {res.pvalue:.3f}")
+    conf_pct = int(round((1.0 - res.alpha) * 100))
+    sig = ("statistically significant" if res.significant
+           else "not statistically significant")
+    stat = ("" if res.statistic is None or res.statistic != res.statistic
+            else f"χ²({_fmt_df(res.df)}) = {_num(res.statistic, 2)}, ")
+    test = ("an exact McNemar test" if res.method == "exact"
+            else "a continuity-corrected McNemar test"
+            if "continuity" in res.test_name else "McNemar's test")
+    out = (f"Among {t.n} matched pairs the event rate was "
+           f"{t.events_a}/{t.n} ({_pct(t.prop_a)}) under {t.label_a} versus "
+           f"{t.events_b}/{t.n} ({_pct(t.prop_b)}) under {t.label_b} "
+           f"({t.a_only} and {t.b_only} discordant pairs); the change was "
+           f"{sig} by {test} ({stat}{psign}).")
+    rd = next((e for e in res.estimates
+               if e.name.startswith("Risk difference")), None)
+    if rd is not None and rd.ci_low is not None:
+        out += (f" Paired risk difference {_pct(rd.value)} "
+                f"({conf_pct}% CI {_pct(rd.ci_low)} to {_pct(rd.ci_high)}).")
+        # Without this the sentence states a non-significant test and an
+        # interval excluding zero side by side, and a reader picks whichever
+        # half suits them. The conflict is real and has to be in the sentence,
+        # not only in the warnings block above it.
+        excludes_zero = not (rd.ci_low <= 0.0 <= rd.ci_high)
+        if excludes_zero != res.significant:
+            out += (" Note that the test and the interval disagree here: the "
+                    "test is exact (conservative) while the score interval is "
+                    "asymptotic, so this is a borderline result.")
+    return out
+
+
+def mcnemar_to_dict(res: PairedBinaryResult) -> Dict[str, Any]:
+    """Serialize a PairedBinaryResult into a plain JSON-friendly dict."""
+    t = res.table
+    out: Dict[str, Any] = {
+        "schema": "statwise/paired-binary/1",
+        "alpha": res.alpha,
+        "design": "paired",
+        "conditions": {"a": t.label_a, "b": t.label_b},
+        "table": {
+            "n_pairs": t.n, "both": t.both, "a_only": t.a_only,
+            "b_only": t.b_only, "neither": t.neither,
+            "n_discordant": t.n_discordant,
+            "events_a": t.events_a, "events_b": t.events_b,
+            "proportion_a": _jnum(t.prop_a), "proportion_b": _jnum(t.prop_b),
+        },
+        "missing": {k: int(v) for k, v in res.missing.items()},
+        "test": {
+            "name": res.test_name,
+            "statistic": _jnum(res.statistic),
+            "df": _jnum(res.df),
+            "pvalue": _jnum(res.pvalue),
+            "pvalue_adj": _jnum(res.pvalue_adj),
+            "method": res.method,
+            "significant": bool(res.significant),
+            "reason": res.reason,
+        },
+        "estimates": [
+            {"name": e.name, "value": _jnum(e.value), "ci_low": _jnum(e.ci_low),
+             "ci_high": _jnum(e.ci_high), "conf": e.conf, "method": e.method,
+             "magnitude": e.magnitude, "note": e.note}
+            for e in res.estimates
+        ],
+        "warnings": list(res.warnings),
+    }
+    out["sentence"] = mcnemar_sentence(res)
+    return out
+
+
+def render_mcnemar_json(res: PairedBinaryResult, indent: int = 2) -> str:
+    return json.dumps(mcnemar_to_dict(res), indent=indent, ensure_ascii=False)
+
+
+# ==========================================================================
 # several endpoints at once
 # ==========================================================================
 
@@ -1245,6 +1446,35 @@ def _binary_rows(res: BinaryResult, endpoint: str = "") -> List[List[str]]:
     return rows
 
 
+def _mcnemar_rows(res: PairedBinaryResult, endpoint: str = "") -> List[List[str]]:
+    t = res.table
+    comparison = f"{t.label_a} vs {t.label_b} (paired)"
+    n_all = (f"{t.label_a}={t.events_a}/{t.n}|{t.label_b}={t.events_b}/{t.n}"
+             f"|discordant={t.a_only}/{t.b_only}")
+    rows: List[List[str]] = []
+    first = res.estimates[0] if res.estimates else None
+    rows.append([endpoint, "paired-binary", comparison, res.test_name,
+                 str(t.n), str(t.n), n_all,
+                 first.name if first else "",
+                 _csv_num(first.value if first else None),
+                 _csv_num(first.ci_low if first else None),
+                 _csv_num(first.ci_high if first else None),
+                 repr(first.conf) if first and first.ci_low is not None else "",
+                 _csv_num(res.statistic), _csv_num(res.df),
+                 _csv_num(res.pvalue), _csv_num(res.pvalue_adj),
+                 "yes" if res.significant else "no",
+                 "significant change" if res.significant
+                 else "no significant change"])
+    for extra in res.estimates[1:]:
+        rows.append([endpoint, "paired-binary-effect", comparison,
+                     res.test_name, str(t.n), str(t.n), n_all, extra.name,
+                     _csv_num(extra.value), _csv_num(extra.ci_low),
+                     _csv_num(extra.ci_high),
+                     repr(extra.conf) if extra.ci_low is not None else "",
+                     "", "", "", "", "", ""])
+    return rows
+
+
 def _ancova_rows(res, endpoint: str = "") -> List[List[str]]:
     """Adjusted-mean rows, the omnibus row, and one row per adjusted contrast."""
     rows: List[List[str]] = []
@@ -1316,6 +1546,8 @@ def render_csv(res) -> str:
     """A tidy one-row-per-comparison CSV of the results (for Excel / R)."""
     if isinstance(res, BinaryResult):
         return _rows_to_csv(_binary_rows(res))
+    if isinstance(res, PairedBinaryResult):
+        return _rows_to_csv(_mcnemar_rows(res))
     if isinstance(res, AncovaResult):
         return _rows_to_csv(_ancova_rows(res))
     return _rows_to_csv(_analysis_rows(res))

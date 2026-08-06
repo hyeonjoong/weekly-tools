@@ -6,11 +6,14 @@
 실행**하고, 효과크기(신뢰구간 포함 — 모든 구간의 신뢰수준은 `--alpha` 를 따릅니다)와
 **논문에 붙일 문장 초안**까지 출력합니다.
 
-연속형 결과만이 아닙니다. 임상시험 프로토콜에 실제로 들어 있는 나머지 네 가지도
+연속형 결과만이 아닙니다. 임상시험 프로토콜에 실제로 들어 있는 나머지 다섯 가지도
 한 도구에서 처리합니다:
 
 - **이진(반응자/이상반응) 결과** — `--binary`: 반응률(Wilson CI), 카이제곱/Fisher
   정확검정, **위험차(RD)·위험비(RR)·오즈비(OR)·NNT** 를 신뢰구간과 함께.
+- **같은 대상의 이진 결과** — `--binary --paired`: **McNemar**(정확/카이제곱),
+  대응 위험차(Tango 점수 구간), 정확 조건부 오즈비, **Cohen's kappa**. 치료 전/후
+  반응 여부, 또는 같은 검체에 대한 두 검사·두 판독자 비교에 씁니다.
 - **등가성·비열등성** — `--equivalence-margin` / `--ni-margin`: "차이가 없다"가
   아니라 **"임상적으로 같다/뒤지지 않는다"** 를 TOST로 검정.
 - **여러 엔드포인트 동시 분석** — `--values isi,psqi,hrv`: 엔드포인트별로 알맞은
@@ -50,6 +53,9 @@ reports exact small-sample p-values and a Hodges-Lehmann location CI for the ran
 tests. Beyond continuous outcomes it also covers the rest of a real protocol: **binary
 responder / adverse-event endpoints** (`--binary`: Wilson rates, chi-square or Fisher,
 risk difference with a Newcombe interval, risk ratio, odds ratio and NNT),
+**paired binary endpoints** (`--binary --paired`: McNemar exact/chi-square, paired risk
+difference with a Tango score interval, exact conditional odds ratio and Cohen's kappa
+— for pre/post responder status or two diagnostic tests on the same samples),
 **equivalence and non-inferiority** (`--equivalence-margin` / `--ni-margin`: TOST, so
 you can actually claim similarity instead of merely failing to reject a difference),
 and **several endpoints in one pass with multiplicity control across them**
@@ -259,6 +265,87 @@ statwise examples/responder_two_arm.csv --binary --value responder --group arm \
 - **집계표 입력**: 이미 `arm,responders,total` 형태로 세어 둔 표라면
   `--events-col responders --n-col total --group arm`.
 - 3그룹 이상이면 k×2 카이제곱 + **Cramér's V**, 유의하면 쌍별 2×2 사후검정(Holm/BH).
+
+### 3-b) 대응 이진(McNemar) — 같은 대상을 두 번 잰 예/아니오 결과
+
+같은 환자의 치료 전/후 반응 여부, 또는 같은 검체에 대한 **두 검사·두 판독자**의
+양성/음성 판정은 짝지어진 자료입니다. 여기에 `--binary` 만 쓰면 한 사람을 두 사람으로
+세어 **표본 수가 두 배가 되고 p값이 실제보다 작아집니다.** `--paired` 를 함께 주세요.
+
+```bash
+statwise examples/diagnostic_agreement_paired.csv --binary --paired \
+    --wide --columns rapid_test,pcr
+```
+
+```
+[1] 짝지어진 2x2 표 / Matched-pair table
+    (행 = rapid_test, 열 = pcr; 같은 대상 30쌍)
+                           pcr: 사건   pcr: 비사건   합계
+    rapid_test: 사건              10             1     11
+    rapid_test: 비사건             7            12     19
+    합계                          17            13     30
+
+    rapid_test 사건률 = 11/30 (36.7%), pcr 사건률 = 17/30 (56.7%)
+    불일치(discordant) 쌍 = 8개 (rapid_test만 1, pcr만 7) — 검정은 이 쌍들만 사용합니다.
+
+[2] 선택된 검정 / Selected test
+    → McNemar exact test (binomial)
+      (근거: 불일치 쌍 8개 < 25 → 정확 이항검정(exact))
+      p=0.070
+      유의수준 α=0.05: 유의하지 않음 (p≥0.05)
+
+[3] 효과 크기 / Effect measures
+    Risk difference (paired) = -20.0%  [95% CI -38.6%, -1.9%]
+      방법: Tango 점수(score) 구간
+    Conditional odds ratio (paired) = 0.143  [95% CI 0.003, 1.112]
+      방법: 정확(Clopper-Pearson) 구간 변환
+    NNT/NNH (1/|위험차|) = 5.0  [95% CI 2.6, 53.2]
+      방법: 1/RD (inverted from the RD CI)
+      주: (…설명 생략…)
+    Cohen's kappa (일치도) = 0.485  [95% CI 0.202, 0.768]  (moderate)
+      방법: Fleiss 대표본 근사
+      주: (…설명 생략…)
+    (기준 reference = pcr: 위험차 = p(rapid_test) − p(pcr))
+    (조건부 오즈비는 **불일치 쌍만**의 비율입니다 — 두 사건률의 주변부 오즈비와 다르며 그렇게 인용하면 안 됩니다.)
+
+[!] 주의 / Warnings
+    - 불일치 쌍이 8개뿐입니다 — 검정력이 사실상 이 개수만으로 정해지므로(일치 쌍은 정보를 주지 않습니다) 결과를 단정적으로 해석하지 마세요.
+    - McNemar p값과 대응 위험차 신뢰구간의 판정이 서로 다릅니다 (p=0.0703, 95% CI [-38.6%, -1.9%]). p값은 정확 이항검정, 신뢰구간 …
+    - 이진 결과 매핑(반드시 확인하세요): 사건(event) = {Y}, 비사건(non-event) = {N}
+```
+
+wide 형식에서 부호는 `--columns` 의 **두 번째 열이 기준**입니다 (위 예에서는 `pcr`).
+행 순서·열 순서에 결론이 좌우되지 않게 하려면 `--baseline pcr` 처럼 명시하세요 —
+long 형식과 같은 규칙입니다.
+
+long 형식이면 `--value` / `--group` / `--id` 로, 부호는 `--baseline` 으로 고정합니다:
+
+```bash
+statwise examples/responder_pre_post_paired.csv --binary --paired \
+    --value responder --group time --id subject --baseline pre --event-is benefit
+```
+
+- **일치 쌍은 검정에 쓰이지 않습니다.** 검정력은 사실상 불일치 쌍의 개수만으로
+  정해지므로, 그 개수를 항상 출력하고 10개 미만이면 경고합니다. 0개면 p=1.000이
+  나오지만 이는 "차이 없음의 증거"가 아니라 **판단 불가**이며 그렇게 표시합니다.
+- **조건부 오즈비는 불일치 쌍만의 비**입니다. 두 사건률의 주변부 오즈비와 다른
+  값이므로 그렇게 인용하면 안 되고, 출력에도 그 경고가 붙습니다.
+- **Cohen's kappa** 는 McNemar와 다른 질문에 답합니다 — McNemar는 "한쪽이 더 자주
+  양성인가"(주변부 이동), kappa는 "같은 검체에서 일치하는가"(개별 일치). 두 판독자가
+  완벽히 대칭으로 어긋나면 McNemar는 p=1.000, kappa는 0에 가깝습니다. 두 검사 비교
+  때는 반드시 둘 다 보세요.
+  **치료 전/후 설계에서는 kappa를 신뢰도로 읽으면 안 됩니다** — 거기서 일치도가 낮은
+  것은 치료가 실제로 사람을 바꿨다는 뜻, 즉 의도한 효과입니다. 출력의 kappa 줄에도
+  같은 주가 항상 붙습니다. kappa는 유병률(주변 분포)에 민감해서 원자료 일치율이 높아도
+  낮게 나올 수 있고(kappa 역설), 신뢰구간은 Fleiss 대표본 근사라 짝이 30개 미만이면
+  경고와 함께 "폭을 그대로 인용하지 말라"고 알립니다. 한쪽 조건에서 한 범주만
+  관측되면 kappa가 자료와 무관하게 고정되므로 신뢰구간을 아예 보고하지 않습니다.
+- **McNemar p값과 대응 위험차 신뢰구간은 서로 다른 방식**입니다(정확 이항검정 vs
+  Tango 점수 근사). 작은 표본에서는 둘의 판정이 갈릴 수 있어, 그럴 때는 경고를 띄우고
+  **논문용 문장에도 "경계선 결과"라고 명시**합니다 — 유리한 쪽만 골라 쓰지 마세요.
+- 한쪽 값이 결측/해석 불가면 **그 쌍 전체가 제외**되고 몇 개가 빠졌는지 표시합니다.
+- 집계된 표(`--events-col`/`--n-col`)로는 McNemar를 계산할 수 없어 거부합니다 —
+  짝지어진 개별 관측치가 있어야 2×2 불일치 칸을 셀 수 있습니다.
 
 ### 4) 등가성(TOST)·비열등성 — "차이가 없다"를 제대로 주장하기
 
@@ -513,7 +600,9 @@ ci_low, ci_high, ci_conf, statistic, df, pvalue, pvalue_adj, significant, verdic
 | `--binary` | 이진(yes/no) 결과 분석 (RD/RR/OR/NNT + χ²·Fisher) |
 | `--event-value VALUE` | (`--binary`) '사건'으로 볼 값 지정 |
 | `--events-col`, `--n-col` | (`--binary`) 이미 집계된 표 입력 |
-| `--binary-test auto\|chisq\|chisq-yates\|fisher` | (`--binary`) 검정 고정 |
+| `--binary` + `--paired` | 대응 이진(McNemar) 분석 — 같은 대상을 두 번 잰 예/아니오 결과 |
+| `--binary-test auto\|chisq\|chisq-yates\|fisher` | (독립 `--binary`) 검정 고정 |
+| `--binary-test auto\|exact\|mcnemar\|mcnemar-cc` | (`--binary --paired`) 검정 고정 — 두 메뉴는 **서로 배타적**이라 교차하면 거부합니다 |
 | `--equivalence-margin Δ` | 등가성(TOST) 마진 — `1.5`(=±1.5) 또는 `-1.0,2.0` |
 | `--ni-margin Δ` | 비열등성 마진(양수) |
 | `--ni-direction higher_is_better\|lower_is_better` | 결과값의 좋은 방향 (**`--ni-margin` 사용 시 필수** — 기본값 없음) |
@@ -581,6 +670,12 @@ ICH E9를 따르는 규제 대상 분석이라면 **`--test` 로 사전 지정�
   카이제곱 + **Cramér's V**(Fisher는 2×2 전용), omnibus가 유의하면 쌍별 2×2 사후검정.
   구간 방법은 비율 = **Wilson**, 위험차 = **Newcombe hybrid score**,
   위험비 = **Katz log**, 오즈비 = **Woolf logit**.
+- **대응 이진 결과 (`--binary --paired`)**: 불일치(discordant) 쌍이 25개 미만이면
+  **McNemar 정확 이항검정**, 이상이면 **McNemar 카이제곱**(df=1);
+  `--binary-test exact|mcnemar|mcnemar-cc` 로 고정할 수 있고, 독립 2군용
+  `chisq`/`fisher` 를 여기에 주면 거부합니다(그 반대도 마찬가지). 구간 방법은
+  대응 위험차 = **Tango 점수(score) 구간**, 조건부 오즈비 = **정확(Clopper-Pearson)
+  구간 변환**, 일치도 = **Cohen's kappa + Fleiss 대표본 구간**.
 - 비모수(Mann-Whitney / Wilcoxon) 검정에는 **위치차의 Hodges-Lehmann 추정값 +
   분포무관 신뢰구간**을 함께 보고합니다(독립표본은 쌍별 차이의 중앙값, 대응표본은
   Walsh 평균의 중앙값; 소표본은 정확 순위분포, 대표본은 정규근사).
@@ -621,9 +716,18 @@ ICH E9를 따르는 규제 대상 분석이라면 **`--test` 로 사전 지정�
   반복측정/혼합모형(random effect), 비선형 공변량 항은 범위 밖입니다. 기울기
   동질성이 기각되면 그 사실을 경고로 알릴 뿐 모형을 바꾸지 않습니다. 또 ANCOVA는
   **완전자료(complete-case)** 로 계산하며, 제외된 행 수를 보고할 뿐 대체하지 않습니다.
-- **대응 이진 자료(McNemar)**, **생존분석**, **반복측정 ANOVA/혼합모형**,
-  **다중대체(multiple imputation)** 는 범위 밖입니다. 결측은 분석에서 제외하고 그
-  개수를 CONSORT식으로 보고할 뿐, 대체하지 않습니다.
+- **대응 이진 자료는 `--binary --paired` 로 지원합니다**(McNemar 정확/카이제곱,
+  Tango 점수 구간의 대응 위험차, 정확 조건부 오즈비, Cohen's kappa). 단 **2조건
+  2×2 표 하나**만 다룹니다 — 3조건 이상의 Cochran's Q, 층화(Mantel-Haenszel),
+  대응 비율에 대한 등가/비열등성 검정은 범위 밖이고, 시도하면 명시적으로 거부합니다.
+- **생존분석**, **반복측정 ANOVA/혼합모형**, **다중대체(multiple imputation)** 는
+  범위 밖입니다. 결측은 분석에서 제외하고 그 개수를 CONSORT식으로 보고할 뿐,
+  대체하지 않습니다.
+- **같은 대상이 같은 조건에 여러 번 기록**되어 있으면 **마지막으로 나온 사용 가능한
+  값**만 쓰고 그 사실을 경고합니다(재측정인지 입력 오류인지는 도구가 판단할 수 없습니다).
+  대응 분석에서 한쪽 값이 결측이면 **그 쌍 전체**가 빠지며, 빠진 수를 조건별로 셉니다.
+- **Wilcoxon 부호순위검정은 차이가 정확히 0인 쌍을 버립니다**(고전적 Wilcoxon, Pratt
+  방식 아님). 몇 쌍을 버렸는지 출력에 표시합니다.
 - **다중 엔드포인트 보정**은 omnibus p값들에 대해서만 적용합니다(엔드포인트 안의
   사후검정은 별도 패밀리). 계층적 검정(gatekeeping)이나 사전 지정 순서 검정은
   지원하지 않습니다.
@@ -689,6 +793,12 @@ d = result_to_dict(res)          # JSON-safe dict (NaN/Inf -> None)
 b = compare_binary([("device", (15, 24)), ("sham", (5, 24))])
 print(render_binary_text(b))
 
+# 대응 이진 (McNemar): 행이 맞춰진 0/1 지표 두 벌
+from statwise import compare_paired_binary
+from statwise.report import render_mcnemar_text
+m = compare_paired_binary(("post", [1, 1, 0, 1]), ("pre", [0, 1, 0, 0]))
+print(render_mcnemar_text(m))
+
 # 공변량 보정 (ANCOVA): 한 행이 한 대상
 from statwise import AncovaRecord, run_ancova
 from statwise.report import render_ancova_text
@@ -710,7 +820,7 @@ JSON 출력에는 텍스트 리포트에 없는 항목도 들어 있습니다 �
 ## Tests
 
 ```bash
-python3 -m pytest    # 609 tests, 전부 오프라인, SciPy/statsmodels 참조값과 대조
+python3 -m pytest    # 701 tests, 전부 오프라인, SciPy/statsmodels 참조값과 대조
 ```
 
 ## License

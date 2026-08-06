@@ -279,10 +279,15 @@ def test_binary_forced_fisher(binary_csv, capsys):
     assert "Fisher's exact test" in capsys.readouterr().out
 
 
-def test_binary_rejects_paired(binary_csv, capsys):
-    assert main([binary_csv, "--binary", "--paired", "--value", "responder",
-                 "--group", "arm", "--id", "subject"]) == 2
-    assert "McNemar" in capsys.readouterr().err
+def test_binary_paired_needs_two_conditions(binary_csv, capsys):
+    # the independent-arms fixture has an 'arm' column with two levels but no
+    # repeated subject, so the McNemar path must fail on the pairing, not on
+    # a blanket "not supported" refusal (which it used to give)
+    rc = main([binary_csv, "--binary", "--paired", "--value", "responder",
+               "--group", "arm", "--id", "subject"])
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "McNemar 검정이 필요하며 현재 지원하지 않습니다" not in err
 
 
 def test_binary_rejects_equivalence_margin(binary_csv, capsys):

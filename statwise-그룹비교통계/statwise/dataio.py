@@ -25,6 +25,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 __all__ = ["load_long", "load_wide", "load_paired_long", "load_paired_wide",
            "load_binary_long", "load_binary_wide", "load_binary_counts",
+           "load_paired_binary_long", "load_paired_binary_wide",
            "load_multi_long", "load_ancova_long", "parse_float",
            "map_binary_levels",
            "summarize_values", "screen_group_labels", "screen_values",
@@ -667,6 +668,190 @@ def load_binary_counts(path: str, events_col: str, n_col: str, group_col: str,
 
 
 # --------------------------------------------------------------------------
+# paired binary (same subjects measured twice)
+# --------------------------------------------------------------------------
+
+def _indicator(cell: str, events: set, non_events: set) -> Optional[int]:
+    """1 / 0 / None (unusable) for one raw cell under a level mapping."""
+    u = _clean_token(cell).upper()
+    if u == "" or u in _NA_LABELS:
+        return None
+    if u in events:
+        return 1
+    if u in non_events:
+        return 0
+    return None
+
+
+def load_paired_binary_long(path: str, value_col: str, group_col: str,
+                            id_col: str, event_value: Optional[str] = None,
+                            delimiter: Optional[str] = None,
+                            notes: Optional[List[str]] = None,
+                            baseline: Optional[str] = None,
+                            missing_out: Optional[Dict[str, int]] = None
+                            ) -> Tuple[Tuple[str, List[int]],
+                                       Tuple[str, List[int]]]:
+    """Load a binary endpoint measured twice per subject, from a long file.
+
+    Same shape as :func:`load_paired_long` — an id column, a condition column
+    with exactly two levels, and a yes/no value column — but the values are
+    mapped to 1/0 event indicators instead of parsed as numbers.  ``baseline``
+    names the *reference* condition, which is placed second so the reported
+    difference is ``(other − baseline)``.
+    """
+    header, data = _read_rows(path, delimiter, notes)
+    try:
+        vi = header.index(value_col)
+        gi = header.index(group_col)
+        ii = header.index(id_col)
+    except ValueError:
+        raise ValueError(
+            f"column not found. header={header}; needed value='{value_col}', "
+            f"group='{group_col}', id='{id_col}'")
+
+    levels: List[str] = []
+    raw: Dict[str, Dict[str, str]] = {}
+    dup_ids: set = set()
+    for row in data:
+        if max(vi, gi, ii) >= len(row):
+            continue
+        grp, sid = row[gi].strip(), row[ii].strip()
+        if grp == "" or grp.upper() in _NA_LABELS or sid == "" \
+                or sid.upper() in _NA_LABELS:
+            continue
+        if grp not in raw:
+            raw[grp] = {}
+            levels.append(grp)
+        if sid in raw[grp]:
+            dup_ids.add((grp, sid))
+            # "last value wins" must not let a stray blank re-entry row erase a
+            # real measurement -- that silently drops the whole subject and
+            # makes the duplicate warning ("마지막 값만 사용") untrue.
+            if _clean_token(row[vi]) == "" and _clean_token(raw[grp][sid]) != "":
+                continue
+        raw[grp][sid] = row[vi]
+    if len(levels) != 2:
+        raise ValueError(
+            f"대응(paired) 분석에는 그룹 열 '{group_col}'에 정확히 2개 수준이 "
+            f"필요합니다. 발견된 수준 {len(levels)}종 중 일부: "
+            f"{summarize_values(levels, 3)}")
+    if baseline is not None:
+        if baseline not in levels:
+            raise ValueError(
+                f"--baseline '{baseline}' 은(는) 그룹 열의 수준이 아닙니다. "
+                f"가능한 값: {levels}")
+        lb = baseline
+        la = levels[0] if levels[1] == baseline else levels[1]
+    else:
+        la, lb = levels[0], levels[1]
+    events, non_events = map_binary_levels(
+        [c for g in levels for c in raw[g].values()], event_value, notes)
+
+    order: List[str] = []
+    seen: set = set()
+    for row in data:
+        if ii < len(row):
+            sid = row[ii].strip()
+            if sid in raw[la] and sid in raw[lb] and sid not in seen:
+                order.append(sid)
+                seen.add(sid)
+    va: List[int] = []
+    vb: List[int] = []
+    lost_a = lost_b = 0
+    for sid in order:
+        ia = _indicator(raw[la][sid], events, non_events)
+        ib = _indicator(raw[lb][sid], events, non_events)
+        if ia is None or ib is None:
+            # one half unusable loses the whole pair; when *both* halves are
+            # unusable the subject must still be counted, or a reader
+            # reconciling n_pairs against the CSV finds subjects that vanished
+            # without a trace
+            lost_a += 1
+            lost_b += 1
+            continue
+        va.append(ia)
+        vb.append(ib)
+    unpaired_a = len(raw[la]) - len(order)
+    unpaired_b = len(raw[lb]) - len(order)
+    if missing_out is not None:
+        missing_out[la] = unpaired_a + lost_a
+        missing_out[lb] = unpaired_b + lost_b
+    if notes is not None:
+        notes.append(_levels_note(events, non_events))
+        if unpaired_a + unpaired_b or lost_a:
+            notes.append(
+                f"짝을 이루지 못한 관측치 {unpaired_a + unpaired_b}개, 값이 "
+                f"결측/해석 불가라 제외된 쌍 {lost_a}개.")
+        if dup_ids:
+            notes.append(
+                f"같은 대상이 같은 조건에 여러 번 기록되어 있어 **마지막 값만** "
+                f"사용했습니다 ({len(dup_ids)}건). 재측정인지 입력 오류인지 "
+                f"확인하세요 — 어느 쪽을 쓸지는 도구가 판단할 수 없습니다.")
+    if not va:
+        raise ValueError("짝을 이루는 관측치가 없습니다 (id/그룹/값 확인).")
+    return (la, va), (lb, vb)
+
+
+def load_paired_binary_wide(path: str, columns: Optional[Sequence[str]] = None,
+                            event_value: Optional[str] = None,
+                            delimiter: Optional[str] = None,
+                            notes: Optional[List[str]] = None,
+                            baseline: Optional[str] = None,
+                            missing_out: Optional[Dict[str, int]] = None
+                            ) -> Tuple[Tuple[str, List[int]],
+                                       Tuple[str, List[int]]]:
+    """Load matched binary pairs from a wide file: two columns matched row-wise."""
+    header, data = _read_rows(path, delimiter, notes)
+    dupes = {h for h in header if header.count(h) > 1}
+    if dupes:
+        raise ValueError(
+            "wide 형식에서 열 이름이 중복됩니다: " + ", ".join(sorted(dupes)))
+    cols = list(columns) if columns else header
+    if len(cols) != 2:
+        raise ValueError(
+            f"대응(paired) wide 분석에는 정확히 2개 열이 필요합니다. "
+            f"--columns 로 2개를 지정하세요. (지금: {cols})")
+    if baseline is not None:
+        if baseline not in cols:
+            raise ValueError(
+                f"--baseline '{baseline}' 은(는) 비교할 두 열 {cols} 에 없습니다.")
+        cols = [c for c in cols if c != baseline] + [baseline]
+    for c in cols:
+        if c not in header:
+            raise ValueError(f"column '{c}' not in header {header}")
+    ia, ib = header.index(cols[0]), header.index(cols[1])
+    cells_a = [row[ia] if ia < len(row) else "" for row in data]
+    cells_b = [row[ib] if ib < len(row) else "" for row in data]
+    events, non_events = map_binary_levels(cells_a + cells_b, event_value,
+                                           notes)
+    va: List[int] = []
+    vb: List[int] = []
+    lost_a = lost_b = 0
+    for ca, cb in zip(cells_a, cells_b):
+        xa = _indicator(ca, events, non_events)
+        xb = _indicator(cb, events, non_events)
+        if xa is None or xb is None:
+            # a row unusable in either column (or in both) is one lost pair
+            lost_a += 1
+            lost_b += 1
+            continue
+        va.append(xa)
+        vb.append(xb)
+    if missing_out is not None:
+        missing_out[cols[0]] = lost_a
+        missing_out[cols[1]] = lost_b
+    if notes is not None:
+        notes.append(_levels_note(events, non_events))
+        if lost_a:
+            notes.append(
+                f"{lost_a}개 행이 값 결측/해석 불가로 제외되었습니다 "
+                f"(row-wise 매칭: 두 열 모두 값이 있어야 한 쌍이 됩니다).")
+    if not va:
+        raise ValueError("짝을 이루는 행이 없습니다 (두 열 모두 값이 있어야 함).")
+    return (cols[0], va), (cols[1], vb)
+
+
+# --------------------------------------------------------------------------
 # several endpoints at once (one column per outcome, shared group column)
 # --------------------------------------------------------------------------
 
@@ -890,9 +1075,25 @@ def screen_group_labels(labels: Sequence[str], notes: Optional[List[str]],
 
 
 def screen_values(label: str, values: Sequence[float],
-                  notes: Optional[List[str]]) -> None:
-    """Warn about coded-missing sentinels and far-out values in one arm."""
-    if notes is None or not values:
+                  notes: Optional[List[str]],
+                  derived: bool = False) -> None:
+    """Warn about coded-missing sentinels and far-out values in one arm.
+
+    Both checks flag *data corruption*, and both are wrong on a **derived**
+    vector such as a within-pair difference, so ``derived=True`` skips them:
+
+    - -9 / -99 are missing codes in a raw column, but ordinary change scores in
+      a difference (a 9-point ISI improvement is a good outcome, not a marker).
+    - a difference far outside the IQR is a strong responder, i.e. the effect
+      being measured, not a typo.
+
+    Both fired on ``examples/isi_pre_post_paired.csv`` and, because the notes
+    are on the integrity gate, suppressed the ready-to-paste sentence entirely
+    — and only under one sign convention, so ``--baseline pre`` broke while
+    omitting the flag did not. The raw values of each condition are screened
+    separately just before, so nothing is lost by skipping the derived vector.
+    """
+    if notes is None or not values or derived:
         return
     hits = sorted({v for v in values if v in _SENTINELS})
     if hits:
