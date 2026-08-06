@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "medpath"
+version = "0.1.0"
+description = "매개효과(간접효과) 분석기 — X → M → Y 경로를 단순·병렬·직렬 다중매개로 추정하고, 간접효과를 케이스 부트스트랩(백분위/BC/BCa) 신뢰구간으로 검정합니다. 공변량 보정, 경로 간 대비, 매개비율, VIF·Breusch–Pagan·Cook's D 진단, 논문용 문장(한/영)까지 출력하며, 지저분한 임상 CSV(BOM·CP949·세미콜론·결측 표기·천단위 쉼표)를 그대로 읽습니다 (표준 라이브러리만)"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "hyeonjoong", email = "hyeonjoongk@gmail.com" }]
+keywords = ["mediation", "indirect-effect", "bootstrap", "process-macro",
+            "sobel", "parallel-mediation", "serial-mediation", "bca",
+            "path-analysis", "clinical", "pharma", "apa"]
+
+# 외부 의존성 없음 — QR 분해·정규/t 분위수·부트스트랩까지 표준 라이브러리로 구현.
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/hyeonjoong/medpath"
+
+[project.scripts]
+medpath = "medpath.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["medpath*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
