@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rocdx"
+version = "0.1.0"
+description = "진단정확도(diagnostic accuracy) 분석기 — ROC 곡선·AUC(DeLong 신뢰구간·짝지은 비교)·절단점 선택(Youden/좌상단/특이도 하한/민감도 하한)·민감도/특이도/PPV/NPV/우도비/진단오즈비를 신뢰구간과 함께 계산하고, 절단점 선택의 낙관(optimism) 편향 크기를 부트스트랩으로 추정하고(제거하지는 않습니다), 논문용 문장까지 출력. 지저분한 임상 CSV(인코딩·결측·검출한계 표기)를 그대로 읽습니다 (표준 라이브러리만)"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "hyeonjoong", email = "hyeonjoongk@gmail.com" }]
+keywords = ["roc", "auc", "diagnostic-accuracy", "sensitivity", "specificity",
+            "cutoff", "youden", "delong", "likelihood-ratio", "ppv", "npv",
+            "biomarker", "clinical", "screening", "stard"]
+
+# 외부 의존성 없음 — 정규분위수·Wilson CI·DeLong 분산까지 표준 라이브러리로 구현.
+dependencies = []
+
+[project.scripts]
+rocdx = "rocdx.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["rocdx*"]
