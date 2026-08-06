@@ -451,8 +451,15 @@ def analyze(design: Design,
         # depends on the group split), so a 0/1 X gets the *partially*
         # standardized effect — the effect in SDs of Y per group change.
         if design.x_kind in ("dummy", "binary"):
+            # A coefficient is per *unit* of X. A 0/1 dummy makes one unit the
+            # group change, but a numeric two-level column coded 0/5 does not —
+            # dividing its coefficient by SD(Y) understates the group
+            # difference by exactly (hi - lo), so multiply the span back in.
+            span = getattr(design, "x_span", 1.0) or 1.0
             res.standardized_kind = "부분표준화 (효과 ÷ SD(Y); X가 이분형이라 X는 표준화하지 않음)"
-            ratio = 1.0 / sd_y
+            if span != 1.0:
+                res.standardized_kind += " · 두 수준 차이 %g 를 반영" % span
+            ratio = span / sd_y
         elif math.isfinite(sd_x) and sd_x > 0:
             res.standardized_kind = "완전표준화 (효과 × SD(X) ÷ SD(Y))"
             ratio = sd_x / sd_y
@@ -466,6 +473,17 @@ def analyze(design: Design,
     c_val = c_total.estimate
     if abs(c_val) < 1e-12:
         res.proportion_note = "총효과가 0에 가까워 매개비율은 의미가 없습니다."
+    elif (math.isfinite(c_total.ci_lo) and math.isfinite(c_total.ci_hi)
+          and c_total.ci_lo <= 0.0 <= c_total.ci_hi):
+        # The ratio's denominator is indistinguishable from zero, so the
+        # percentage is arbitrarily large and arbitrarily signed. Reporting it
+        # anyway is how "57.6% mediated" ends up in a paper whose total effect
+        # was never established.
+        res.proportion_note = (
+            "총효과의 신뢰구간이 0을 포함해(c = %.4g, %g%% CI [%.4g, %.4g]) 매개비율은 "
+            "분모가 0에 가까운 비율이라 불안정합니다 — 계산하지 않았습니다. "
+            "간접효과 자체의 크기와 구간으로 보고하세요."
+            % (c_val, conf * 100, c_total.ci_lo, c_total.ci_hi))
     elif ind_total_val * c_val < 0:
         res.proportion_note = ("간접효과와 총효과의 부호가 반대입니다(억제/inconsistent mediation). "
                                "매개비율(%)은 해석 불가라 계산하지 않았습니다.")

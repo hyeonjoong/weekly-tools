@@ -175,13 +175,26 @@ def _apa_sentences(res: MediationResult, digits: int) -> Tuple[str, str]:
     # say that outright instead of reading as a tested null result.
     untested = [e for e in inds if not e.tested]
     if untested and len(untested) == len(inds):
-        ko = ["%s 모형으로 %s → %s 경로를 추정했다(N = %d). 부트스트랩을 실행하지 않아 "
-              "간접효과의 신뢰구간과 유의성 검정은 수행하지 않았다."
-              % (model_ko, x, y, d.n_used)]
-        en = ["A %s model was estimated for %s → %s (N = %d). No bootstrap resamples "
-              "were drawn, so the indirect effects were not tested and no confidence "
-              "intervals are available."
-              % (model_en, x, y, d.n_used)]
+        # "No resamples were drawn" and "every resample was unusable" are
+        # different claims about what was run. Pasting the first into a Methods
+        # section when the second happened is a false statement, so branch.
+        if res.n_boot > 0:
+            ko = ["%s 모형으로 %s → %s 경로를 추정했다(N = %d). 부트스트랩 %s회를 시도했으나 "
+                  "사용 가능한 재표본이 부족해 간접효과의 신뢰구간과 유의성 검정은 "
+                  "얻지 못했다."
+                  % (model_ko, x, y, d.n_used, "{:,}".format(res.n_boot))]
+            en = ["A %s model was estimated for %s → %s (N = %d). %s bootstrap resamples "
+                  "were attempted, but too few were usable, so no confidence intervals "
+                  "could be computed and the indirect effects were not tested."
+                  % (model_en, x, y, d.n_used, "{:,}".format(res.n_boot))]
+        else:
+            ko = ["%s 모형으로 %s → %s 경로를 추정했다(N = %d). 부트스트랩을 실행하지 않아 "
+                  "간접효과의 신뢰구간과 유의성 검정은 수행하지 않았다."
+                  % (model_ko, x, y, d.n_used)]
+            en = ["A %s model was estimated for %s → %s (N = %d). No bootstrap resamples "
+                  "were drawn, so the indirect effects were not tested and no confidence "
+                  "intervals are available."
+                  % (model_en, x, y, d.n_used)]
     else:
         ko = ["%s 모형으로 %s → %s 경로를 검정했다(N = %d, 부트스트랩 %s회, %s%% %s 신뢰구간)."
               % (model_ko, x, y, d.n_used, "{:,}".format(res.boot_ok), conf_pct, method)]
@@ -291,11 +304,13 @@ def render(res: MediationResult, source: str, mode: str = "text",
             if e.tested:
                 out.line("    %s %g%% CI %s → %s"
                          % (e.ci_method, res.conf * 100, _ci(e.ci_lo, e.ci_hi, digits),
-                            "0을 포함하지 않음(효과 있음)" if e.significant
+                            "0을 포함하지 않음(구간이 0을 배제)" if e.significant
                             else "0을 포함(효과 근거 부족)"))
             else:
-                out.line("    신뢰구간 없음 — 부트스트랩을 실행하지 않아 이 경로는 "
-                         "검정되지 않았습니다(‘유의하지 않다’와 다릅니다).")
+                out.line("    신뢰구간 없음 — %s 이 경로는 검정되지 않았습니다"
+                         "(‘유의하지 않다’와 다릅니다)."
+                         % ("사용 가능한 부트스트랩 재표본이 부족해"
+                            if res.n_boot > 0 else "부트스트랩을 실행하지 않아"))
             if math.isfinite(e.delta_z):
                 out.line("    Sobel/델타법 z = %s, p %s (참고용 — 곱의 분포는 정규가 아님)"
                          % (fmt(e.delta_z, 2), fmt_p(e.delta_p)))
@@ -319,6 +334,15 @@ def render(res: MediationResult, source: str, mode: str = "text",
             out.line()
             out.bullet("대비 %d개 중 0을 포함하지 않는 것만 표시했습니다(전체는 --json 참고)."
                        % len(res.contrasts))
+        if len(res.contrasts) > 1:
+            # Every contrast (and every specific indirect effect) is tested at
+            # the nominal level. With k mediators a serial model yields 2^k-1
+            # effects and C(2^k-1, 2) contrasts, so "one of them was
+            # significant" means much less than it looks.
+            out.bullet("대비 %d개는 모두 명목 %g%% 수준이며 다중비교 보정을 하지 않았습니다 "
+                       "— 귀무가설이 참이어도 %.1f개 정도는 0을 배제할 것으로 기대됩니다."
+                       % (len(res.contrasts), res.conf * 100,
+                          len(res.contrasts) * (1.0 - res.conf)))
 
     # --- regressions -----------------------------------------------------
     if not brief:

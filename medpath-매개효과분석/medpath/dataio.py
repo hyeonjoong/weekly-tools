@@ -30,7 +30,8 @@ class DataError(ValueError):
 
 
 _NA_LABELS = {"NA", "N/A", "NAN", "NULL", ".", "-", "--", "NONE", "MISSING",
-              "#N/A", "#NULL!", "#DIV/0!", "결측", "없음"}
+              "#N/A", "#NULL!", "#DIV/0!", "결측", "없음", "미측정", "측정안함",
+              "해당없음", "무응답"}
 
 # utf-8-sig strips a BOM; cp949/euc-kr covers Korean Excel; latin-1 always
 # decodes, so we never crash on odd bytes (a note is emitted when used).
@@ -217,20 +218,27 @@ def _sniff_decimal(rows: Sequence[Sequence[str]], delim: str) -> str:
     """
     comma_decimal_hits = 0
     comma_group_hits = 0
+    dot_decimal_hits = 0
     for row in rows[:200]:
         for cell in row:
             c = _normalize_numeric_text(cell.strip().strip('"').strip("'"))
             if "," not in c:
+                # Counter-evidence: a plain dot-decimal like "0.71". In comma
+                # mode a three-decimal token ("1.024") is re-read as 1024, so a
+                # file full of these is emphatically NOT a European export.
+                if "." in c and _PLAIN_NUM_RE.match(c):
+                    dot_decimal_hits += 1
                 continue
-            if _COMMA_DEC_RE.match(c) and not _PLAIN_NUM_RE.match(c.replace(",", "")):
-                pass
             if re.match(r"^[+-]?\d+,\d{1,2}$", c) or re.match(r"^[+-]?\d+,\d{4,}$", c):
                 comma_decimal_hits += 1
             elif _THOUSANDS_RE.match(c):
                 comma_group_hits += 1
-    if comma_decimal_hits:
+    # A single stray cell like a multi-select code "1,2" used to flip the whole
+    # file into comma mode and multiply every 3-decimal value by 1000 — silently
+    # reversing conclusions. Require the comma evidence to actually dominate.
+    if comma_decimal_hits > max(comma_group_hits, dot_decimal_hits):
         return ","
-    if delim == ";" and comma_group_hits:
+    if delim == ";" and comma_group_hits and not dot_decimal_hits:
         return ","
     return "."
 
@@ -255,9 +263,14 @@ def load_table(path: str, delimiter: Optional[str] = None,
     if delimiter is None and delim != ",":
         notes.append("구분자를 '%s'(으)로 자동 인식했습니다."
                      % {"\t": "탭", ";": "세미콜론", "|": "파이프"}.get(delim, delim))
-    reader = csv.reader(io.StringIO(text, newline=""), delimiter=delim)
     try:
+        # csv.reader() itself rejects some delimiters (quotechar, newline), and
+        # constructing it outside the try let that raw English ValueError escape
+        # as the user-facing message.
+        reader = csv.reader(io.StringIO(text, newline=""), delimiter=delim)
         raw_rows = list(reader)
+    except (TypeError, ValueError) as exc:
+        raise DataError("구분자로 쓸 수 없는 문자입니다: %r (%s)" % (delim, exc))
     except csv.Error as exc:
         raise DataError("CSV를 읽는 중 오류가 발생했습니다: %s" % exc)
     raw_rows = [r for r in raw_rows if any(c.strip() for c in r)]
@@ -318,6 +331,11 @@ class Design:
         self.x_name = ""
         self.x_label = ""          # human description incl. coding
         self.x_kind = "numeric"    # numeric | binary | dummy
+        # Distance between the two levels of a two-valued X. 1.0 for a 0/1
+        # dummy; for a numeric column coded 0/5 it is 5, and the partially
+        # standardized effect must be scaled by it (a coefficient is per unit,
+        # not per group change).
+        self.x_span = 1.0
         self.x_reference: Optional[str] = None
         self.x_comparison: Optional[str] = None
         self.mediators: List[Tuple[str, List[float]]] = []
@@ -401,6 +419,20 @@ def _levels(values: Sequence[str]) -> List[str]:
         t = v.strip().strip('"').strip("'").strip()
         seen[t] = seen.get(t, 0) + 1
     return sorted(seen, key=lambda k: (-seen[k], k))
+
+
+def _levels_preview(levels: Sequence[str], cap: int = 8) -> str:
+    """List a column's distinct values, capped.
+
+    This message fires exactly when the user pointed ``--x`` at the wrong
+    column — very often an identifier. Echoing every distinct value then dumps
+    the whole ID column (one line per patient) into the terminal or CI log, so
+    the list is capped and the remainder is reported as a count only.
+    """
+    shown = ", ".join(levels[:cap])
+    if len(levels) > cap:
+        shown += " … (총 %d개 중 %d개만 표시)" % (len(levels), cap)
+    return shown
 
 
 def _unparsed_warning(name: str, bad: int, n: int, samples: Sequence[str]) -> str:
@@ -501,14 +533,14 @@ def build_design(
             if missing_lv:
                 raise DataError(
                     "'%s' 열에 없는 수준입니다: %s (있는 수준: %s)"
-                    % (x_name, ", ".join(missing_lv), ", ".join(levels)))
+                    % (x_name, ", ".join(missing_lv), _levels_preview(levels)))
             ref, comp = x_levels[0], x_levels[1]
         elif len(levels) == 2:
             if reference is not None:
                 if reference not in levels:
                     raise DataError(
                         "--reference '%s' 는 '%s' 열에 없습니다 (있는 수준: %s)"
-                        % (reference, x_name, ", ".join(levels)))
+                        % (reference, x_name, _levels_preview(levels)))
                 ref = reference
                 comp = [lv for lv in levels if lv != ref][0]
             else:
@@ -530,7 +562,7 @@ def build_design(
             raise DataError(
                 "X '%s' 는 수준이 %d개(%s)입니다. 매개분석의 X는 연속형이거나 2수준이어야 합니다. "
                 "두 수준만 비교하려면 --x-levels 기준수준,비교수준 을 쓰세요."
-                % (x_name, len(levels), ", ".join(levels[:8])))
+                % (x_name, len(levels), _levels_preview(levels)))
         d.x_kind = "dummy"
         d.x_reference, d.x_comparison = ref, comp
         d.x_label = "%s (0=%s, 1=%s)" % (x_name, ref, comp)
@@ -552,6 +584,15 @@ def build_design(
         raw = table.column(cname)
         parsed, bad, _samples = _numeric_scan(raw, table.decimal)
         if bad == 0 and any(v is not None for v in parsed):
+            cov_cols.append((cname, parsed))
+            continue
+        # A single typo ("45 세" in an age column) used to silently demote a
+        # continuous covariate to a dummy-coded factor with dozens of levels,
+        # changing the model without a word. Mirror _require_numeric: below the
+        # halfway mark the column stays numeric and the bad cells are reported.
+        if bad and any(v is not None for v in parsed) \
+                and bad < max(1, int(0.5 * len(raw))):
+            d.warnings.append(_unparsed_warning(cname, bad, len(raw), _samples))
             cov_cols.append((cname, parsed))
             continue
         levels = _levels(raw)
@@ -613,15 +654,21 @@ def build_design(
         if len(distinct) == 2:
             d.x_kind = "binary"
             lo, hi = sorted(distinct)
-            d.x_label = "%s (숫자 2수준: %g vs %g — 계수는 %g→%g 변화 효과)" % (
-                x_name, lo, hi, lo, hi)
+            d.x_span = hi - lo
+            d.x_label = "%s (숫자 2수준: %g vs %g — 계수는 1단위 변화 효과, 두 수준 차이는 %g)" % (
+                x_name, lo, hi, d.x_span)
         elif len(distinct) == 1:
             raise DataError(
                 "완전자료에서 X '%s' 의 값이 한 종류뿐이라 효과를 추정할 수 없습니다." % x_name)
 
     # constant-column guard on the analysed sample
     for nm, col in [(d.y_name, d.y)] + d.mediators + d.covariates:
-        if len({round(v, 15) for v in col}) == 1:
+        # round(v, 15) is 15 *decimal places*, not significant digits, so every
+        # column below ~1e-15 collapsed to {0.0} and valid data was rejected as
+        # constant. Compare on a relative scale instead.
+        lo_v, hi_v = min(col), max(col)
+        scale = max(abs(lo_v), abs(hi_v))
+        if hi_v - lo_v <= 1e-12 * scale or scale == 0.0:
             raise DataError(
                 "완전자료에서 '%s' 열의 값이 전부 같습니다(상수). 회귀에 쓸 수 없으니 빼고 실행하세요." % nm)
 

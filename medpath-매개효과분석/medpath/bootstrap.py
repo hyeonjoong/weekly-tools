@@ -28,6 +28,11 @@ __all__ = ["EffectPlan", "BootResult", "run_bootstrap", "quantile",
 # byte-identical no matter how many worker processes are used.
 CHUNK = 250
 
+# Fewest usable resamples that may back a reported interval. Below this the
+# empirical quantiles are dominated by which handful of resamples happened to
+# survive, and the interval is reported as "not computed" instead.
+MIN_BOOT_FOR_CI = 100
+
 
 class EffectPlan:
     """How to turn one accumulated Gram matrix into the effect vector.
@@ -304,8 +309,21 @@ def ci_from_boots(boots: Sequence[float], observed: float, conf: float,
                   ) -> Tuple[float, float, List[str]]:
     """Dispatch to the requested interval, returning any warnings raised."""
     warns: List[str] = []
+    # Validate the method before any early return, so a typo is a loud error
+    # rather than a silently uncomputed interval.
+    if method not in ("percentile", "bc", "bca"):
+        raise ValueError("unknown CI method: %r" % (method,))
     if not boots:
         return float("nan"), float("nan"), ["부트스트랩 표본이 없습니다."]
+    if len(boots) < MIN_BOOT_FOR_CI:
+        # With a handful of surviving resamples the "interval" collapses onto
+        # those few values and reads as a decisive result: 1 replicate gives a
+        # zero-width 95% CI that always excludes zero. Refusing to report an
+        # interval leaves `tested` False, which the report renders as
+        # "검정 안 함" rather than a spurious "0 미포함".
+        return (float("nan"), float("nan"),
+                ["사용 가능한 부트스트랩 재표본이 %d개뿐이라(최소 %d개 필요) 신뢰구간을 "
+                 "계산하지 않았습니다." % (len(boots), MIN_BOOT_FOR_CI)])
     if method == "percentile":
         lo, hi = percentile_ci(boots, conf)
         return lo, hi, warns
