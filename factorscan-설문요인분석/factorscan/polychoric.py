@@ -184,20 +184,53 @@ def polychoric_corr(xi: np.ndarray, xj: np.ndarray) -> float:
     return float(max(-1.0, min(1.0, r)))
 
 
-def polychoric_matrix(x: np.ndarray) -> np.ndarray:
-    """순서형 응답행렬 (n,p)의 폴리코릭 상관행렬 (p,p). 대각 1, 대칭."""
+def polychoric_matrix(x: np.ndarray, pairwise: bool = False):
+    """순서형 응답행렬 (n,p)의 폴리코릭 상관행렬 (p,p). 대각 1, 대칭.
+
+    pairwise=True 면 결측(NaN)이 섞인 원자료를 받아 **문항쌍마다 둘 다 응답한 행**으로
+    ρ를 추정하고, (r, counts) 튜플을 돌려준다(counts는 쌍별 유효 표본 수).
+    """
     p = x.shape[1]
     r = np.eye(p)
-    xi_int = np.rint(x).astype(np.int64)   # 범주 라벨(정수) 기준으로 집계
+    # int64로 캐스팅하기 전에 범위를 확인한다. 1e19 같은 값은 조용히 포화(saturate)해
+    # 모든 응답이 INT64_MAX라는 단일 '범주'가 되고, 그러면 ρ가 추정 불가가 되어
+    # (예전 코드에서는) 0.0으로 메워졌다 — '무상관'이라는 강한 거짓 주장이었다.
+    finite_vals = x[np.isfinite(x)]
+    if finite_vals.size and float(np.max(np.abs(finite_vals))) > 2 ** 53:
+        raise ValueError(
+            "polychoric 상관은 정수 코드 순서형(리커트) 문항을 가정하는데, 범주 코드로 "
+            "쓰기에 값이 너무 큰 문항이 있습니다(|값| > 2^53). 단위·자릿수 입력 오류가 "
+            "아닌지 확인하거나 --correlation pearson 을 쓰세요.")
+    if not pairwise:
+        xi_int = np.rint(x).astype(np.int64)   # 범주 라벨(정수) 기준으로 집계
+        for i in range(p):
+            for j in range(i + 1, p):
+                # 추정 불가(범주가 1개뿐 등)는 0.0으로 메우지 않고 NaN으로 남긴다 —
+                # 0은 '무상관'이라는 주장이라 요인해를 실제로 바꾼다. 호출 쪽에서
+                # 원인 문항을 짚어 거절한다(재표본·집단 경로는 자체 실패 처리를 쓴다).
+                r[i, j] = r[j, i] = polychoric_corr(xi_int[:, i], xi_int[:, j])
+        return r
+
+    obs = np.isfinite(x)
+    xi_int = np.rint(np.where(obs, x, 0.0)).astype(np.int64)
+    counts = np.zeros((p, p), dtype=np.int64)
+    for i in range(p):
+        counts[i, i] = int(obs[:, i].sum())
     for i in range(p):
         for j in range(i + 1, p):
-            rho = polychoric_corr(xi_int[:, i], xi_int[:, j])
-            if not math.isfinite(rho):
-                rho = 0.0
-            r[i, j] = r[j, i] = rho
-    return r
+            m = obs[:, i] & obs[:, j]
+            counts[i, j] = counts[j, i] = int(m.sum())
+            rho = (polychoric_corr(xi_int[m, i], xi_int[m, j])
+                   if int(m.sum()) >= 3 else float("nan"))
+            r[i, j] = r[j, i] = rho if math.isfinite(rho) else np.nan
+    return r, counts
 
 
 def max_categories(x: np.ndarray) -> int:
-    """열별 고유값 개수의 최댓값(폴리코릭 적정성 진단용)."""
-    return int(max(np.unique(x[:, j]).size for j in range(x.shape[1])))
+    """열별 고유값 개수의 최댓값(폴리코릭 적정성 진단용). 결측은 무시한다."""
+    best = 0
+    for j in range(x.shape[1]):
+        col = x[:, j]
+        col = col[np.isfinite(col)]
+        best = max(best, int(np.unique(col).size))
+    return best

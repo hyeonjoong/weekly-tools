@@ -621,6 +621,43 @@ def _g(v, nd=3):
     return f"{v:.{nd}f}"
 
 
+def _rmsea_verdict(fit: Dict) -> str:
+    """RMSEA 판정 문구. 텍스트 보고서와 HTML이 같은 판정을 쓰도록 한 곳에 둔다.
+
+    판정은 '점추정'이 아니라 '신뢰구간'으로 읽는다. **CI 상한이 .10 초과이고 하한이
+    .08 이하**면 '결론 보류'다 — 자료가 우수와 미흡을 구분하지 못한다는 뜻이라,
+    점추정만 보고 '수용'이라 하면 안 된다. 구간이 넓은 원인은 표본만이 아니라
+    자유도 부족일 수도 있다(n=200에서도 df=4면 CI가 [.000,.132]까지 벌어진다).
+    """
+    rm = fit.get("rmsea")
+    lo, hi = fit.get("rmsea_lo"), fit.get("rmsea_hi")
+    if rm is None:
+        return ""
+    if hi is not None and hi > 0.10 and (lo is None or lo <= 0.08):
+        return "결론 보류 — 90% CI가 넓어 적합/부적합을 가릴 수 없습니다(표본·자유도 부족)"
+    if hi is not None and hi <= 0.05:
+        return "우수(CI 상한도 ≤.05)"
+    if hi is not None and hi <= 0.08:
+        return "수용(CI 상한 ≤.08)"
+    if rm <= 0.05:
+        return "점추정 우수(≤.05)이나 CI 상한 확인 필요"
+    if rm <= 0.08:
+        return "점추정 수용(≤.08)이나 CI 상한 확인 필요"
+    return "미흡(>.08)"
+
+
+def _omega_label(res: Dict, short: bool = False) -> str:
+    """ω 표시 이름. PCA 적재로 계산한 ω는 McDonald's ω가 아니다(낙관적 근사).
+
+    'McDonald ω'라 적으면 그 문자열이 그대로 논문에 복사되므로, 추출 방식에 따라
+    이름 자체를 바꾼다 — 각주 고지는 잘못된 라벨을 취소하지 못한다.
+    """
+    is_common = res.get("extraction") in ("principal_axis", "maximum_likelihood")
+    if is_common:
+        return "McDonald ω" if short else "요인별 신뢰도(McDonald ω)"
+    return "ω (PCA 근사·낙관적)" if short else "요인별 합성신뢰도(ω, PCA 근사·낙관적)"
+
+
 def _fit_lines(res: Dict) -> List[str]:
     """ML 추출의 공식 적합도지수(χ²·RMSEA·CFI/TLI·AIC/BIC)와 k별 적합도 스캔 표.
 
@@ -657,24 +694,7 @@ def _fit_lines(res: Dict) -> List[str]:
     lo, hi = fit.get("rmsea_lo"), fit.get("rmsea_hi")
     ci = f"  90% CI [{_g(lo)}, {_g(hi)}]" if lo is not None and hi is not None else ""
     if rm is not None:
-        # 판정은 '점추정'이 아니라 '신뢰구간'으로 읽는다. 실제 조건은 아래 코드대로
-        # **CI 상한이 .10 초과이고 하한이 .08 이하** 일 때 '결론 보류'다 — 자료가 우수와
-        # 미흡을 구분하지 못한다는 뜻이라, 점추정만 보고 '우수'라 하면 안 된다.
-        if hi is not None and hi > 0.10 and (lo is None or lo <= 0.08):
-            # 구간이 넓은 원인은 표본만이 아니다 — 자유도가 작아도(문항 대비 요인이 많아도)
-            # 넓어진다. n=200에서도 df=4면 CI가 [.000,.132]까지 벌어진다.
-            judge = "결론 보류 — 90% CI가 넓어 적합/부적합을 가릴 수 없습니다(표본·자유도 부족)"
-        elif hi is not None and hi <= 0.05:
-            judge = "우수(CI 상한도 ≤.05)"
-        elif hi is not None and hi <= 0.08:
-            judge = "수용(CI 상한 ≤.08)"
-        elif rm <= 0.05:
-            judge = "점추정 우수(≤.05)이나 CI 상한 확인 필요"
-        elif rm <= 0.08:
-            judge = "점추정 수용(≤.08)이나 CI 상한 확인 필요"
-        else:
-            judge = "미흡(>.08)"
-        out.append(f"  RMSEA = {_g(rm)}{ci}  → {judge}")
+        out.append(f"  RMSEA = {_g(rm)}{ci}  → {_rmsea_verdict(fit)}")
     if fit.get("p_close") is not None:
         out.append(f"  PCLOSE(근접적합 H0: RMSEA≤.05) p = {fit['p_close']:.4g}")
     if fit.get("cfi") is not None or fit.get("tli") is not None:
@@ -736,6 +756,18 @@ def render(res: Dict) -> str:
 
     if res.get("correlation") == "polychoric":
         A("  상관행렬: 폴리코릭(polychoric, 순서형 잠재상관)")
+
+    pw = res.get("pairwise")
+    if pw:
+        A(f"  결측 처리: 쌍별 삭제(pairwise) — 상관행렬은 전체 {pw['n_rows']}명 중 "
+          f"문항쌍별 {pw['n_min']}~{pw['n_max']}명(중앙값 {pw['n_median']:.0f}명)으로 추정")
+        A(f"    · 유효 N(보수적, Bartlett·평행분석용): {pw['n_min']}명 / "
+          f"완전응답자(α·문항-총점·부트스트랩·요인점수): {pw['n_complete']}명")
+        if pw.get("smoothed"):
+            A(f"    · 양의 정부호 보정(smoothing) 적용: 보정 전 최소 고유값 "
+              f"{pw.get('min_eigenvalue_before', float('nan')):+.4f}, 하한에 걸린 고유값 "
+              f"{pw.get('n_eigenvalues_clipped', 0)}개, 최대 상관 변화 "
+              f"{pw['smoothing_delta']:.3f} → KMO·Bartlett·ML 적합도 생략")
 
     # --- 결측 구조(결측이 있을 때만) ---
     for line in _missing_lines(res):
@@ -838,11 +870,7 @@ def render(res: Dict) -> str:
 
     om = res.get("omega")
     if om:
-        # PCA 적재로 계산한 ω는 McDonald's ω가 아니다(공통성을 과대추정해 낙관적).
-        # 표에 'McDonald ω'라 적으면 그 문자열이 그대로 논문에 복사되므로, 추출 방식에
-        # 따라 이름 자체를 바꾼다 — 각주 고지는 잘못된 라벨을 취소하지 못한다.
-        is_common = res.get("extraction") in ("principal_axis", "maximum_likelihood")
-        om_label = "요인별 신뢰도(McDonald ω)" if is_common else "요인별 합성신뢰도(ω, PCA 근사·낙관적)"
+        om_label = _omega_label(res)
         A(f"  {om_label}: " + "  ".join(
             (f"{_factor_label(res, j)}={om[j]:.3f}" if j < len(om) and om[j] is not None
              else f"{_factor_label(res, j)}=—")
@@ -939,3 +967,285 @@ def render(res: Dict) -> str:
         A("RMSR은 작을수록(대략 <0.08) 적합이 좋습니다(PCA라 다소 큼). ω는 PCA 기반 근사로 공통요인 ω·α보다")
         A("높게(낙관적) 나오는 경향이 있으니 'PCA 기반 ω(근사)'로 보고하세요(대략 ≥0.70 권장). 공통요인 추출은 --extraction paf.")
     return "\n".join(L)
+
+
+# ---------------------------------------------------------------------------
+# HTML 보고서 — 팀·심사자에게 그대로 보낼 수 있는 단일 파일 출력
+# ---------------------------------------------------------------------------
+# 터미널 텍스트는 본인이 볼 때는 충분하지만, 공동연구자에게 붙여넣으면 표가 깨지고
+# 스크리 도표는 애초에 없다. 여기서는 외부 라이브러리(matplotlib 등) 없이 순수
+# HTML+SVG로 스크리 도표와 색으로 읽히는 적재표를 만들어 파일 하나로 완결시킨다.
+
+def _esc(s) -> str:
+    """HTML 이스케이프. 문항명에 <, &, " 가 들어와도 문서가 깨지지 않게 한다."""
+    return (str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            .replace('"', "&quot;").replace("'", "&#39;"))
+
+
+def _h(v, nd=3) -> str:
+    """HTML 표의 숫자 셀(결측·비유한값은 빈 칸)."""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return ""
+    return f"{f:.{nd}f}" if np.isfinite(f) else ""
+
+
+def _load_color(v: float, min_loading: float) -> str:
+    """적재량 크기를 배경색으로. 양수는 파랑, 음수는 붉은색(역문항 신호)."""
+    if v is None or not np.isfinite(v):
+        return ""
+    a = min(abs(float(v)), 1.0)
+    if a < min_loading:
+        return ""
+    alpha = 0.12 + 0.55 * (a - min_loading) / max(1e-9, 1.0 - min_loading)
+    rgb = "37,99,235" if v >= 0 else "220,38,38"
+    return f"background:rgba({rgb},{alpha:.2f})"
+
+
+def _scree_svg(res: Dict, width: int = 640, height: int = 300) -> str:
+    """고유값(관측)과 평행분석 기준선을 겹쳐 그린 스크리 도표 SVG.
+
+    '몇 개 요인인가'는 이 도표 하나로 대부분 설명되는데, 텍스트 보고서에서는 숫자 열을
+    눈으로 훑어야 했다. 외부 의존성 없이 좌표만 계산해 직접 그린다.
+    """
+    ev = [float(v) for v in (res.get("eigenvalues") or [])]
+    if not ev:
+        return ""
+    pa = res.get("parallel_eigenvalues")
+    pa = [float(v) for v in pa] if pa else None
+    ml, mr, mt, mb = 46, 14, 14, 34
+    iw = max(1, width - ml - mr)
+    ih = max(1, height - mt - mb)
+    p = len(ev)
+    ymax = max(ev + (pa or []) + [1.0]) * 1.08
+    ymax = ymax if np.isfinite(ymax) and ymax > 0 else 1.0
+
+    def X(i):
+        return ml + (iw * i / max(1, p - 1) if p > 1 else iw / 2)
+
+    def Y(v):
+        return mt + ih * (1.0 - min(max(v, 0.0), ymax) / ymax)
+
+    parts = [f'<svg viewBox="0 0 {width} {height}" width="100%" '
+             f'role="img" aria-label="스크리 도표" '
+             f'style="max-width:{width}px;font:11px sans-serif">']
+    # 가로 눈금선 + y축 라벨
+    steps = 4
+    for s in range(steps + 1):
+        v = ymax * s / steps
+        y = Y(v)
+        parts.append(f'<line x1="{ml}" y1="{y:.1f}" x2="{width-mr}" y2="{y:.1f}" '
+                     f'stroke="#e5e7eb"/>')
+        parts.append(f'<text x="{ml-6}" y="{y+4:.1f}" text-anchor="end" '
+                     f'fill="#6b7280">{v:.1f}</text>')
+    # 고유값 1 기준선(Kaiser)
+    if ymax > 1.0:
+        y1 = Y(1.0)
+        parts.append(f'<line x1="{ml}" y1="{y1:.1f}" x2="{width-mr}" y2="{y1:.1f}" '
+                     f'stroke="#9ca3af" stroke-dasharray="4 3"/>')
+    # x축 라벨(요인 번호) — 많으면 솎아낸다
+    step = max(1, p // 12)
+    for i in range(p):
+        if i % step == 0 or i == p - 1:
+            parts.append(f'<text x="{X(i):.1f}" y="{height-mb+16}" text-anchor="middle" '
+                         f'fill="#6b7280">{i+1}</text>')
+    parts.append(f'<text x="{ml+iw/2:.1f}" y="{height-4}" text-anchor="middle" '
+                 f'fill="#374151">요인 번호</text>')
+
+    def poly(vals, color, dash=""):
+        pts = " ".join(f"{X(i):.1f},{Y(v):.1f}" for i, v in enumerate(vals))
+        d = f' stroke-dasharray="{dash}"' if dash else ""
+        out = [f'<polyline points="{pts}" fill="none" stroke="{color}" '
+               f'stroke-width="2"{d}/>']
+        for i, v in enumerate(vals):
+            out.append(f'<circle cx="{X(i):.1f}" cy="{Y(v):.1f}" r="3" fill="{color}"/>')
+        return out
+
+    if pa and len(pa) == p:
+        parts += poly(pa, "#dc2626", "5 4")
+    parts += poly(ev, "#2563eb")
+    # 범례
+    lx = ml + 8
+    parts.append(f'<rect x="{lx}" y="{mt+4}" width="12" height="3" fill="#2563eb"/>')
+    parts.append(f'<text x="{lx+18}" y="{mt+10}" fill="#374151">관측 고유값</text>')
+    if pa and len(pa) == p:
+        parts.append(f'<rect x="{lx}" y="{mt+20}" width="12" height="3" fill="#dc2626"/>')
+        parts.append(f'<text x="{lx+18}" y="{mt+26}" fill="#374151">평행분석 기준선</text>')
+    parts.append("</svg>")
+    return "".join(parts)
+
+
+_HTML_CSS = """
+:root{color-scheme:light dark}
+body{font-family:-apple-system,'Apple SD Gothic Neo','Malgun Gothic',sans-serif;
+ margin:0;padding:24px;line-height:1.55;color:#111827;background:#fff}
+h1{font-size:20px;margin:0 0 4px}h2{font-size:15px;margin:26px 0 8px;
+ border-bottom:2px solid #e5e7eb;padding-bottom:4px}
+.meta{color:#4b5563;font-size:13px;margin-bottom:12px}
+table{border-collapse:collapse;font-size:13px;margin:6px 0 2px}
+th,td{border:1px solid #e5e7eb;padding:3px 7px;text-align:right;white-space:nowrap}
+th{background:#f9fafb;font-weight:600}
+td.k,th.k{text-align:left}
+.warn,.note{border-radius:6px;padding:8px 12px;margin:6px 0;font-size:13px}
+.warn{background:#fef2f2;border-left:4px solid #dc2626}
+.note{background:#f0f9ff;border-left:4px solid #0284c7}
+.small{font-size:12px;color:#6b7280}
+.prob{color:#b91c1c;font-size:12px}
+"""
+
+
+def render_html(res: Dict, title: str = "factorscan 요인분석 보고서") -> str:
+    """분석 결과를 단일 HTML 파일(스크리 도표 SVG 포함)로 렌더링한다.
+
+    외부 CSS·JS·이미지를 참조하지 않으므로 메일 첨부·공유 폴더로 그대로 보낼 수 있다.
+    숫자는 텍스트 보고서와 같은 값이며, 여기서만 새로 계산하는 통계는 없다.
+    """
+    items = res["items"]
+    p = len(items)
+    kf = int(res["n_factors"])
+    load = res["loadings"]
+    comm = res["communalities"]
+    minl = float(res.get("min_loading") or 0.40)
+    flags = {f["item"]: f for f in res.get("item_flags", [])}
+    itf = res.get("item_total_by_factor") or [None] * p
+    kmo = res.get("kmo")
+    msa = kmo["per_item"] if kmo else [None] * p
+
+    out: List[str] = []
+    A = out.append
+    A("<!DOCTYPE html><html lang=\"ko\"><head><meta charset=\"utf-8\">")
+    A(f"<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">")
+    A(f"<title>{_esc(title)}</title><style>{_HTML_CSS}</style></head><body>")
+    A(f"<h1>{_esc(title)}</h1>")
+
+    extr = {"principal_component": "주성분(PCA)", "principal_axis": "주축분해(PAF)",
+            "maximum_likelihood": "최대우도(ML)"}.get(res.get("extraction"), "")
+    rot = {"varimax": "Varimax 직교회전", "promax": "Promax 사교회전"}.get(
+        res.get("rotation"), "비회전")
+    corr = "폴리코릭" if res.get("correlation") == "polychoric" else "피어슨"
+    miss = "쌍별 삭제(pairwise)" if res.get("missing_method") == "pairwise" else "완전응답(listwise)"
+    A(f"<div class=\"meta\">문항 {p}개 · 응답자 {res['n_used']}명 사용"
+      f"(전체 {res['n_total']}, 결측제거 {res['n_dropped']}) · {_esc(extr)} · {_esc(rot)}"
+      f" · {corr} 상관 · 결측 처리 {miss}</div>")
+
+    pw = res.get("pairwise")
+    if pw:
+        smooth = (f" 양의 정부호 보정 적용(하한에 걸린 고유값 "
+                  f"{pw.get('n_eigenvalues_clipped', 0)}개) → KMO·Bartlett·ML 적합도 생략."
+                  if pw.get("smoothed") else "")
+        A(f"<div class=\"note\">쌍별 삭제: 상관행렬은 문항쌍별 {pw['n_min']}~{pw['n_max']}명"
+          f"(중앙값 {pw['n_median']:.0f}명)으로 추정했고, Bartlett·평행분석에는 보수적 유효 N "
+          f"{pw['n_min']}명을 썼습니다. α·문항-총점·부트스트랩·요인점수는 완전응답자 "
+          f"{pw['n_complete']}명 기준이며, ML 적합도지수는 단일 N이 없어 생략됩니다."
+          f"{smooth}</div>")
+
+    for w in res.get("warnings", []):
+        A(f"<div class=\"warn\">⚠ {_esc(w)}</div>")
+    for nt in res.get("notes", []):
+        A(f"<div class=\"note\">· {_esc(nt)}</div>")
+
+    # --- 적합성 ---
+    A("<h2>1. 요인분석 적합성</h2><table><tr><th class=\"k\">지표</th><th>값</th>"
+      "<th class=\"k\">판정</th></tr>")
+    b = res.get("bartlett")
+    if b:
+        A(f"<tr><td class=\"k\">Bartlett χ²({b['df']})</td><td>{b['chi_square']:.2f}</td>"
+          f"<td class=\"k\">p = {b['p_value']:.4g} "
+          f"({'유의(적합)' if b['p_value'] < 0.05 else '비유의(주의)'})</td></tr>")
+    else:
+        A("<tr><td class=\"k\">Bartlett χ²</td><td>—</td>"
+          "<td class=\"k\">계산 불가(특이행렬)</td></tr>")
+    if kmo:
+        A(f"<tr><td class=\"k\">KMO 전체</td><td>{kmo['overall']:.3f}</td>"
+          f"<td class=\"k\">{_esc(_kmo_verdict(kmo['overall']))}</td></tr>")
+    else:
+        A("<tr><td class=\"k\">KMO 전체</td><td>—</td>"
+          "<td class=\"k\">계산 불가(특이행렬)</td></tr>")
+    A("</table>")
+
+    # --- 요인 수 + 스크리 ---
+    A("<h2>2. 요인(차원) 수</h2>")
+    svg = _scree_svg(res)
+    if svg:
+        A(svg)
+    bits = [f"Kaiser 기준 {res['kaiser_k']}개"]
+    if res.get("parallel_k") is not None:
+        bits.append(f"평행분석 {res['parallel_k']}개")
+    if res.get("map_k") is not None:
+        bits.append(f"Velicer MAP {res['map_k']}개")
+    src = {"user": "사용자 지정", "parallel": "평행분석 기준",
+           "kaiser": "Kaiser 기준"}.get(res.get("k_source"), res.get("k_source", ""))
+    A(f"<p class=\"small\">{_esc(' · '.join(bits))} → 적용한 요인 수 "
+      f"<b>{kf}개</b> ({_esc(src)})</p>")
+
+    # --- 적재표 ---
+    A(f"<h2>3. 요인적재량 (|적재| ≥ {minl:g} 강조)</h2><table><tr><th class=\"k\">문항</th>")
+    for j in range(kf):
+        A(f"<th>{_esc(_factor_label(res, j))}</th>")
+    A("<th>공통성</th><th>MSA</th><th>문항-총점</th><th class=\"k\">진단</th></tr>")
+    for i, nm in enumerate(items):
+        A(f"<tr><td class=\"k\">{_esc(nm)}</td>")
+        for j in range(kf):
+            v = float(load[i][j])
+            A(f"<td style=\"{_load_color(v, minl)}\">{_h(v)}</td>")
+        probs = "; ".join(flags.get(nm, {}).get("problems", []))
+        A(f"<td>{_h(comm[i])}</td><td>{_h(msa[i])}</td><td>{_h(itf[i])}</td>"
+          f"<td class=\"k prob\">{_esc(probs)}</td></tr>")
+    A("</table>")
+    ssp = res.get("ss_prop_variance") or []
+    if ssp:
+        tot = sum(float(v) for v in ssp) * 100
+        A(f"<p class=\"small\">회전 후 설명분산: "
+          + " · ".join(f"{_esc(_factor_label(res, j))} {float(v)*100:.1f}%"
+                       for j, v in enumerate(ssp))
+          + f" · 합계 {tot:.1f}%</p>")
+
+    # --- 신뢰도 ---
+    # ω 라벨은 추출 방식에 따라 달라진다 — PCA 적재 기반 ω를 'McDonald ω'라 적으면
+    # 그 문자열이 그대로 논문에 복사된다(텍스트 보고서와 같은 함수를 쓴다).
+    A(f"<h2>4. 하위척도 신뢰도</h2><table><tr><th class=\"k\">요인</th><th>문항수</th>"
+      f"<th>{_esc(_omega_label(res, short=True))}</th><th>Cronbach α</th>"
+      f"<th class=\"k\">α 95% CI</th></tr>")
+    om = res.get("omega") or [None] * kf
+    al = res.get("alpha") or [None] * kf
+    aci = res.get("alpha_ci") or [None] * kf
+    counts = [0] * kf
+    for i in range(p):
+        counts[int(np.argmax(np.abs(np.asarray(load[i]))))] += 1
+    for j in range(kf):
+        ci = aci[j] if j < len(aci) else None
+        ci_s = f"[{ci[0]:.3f}, {ci[1]:.3f}]" if ci else "—"
+        A(f"<tr><td class=\"k\">{_esc(_factor_label(res, j))}</td><td>{counts[j]}</td>"
+          f"<td>{_h(om[j] if j < len(om) else None)}</td>"
+          f"<td>{_h(al[j] if j < len(al) else None)}</td>"
+          f"<td class=\"k\">{ci_s}</td></tr>")
+    A("</table>")
+
+    resid = res.get("residual") or {}
+    if resid:
+        thr = resid.get("threshold", 0.05)
+        A(f"<p class=\"small\">잔차 RMSR = {_h(resid.get('rmsr'), 4)} · "
+          f"|잔차|&gt;{float(thr):g} 비율 {_h(resid.get('prop_large'), 3)} "
+          f"({resid.get('n_large', 0)}/{resid.get('n_resid', 0)}쌍)</p>")
+    fit = res.get("fit")
+    if fit and fit.get("identified"):
+        # RMSEA는 **점추정만 싣지 않는다** — 90% CI와 판정을 함께 내야 한다. HTML은
+        # 그대로 공동연구자에게 전달되므로, 여기서 '0.071'만 보이면 텍스트 보고서가
+        # '결론 보류'라고 말한 사례가 '수용(≤.08)'으로 읽힌다.
+        lo, hi = fit.get("rmsea_lo"), fit.get("rmsea_hi")
+        ci = (f" (90% CI [{_h(lo)}, {_h(hi)}])" if lo is not None and hi is not None else "")
+        verdict = _rmsea_verdict(fit)
+        A(f"<p class=\"small\">ML 적합도: χ²({fit.get('df')}) = {_h(fit.get('chi_square'), 2)}, "
+          f"p = {_h(fit.get('p_value'), 4)} · TLI = {_h(fit.get('tli'))} · "
+          f"CFI = {_h(fit.get('cfi'))}<br>RMSEA = {_h(fit.get('rmsea'))}{ci} "
+          f"→ {_esc(verdict)}</p>")
+        tli = fit.get("tli")
+        if tli is not None and float(tli) > 1.0:
+            A("<div class=\"note\">TLI&gt;1은 우수함이 아니라 표본 대비 모형이 과하다는 "
+              "신호입니다(보고 시 1.00으로 절단하는 관례가 있습니다).</div>")
+
+    A("<p class=\"small\">이 문서는 factorscan이 자동 생성했습니다. 탐색적 요인분석은 "
+      "확인적 요인분석(CFA)이나 측정불변성 검정을 대체하지 않습니다.</p>")
+    A("</body></html>")
+    return "\n".join(out)

@@ -25,7 +25,8 @@ CONGRUENCE_EQUAL = 0.95     # Tucker φ: 사실상 동일한 요인
 CONGRUENCE_FAIR = 0.85      # Tucker φ: 상당히 유사(그 아래는 다른 요인)
 
 
-def _missing_diagnostics(prep: Prepared, names: List[str], result: Dict) -> None:
+def _missing_diagnostics(prep: Prepared, names: List[str], result: Dict,
+                         pairwise: bool = False) -> None:
     """결측 구조를 진단해 result에 싣고, 손실이 크거나 편향 신호가 있으면 경고한다.
 
     listwise 삭제는 '한 문항만 빠져도' 응답자를 통째로 버린다. 임상 설문에서는 이 손실이
@@ -47,9 +48,18 @@ def _missing_diagnostics(prep: Prepared, names: List[str], result: Dict) -> None
             worst = rep.get("worst_item")
             hint = (f" 결측이 가장 많은 문항은 '{worst}'입니다 — 이 문항을 빼고(--items) 다시 "
                     f"돌리면 표본이 늘 수 있습니다." if worst else "")
-            result["warnings"].append(
-                f"결측 제거로 응답자의 {prop*100:.0f}%({prep.n_dropped}/{n_total}명)를 잃었습니다."
-                + hint)
+            if pairwise:
+                # 쌍별 삭제에서는 상관행렬 추정에서 아무도 버려지지 않는다 — "잃었다"고만
+                # 하면 사용자는 옵션이 듣지 않은 줄 안다.
+                result["notes"].append(
+                    f"완전응답자는 {n_total}명 중 {n_total - prep.n_dropped}명"
+                    f"({(1 - prop)*100:.0f}%)뿐이지만, 상관행렬은 쌍별 삭제로 전원을 "
+                    f"활용합니다. 다만 α·문항-총점·부트스트랩·요인점수는 그 완전응답자 "
+                    f"기준입니다." + hint)
+            else:
+                result["warnings"].append(
+                    f"결측 제거로 응답자의 {prop*100:.0f}%({prep.n_dropped}/{n_total}명)를 잃었습니다."
+                    + hint)
 
     high = [(names[i], v) for i, v in enumerate(rep["per_item_prop"]) if v >= ITEM_MISS_WARN]
     if high:
@@ -665,20 +675,35 @@ def analyze(prep: Prepared,
             bootstrap: int = 0,
             group_labels: Optional[Sequence] = None,
             group_name: Optional[str] = None,
-            structure: Optional[Dict[str, List[str]]] = None) -> Dict:
+            structure: Optional[Dict[str, List[str]]] = None,
+            missing: str = "listwise") -> Dict:
     """전처리된 데이터에 EFA/타당도 진단을 수행하고 결과 딕셔너리를 반환.
 
     extraction: "pca"(주성분, SPSS 기본) · "paf"(주축분해) · "ml"(최대우도, 적합도지수 제공).
     correlation: "pearson"(기본) 또는 "polychoric"(순서형 리커트용 잠재상관).
     fit_scan: ML 추출에서 k=1..최대까지 적합도지수를 훑어 요인 수 선택 근거를 제공.
+    missing: 상관행렬 추정에 쓸 결측 처리 — "listwise"(완전응답자만, 기본) 또는
+      "pairwise"(문항쌍마다 둘 다 응답한 사람으로 추정). pairwise는 상관행렬과 거기서
+      나오는 모든 것(고유값·평행분석·MAP·KMO·Bartlett·적재량·공통성·적합도)에만 적용되며,
+      원점수 행이 필요한 통계(α·문항-총점·부트스트랩·집단 재현성·요인점수)는 언제나
+      완전응답자 기준이다.
     """
     if extraction not in ("pca", "paf", "ml"):
         raise ValueError("extraction은 'pca', 'paf', 'ml' 중 하나여야 합니다.")
     if correlation not in ("pearson", "polychoric"):
         raise ValueError("correlation은 'pearson' 또는 'polychoric'이어야 합니다.")
+    if missing not in ("listwise", "pairwise"):
+        raise ValueError("missing은 'listwise' 또는 'pairwise'여야 합니다.")
     names = prep.names
     x = prep.matrix
     n, p = x.shape
+    pairwise = missing == "pairwise"
+    raw_all = getattr(prep, "raw", None)
+    if pairwise and raw_all is None:
+        # 원자료가 없으면(직접 Prepared를 만든 경우) 쌍별 삭제할 것이 없다 — 조용히
+        # listwise로 되돌리지 않고 완전응답 행렬을 그대로 쓰되 사실을 남긴다.
+        raw_all = x
+    xr = raw_all if pairwise else x
 
     result: Dict = {
         "items": names,
@@ -690,6 +715,8 @@ def analyze(prep: Prepared,
         "extraction": {"pca": "principal_component", "paf": "principal_axis",
                        "ml": "maximum_likelihood"}[extraction],
         "correlation": correlation,
+        "missing_method": missing,
+        "pairwise": None,
         "warnings": [],
         "notes": [],
     }
@@ -714,11 +741,11 @@ def analyze(prep: Prepared,
             f"원인을 확인하세요(ID·날짜·메모 열이면 정상입니다).")
 
     # 결측 구조 진단(제거 전 원자료 기준) — 손실 규모·유발 문항·MCAR 위배 신호.
-    _missing_diagnostics(prep, names, result)
+    _missing_diagnostics(prep, names, result, pairwise=pairwise)
 
     if p < 2:
         raise ValueError("요인분석에는 최소 2개 이상의 문항(열)이 필요합니다.")
-    if n < 3:
+    if n < 3 and not pairwise:
         # 표본이 처음부터 적은 것과 'listwise 삭제가 다 지워버린 것'은 원인도 해법도 다르다.
         # 후자에 "표본이 적다"고만 말하면 사용자는 엉뚱한 곳을 고치게 된다.
         if prep.n_dropped > 0 and prep.n_total >= 3:
@@ -738,45 +765,98 @@ def analyze(prep: Prepared,
     # 극단값(1e308 등)은 분산 계산에서 오버플로해 상관행렬을 NaN으로 만들고, numpy가
     # 영문 RuntimeWarning을 뿜은 뒤 "Eigenvalues did not converge" 같은 해석 불가한
     # 오류로 끝난다. 분산을 쓰는 첫 계산보다 먼저 원인을 짚어 막는다.
+    # (pairwise 모드에서는 문항별 '응답한 값'만 본다 — listwise 입력에는 결측이 없어
+    #  동작이 달라지지 않는다.)
+    obs_cols = [xr[:, i][np.isfinite(xr[:, i])] for i in range(p)]
+    empty_cols = [names[i] for i in range(p) if obs_cols[i].size == 0]
+    if empty_cols:
+        raise ValueError(
+            f"응답이 하나도 없는(전부 결측인) 문항이 있습니다: {', '.join(empty_cols)}. "
+            f"해당 문항을 --items 에서 빼고 다시 실행하세요.")
     with np.errstate(over="ignore", invalid="ignore"):
-        col_var = np.var(x, axis=0)
+        col_var = np.array([float(np.var(c)) for c in obs_cols])
     bad_scale = [names[i] for i in range(p) if not np.isfinite(col_var[i])]
     if bad_scale:
         raise ValueError(
             f"값이 너무 커서 분산을 계산할 수 없는 문항이 있습니다: {', '.join(bad_scale)}. "
             f"입력 오류(자릿수·단위)가 아닌지 확인하세요 — 리커트 응답이라면 보통 1~7 범위입니다.")
 
-    zero_var = [names[i] for i in range(p) if np.std(x[:, i]) == 0]
+    zero_var = [names[i] for i in range(p) if float(np.std(obs_cols[i])) == 0]
     if zero_var:
         raise ValueError(
-            f"결측 제거 후 값이 모두 동일해진 문항이 있습니다: {', '.join(zero_var)}. "
-            f"해당 문항을 제외하거나 결측 패턴을 확인하세요.")
+            ("응답한 값이 모두 동일한 문항이 있습니다: " if pairwise
+             else "결측 제거 후 값이 모두 동일해진 문항이 있습니다: ")
+            + f"{', '.join(zero_var)}. 해당 문항을 제외하거나 결측 패턴을 확인하세요.")
+
+    # --- 상관행렬의 유효 표본 수(n_r) ---
+    # listwise면 완전응답자 수 그대로. pairwise면 셀마다 표본이 다르므로 **가장 작은
+    # 쌍별 표본 수**를 보수적 유효 N으로 쓴다(Bartlett χ²·ML 적합도·평행분석 기준선처럼
+    # n에 직접 비례하는 통계를 낙관적으로 부풀리지 않기 위한 표준적 선택).
+    pair_counts = None
+    if pairwise:
+        obs_mask = np.isfinite(xr).astype(np.int64)
+        pair_counts = obs_mask.T @ obs_mask
+        off_counts = pair_counts[np.triu_indices(p, k=1)]
+        n_min = int(off_counts.min()) if off_counts.size else int(np.diag(pair_counts).min())
+        if n_min < 3:
+            ii, jj = np.unravel_index(int(np.argmin(np.where(
+                np.eye(p, dtype=bool), np.iinfo(np.int64).max, pair_counts))), (p, p))
+            raise ValueError(
+                f"쌍별 삭제(--missing pairwise)로도 상관을 계산할 수 없습니다: "
+                f"'{names[ii]}'와 '{names[jj]}'를 둘 다 응답한 사람이 {n_min}명뿐입니다"
+                f"(최소 3명 필요). 결측이 많은 문항을 빼고 다시 실행하세요.")
+        n_r = n_min
+        result["pairwise"] = {
+            "n_min": n_min,
+            "n_median": float(np.median(off_counts)) if off_counts.size else float(n_min),
+            "n_max": int(off_counts.max()) if off_counts.size else int(n_min),
+            "n_rows": int(xr.shape[0]),
+            "n_complete": int(n),
+            "smoothed": False,
+            "smoothing_delta": None,
+        }
+    else:
+        n_r = n
 
     # 표본 크기 경고.
     # '문항당 N명' 규칙만으로는 부족하다 — MacCallum, Widaman, Zhang & Hong(1999)은
     # 요인해의 안정성이 문항당 인원비가 아니라 '절대 표본 수 · 공통성 크기'에 달렸음을
     # 보였다. n=60·p=10이면 문항당 6명이라 비율 규칙은 통과하지만 실제로는 위험하다.
     # 그래서 비율과 절대 수를 함께 본다.
-    if n < p:
+    # 쌍별 삭제에서는 'n'이 무엇의 표본인지 밝혀야 한다(완전응답자 수로 오해하면 안 된다).
+    tag = "쌍별 최소 " if pairwise else ""
+    if n_r < p:
         result["warnings"].append(
-            f"응답자 수(n={n})가 문항 수(p={p})보다 적어 상관행렬이 특이합니다 — 결과 신뢰 불가.")
-    elif n < 5 * p:
+            f"{tag}응답자 수(n={n_r})가 문항 수(p={p})보다 적어 상관행렬이 특이합니다 — 결과 신뢰 불가."
+            if not pairwise else
+            f"쌍별 최소 표본(n={n_r})이 문항 수(p={p})보다 적습니다 — 상관행렬의 계수(rank)가 "
+            f"부족해 결과를 신뢰할 수 없습니다.")
+    elif n_r < 5 * p:
         result["warnings"].append(
-            f"표본이 작습니다(n={n}, 문항당 {n / p:.1f}명). 문항당 5~10명 이상을 권장합니다.")
-    if p <= n < 150:
+            f"표본이 작습니다({tag}n={n_r}, 문항당 {n_r / p:.1f}명). 문항당 5~10명 이상을 권장합니다.")
+    if p <= n_r < 150:
         result["warnings"].append(
-            f"절대 표본 수가 작습니다(n={n}). 공통성이 낮거나(<.5) 요인당 문항이 적으면 "
+            f"절대 표본 수가 작습니다({tag}n={n_r}). 공통성이 낮거나(<.5) 요인당 문항이 적으면 "
             f"n<150에서는 요인해가 표본마다 크게 흔들립니다 — 적재량·요인 수를 확정적으로 "
             f"해석하지 마세요(문항당 인원비만으로는 충분하지 않습니다).")
+    # 쌍별 삭제에서는 위 경고가 '상관행렬' 표본만 본다. α·문항-총점·부트스트랩·요인점수는
+    # 여전히 완전응답자로 계산되므로, 그쪽이 위태로우면 따로 경고해야 한다 — 그러지 않으면
+    # 쌍별로 바꾸기만 해도 경고가 사라져 '작은 표본 문제가 해결됐다'는 착시가 생긴다.
+    if pairwise and n < 5 * p:
+        result["warnings"].append(
+            f"완전응답자가 적습니다(n={n}, 문항당 {n / p:.1f}명). 상관행렬은 쌍별 표본으로 "
+            f"추정했지만 Cronbach α·문항-총점·제거시 α·부트스트랩·집단 재현성·요인점수는 "
+            f"이 {n}명으로만 계산됩니다 — 그 값들은 확정적으로 해석하지 마세요.")
 
     # 문항 기술통계(평균·SD·왜도·첨도·바닥/천장) — 척도 논문 Table 1이자
-    # polychoric/ML 전환 판단의 근거.
-    _descriptive_diagnostics(x, names, result, scale_min, scale_max, correlation, extraction)
+    # polychoric/ML 전환 판단의 근거. pairwise면 문항별로 응답한 사람 전부를 쓴다.
+    _descriptive_diagnostics(xr, names, result, scale_min, scale_max, correlation, extraction)
 
     if correlation == "polychoric":
         # 순서형 적정성 진단: 범주가 너무 많으면(연속형에 가까움) 폴리코릭이 부적절·과도.
-        max_cat = polychoric.max_categories(x)
-        non_int = int(np.sum(np.abs(x - np.rint(x)) > 1e-8))
+        max_cat = polychoric.max_categories(xr)
+        finite_vals = xr[np.isfinite(xr)]
+        non_int = int(np.sum(np.abs(finite_vals - np.rint(finite_vals)) > 1e-8))
         if non_int > 0:
             result["warnings"].append(
                 f"polychoric 상관은 정수 코드 순서형(리커트) 문항을 가정합니다 — 정수가 아닌 값 "
@@ -785,12 +865,59 @@ def analyze(prep: Prepared,
             result["warnings"].append(
                 f"문항 범주 수가 많습니다(최대 {max_cat}개). 폴리코릭은 소수 범주(대개 ≤7) 순서형에 적합하며 "
                 f"범주가 많으면 느리고 이득이 적습니다 — 연속형이면 --correlation pearson을 권장합니다.")
-        r = polychoric.polychoric_matrix(x)
+        if pairwise:
+            r, _pc = polychoric.polychoric_matrix(xr, pairwise=True)
+        else:
+            r = polychoric.polychoric_matrix(x)
+    elif pairwise:
+        r, _pc = efa.pairwise_correlation(xr)
     else:
         r = efa.correlation_matrix(x)
+
+    # 추정 불가 셀(둘 다 답한 사람이 없거나 그 부분표본에서 분산 0, 폴리코릭에서 범주가
+    # 1개뿐)은 조용히 0으로 메우지 않는다 — 0은 '무상관'이라는 강한 주장이라 요인구조를
+    # 실제로 바꾼다(그 문항이 혼자 요인 하나를 통째로 만들어 낸다).
+    bad = np.argwhere(~np.isfinite(r))
+    if bad.size:
+        pairs = sorted({(min(int(a), int(b)), max(int(a), int(b))) for a, b in bad})
+        detail = ", ".join(f"{names[a]}–{names[b]}" for a, b in pairs[:5])
+        why = ("두 문항을 함께 응답한 사람이 없거나 그 부분표본에서 한 문항의 값이 모두 같습니다"
+               if pairwise else
+               "한 문항의 응답 범주가 하나뿐이거나(반올림 후) 값이 모두 같습니다")
+        raise ValueError(
+            f"{'쌍별 ' if pairwise else ''}상관을 추정할 수 없는 문항쌍이 있습니다: {detail}"
+            f"{' 외' if len(pairs) > 5 else ''}. {why} — 해당 문항을 빼고 실행하세요.")
+
+    smoothed = False
+    if pairwise and not efa.is_positive_definite(r):
+        r_s, sm = efa.smooth_correlation(r)
+        if efa.is_positive_definite(r_s):
+            smoothed = True
+            result["pairwise"].update({
+                "smoothed": True,
+                "smoothing_delta": sm["max_delta"],
+                "min_eigenvalue_before": sm["min_eig_before"],
+                "n_eigenvalues_clipped": sm["n_clipped"],
+            })
+            result["warnings"].append(
+                f"쌍별 상관행렬이 양의 정부호가 아니어서 고유값 보정(smoothing)을 적용했습니다"
+                f"(보정 전 최소 고유값 {sm['min_eig_before']:+.4f}, 하한에 걸린 고유값 "
+                f"{sm['n_clipped']}개, 최대 상관 변화 {sm['max_delta']:.3f}). "
+                f"고유값·적재량은 보정된 행렬로 계산했지만, **KMO·Bartlett·ML 적합도는 "
+                f"생략**합니다 — 이 통계들은 |R|과 R⁻¹에 의존해서 보정 하한값이 그대로 "
+                f"결과를 지배하기 때문입니다(중복 문항이 있으면 χ²의 99%가 하한에서 나옵니다). "
+                f"중복·거의 동일한 문항이 없는지 확인하고 --missing listwise 와 비교하세요.")
+            r = r_s
+        else:
+            result["warnings"].append(
+                "쌍별 상관행렬이 양의 정부호가 아니며 보정에도 실패했습니다 — "
+                "KMO/Bartlett/ML이 생략될 수 있습니다. --missing listwise 로 비교해 보세요.")
+
     result["correlation_matrix"] = r
-    pos_def = efa.is_positive_definite(r)
-    if correlation == "polychoric" and not pos_def:
+    # 보정을 했다면 '수치적으로는' 양의 정부호지만, 행렬식·역행렬에 기대는 추론
+    # (Bartlett·KMO·MAP·ML 적합도)은 자료가 아니라 하한값이 만들어 낸 값이 된다.
+    pos_def = efa.is_positive_definite(r) and not smoothed
+    if correlation == "polychoric" and not pos_def and not smoothed:
         result["warnings"].append(
             "폴리코릭 상관행렬이 양의 정부호가 아닙니다(쌍별 추정의 흔한 특성) — KMO/Bartlett가 생략될 수 "
             "있습니다. 표본을 키우거나 문항 수를 줄여 보세요.")
@@ -819,7 +946,7 @@ def analyze(prep: Prepared,
     # --- 요인분석 적합성: Bartlett & KMO (역행렬/행렬식 필요) ---
     if pos_def:
         try:
-            b = efa.bartlett_sphericity(r, n)
+            b = efa.bartlett_sphericity(r, n_r)
             result["bartlett"] = {"chi_square": b.chi_square, "df": b.df, "p_value": b.p_value}
         except (ValueError, np.linalg.LinAlgError) as exc:
             result["bartlett"] = None
@@ -833,9 +960,10 @@ def analyze(prep: Prepared,
     else:
         result["bartlett"] = None
         result["kmo"] = None
-        result["warnings"].append(
-            "상관행렬이 양의 정부호가 아닙니다(특이행렬) — KMO/Bartlett 생략. "
-            "표본이 문항 수보다 충분히 큰지, 중복/완전상관 문항이 없는지 확인하세요.")
+        if not smoothed:
+            result["warnings"].append(
+                "상관행렬이 양의 정부호가 아닙니다(특이행렬) — KMO/Bartlett 생략. "
+                "표본이 문항 수보다 충분히 큰지, 중복/완전상관 문항이 없는지 확인하세요.")
 
     # --- 고유값 / 설명분산 / Kaiser / 평행분석 ---
     eig = efa.eigen_summary(r)
@@ -868,13 +996,13 @@ def analyze(prep: Prepared,
     result["parallel_eigenvalues"] = None
     result["parallel_k"] = None
     if parallel_iter and parallel_iter > 0:
-        if n <= p:
+        if n_r <= p:
             # n<=p 이면 무작위 상관행렬도 특이(0/음수 고유값 포함)해 기준선이 왜곡된다.
             result["warnings"].append(
-                f"평행분석 생략: 응답자 수(n={n})가 문항 수(p={p}) 이하여서 "
+                f"평행분석 생략: 응답자 수(n={n_r})가 문항 수(p={p}) 이하여서 "
                 f"무작위 기준선이 왜곡됩니다.")
         else:
-            pa = efa.parallel_analysis(n, p, iters=parallel_iter, seed=seed)
+            pa = efa.parallel_analysis(n_r, p, iters=parallel_iter, seed=seed)
             result["parallel_eigenvalues"] = pa.tolist()
             # 첫 교차(관측<=무작위)에서 멈추는 표준 규칙으로 선행 요인 수만 센다.
             pa_k = efa.retained_by_parallel(eig.values, pa)
@@ -921,18 +1049,42 @@ def analyze(prep: Prepared,
             result["warnings"].append(
                 "최대우도(ML)에서 고유분산이 하한(0.005)에 도달하는 Heywood 케이스가 발생했습니다 — "
                 "요인 수 과다·표본 부족·문항 다중공선성의 신호이며 해가 불안정할 수 있습니다.")
-        fit = efa.fit_indices(ml.criterion, n, p, k, null_chi_square=null_chi)
-        result["fit"] = fit
-        if not fit.get("identified"):
-            result["warnings"].append(
-                f"요인 수 k={k}에서 모형 자유도가 {fit['df']}(≤0)이라 적합도 검정이 불가합니다 — "
-                f"문항 수(p={p}) 대비 요인이 너무 많습니다(최대 k={efa.ml_max_factors(p)}).")
+        # χ² 계열 적합도지수는 표본 크기 N에 **직접 비례**한다(χ² ≈ (N−1)·F). 쌍별 삭제에는
+        # 유일한 N이 존재하지 않으며, 어떤 값을 넣든 그 선택이 결과를 만든다:
+        #   · 최솟값을 넣으면 χ²가 줄어 RMSEA→0·CFI→1 로 **기각될 모형이 완벽해 보인다**
+        #     (실측: n_min=55/n=600 자료에서 RMSEA 0.101 → 0.000, CFI 0.896 → 1.000).
+        #   · 최댓값·중앙값을 넣으면 갖고 있지 않은 정보량을 주장하게 된다.
+        # Bartlett·평행분석에서는 최솟값이 '보수적'이지만 여기서는 방향이 정반대라,
+        # 같은 규칙을 재사용할 수 없다. 숫자를 지어내느니 내지 않는다.
+        if pairwise:
+            result["fit"] = None
+            result["notes"].append(
+                "--missing pairwise 에서는 ML 적합도지수(χ²·RMSEA·CFI·TLI·AIC/BIC)를 "
+                "계산하지 않습니다. 이 지수들은 χ² ≈ (N−1)·F 로 표본 크기에 직접 비례하는데 "
+                "쌍별 삭제에는 단일한 N이 없고, 보수적이라며 최솟값을 넣으면 오히려 χ²가 "
+                "줄어 '완벽한 적합'이 만들어집니다(RMSEA→0, CFI→1). 적재량·공통성·잔차 RMSR은 "
+                "그대로 제공되며, 적합도지수가 필요하면 --missing listwise 로 다시 실행해 "
+                "완전응답자 기준으로 보고하세요.")
+        else:
+            fit = efa.fit_indices(ml.criterion, n_r, p, k, null_chi_square=null_chi)
+            result["fit"] = fit
+            if not fit.get("identified"):
+                reason = fit.get("unidentified_reason")
+                result["warnings"].append(
+                    f"요인 수 k={k}에서 적합도 검정이 불가합니다: "
+                    + (reason if reason else
+                       f"모형 자유도가 {fit['df']}(≤0)입니다 — 문항 수(p={p}) 대비 요인이 "
+                       f"너무 많습니다(최대 k={efa.ml_max_factors(p)})."))
         if correlation == "polychoric":
             result["notes"].append(
                 "폴리코릭 상관에 ML 적합도지수를 적용했습니다. χ²/RMSEA/TLI/CFI는 원자료의 다변량 "
                 "정규성을 가정한 값이라 폴리코릭 입력에서는 근사이며, 참고용으로만 보고하세요.")
-        if fit_scan:
-            scan = _ml_fit_scan(r, n, p, null_chi)
+        if fit_scan and pairwise:
+            result["warnings"].append(
+                "--fit-scan 은 --missing pairwise 와 함께 쓸 수 없습니다(적합도지수 자체를 "
+                "계산하지 않습니다). --missing listwise 로 실행하세요.")
+        elif fit_scan:
+            scan = _ml_fit_scan(r, n_r, p, null_chi)
             result["fit_scan"] = scan
             if not scan:
                 # p가 작으면 df>0인 k가 하나도 없다 → 표가 통째로 비는데, 아무 말도 없으면
@@ -1043,9 +1195,29 @@ def analyze(prep: Prepared,
             f"--scale-min 1 --scale-max 5`(실제 척도범위로) 로 다시 실행하세요. "
             f"역문항이 아니라면 문항 방향(문구)을 확인하세요.")
 
+    # --- 원점수 행이 필요한 통계는 언제나 '완전응답자' 기준이다 ---
+    # (α·문항-총점·부트스트랩은 응답자별 총점을 만들어야 하므로 쌍별 삭제로 대체할 수 없다.)
+    cc_ok = n >= 3
+    if pairwise:
+        result["notes"].append(
+            f"--missing pairwise: 상관행렬은 쌍별 응답자(쌍별 N {result['pairwise']['n_min']}"
+            f"~{result['pairwise']['n_max']}명)로 추정했고, 고유값·평행분석·KMO·Bartlett·"
+            f"적재량·잔차는 그 행렬에서 나옵니다(Bartlett·평행분석의 유효 N은 보수적으로 최솟값 "
+            f"{n_r}명을 사용). 반면 α·문항-총점·부트스트랩·집단 재현성·요인점수는 원점수 "
+            f"행이 필요해 완전응답자 {n}명 기준입니다 — 두 표본이 다르다는 점을 논문에 "
+            f"명시하세요.")
+    if not cc_ok:
+        result["notes"].append(
+            f"완전응답자가 {n}명뿐이라 α·문항-총점·제거시 α·부트스트랩을 계산하지 "
+            f"않았습니다(최소 3명 필요). 요인구조만 해석하세요.")
+
     # --- 수정된 문항-총점 상관: 전체 척도 기준 + 소속 요인(하위척도) 기준 ---
-    it_overall = efa.corrected_item_total(x)
-    it_factor = efa.corrected_item_total_by_group(x, groups)
+    if not cc_ok:
+        nan_p = np.full(p, np.nan)
+        it_overall, it_factor = nan_p, nan_p
+    else:
+        it_overall = efa.corrected_item_total(x)
+        it_factor = efa.corrected_item_total_by_group(x, groups)
     result["item_total_overall"] = it_overall.tolist()   # 전체 문항 합 기준
     result["item_total_by_factor"] = it_factor.tolist()  # 소속 요인 내 합 기준(다차원 권장)
     # 다차원 척도에서는 소속 요인 기준을 진단·표시에 쓴다(k=1이면 둘이 동일).
@@ -1060,7 +1232,7 @@ def analyze(prep: Prepared,
     omega = efa.omega_by_group(struct_mat, groups)
     result["omega"] = [omega.get(f) for f in range(k)]
     # 요인별 Cronbach's α — 표본 원점수 기반(적재 낙관적 ω와 나란히 보고).
-    alpha = efa.alpha_by_group(x, groups, k)
+    alpha = efa.alpha_by_group(x, groups, k) if cc_ok else {}
     result["alpha"] = [alpha.get(f) for f in range(k)]
     # α의 Feldt 95% 신뢰구간 — APA/COSMIN 보고 지침이 요구하는 값. 점추정 .80이
     # "실제로는 .70을 못 넘을 수도" 있다는 사실은 구간을 봐야만 드러난다.
@@ -1106,16 +1278,25 @@ def analyze(prep: Prepared,
             f"표본이 작아 'α≥{ALPHA_GOOD:.2f} 달성'이라고 단정할 수 없습니다 — 논문에는 "
             f"점추정과 구간을 함께 보고하세요.")
     # 문항을 뺐을 때의 α — "이 문항을 지우면 신뢰도가 오르나?"에 직접 답한다.
-    aid = efa.alpha_if_deleted(x, groups, k)
+    aid = efa.alpha_if_deleted(x, groups, k) if cc_ok else np.full(p, np.nan)
     result["alpha_if_deleted"] = aid.tolist()
 
     # --- 부트스트랩 안정성: 적재 신뢰구간 + 요인 수 합의율 ---
     # 이 보고서의 다른 모든 숫자는 점추정이다. "표본을 다시 뽑아도 이 적재·이 요인 수가
     # 버티는가"에 답할 수 있는 유일한 지표라, 작은 표본에서 특히 중요하다.
     result["bootstrap"] = None
-    if bootstrap and bootstrap > 0:
+    if bootstrap and bootstrap > 0 and not cc_ok:
+        result["warnings"].append(
+            f"부트스트랩을 생략했습니다: 완전응답자가 {n}명뿐입니다(재표본을 만들 수 없음).")
+    elif bootstrap and bootstrap > 0:
         pa_ref = np.asarray(result["parallel_eigenvalues"]) \
             if result.get("parallel_eigenvalues") else None
+        if pairwise and pa_ref is not None:
+            # 부트스트랩은 **완전응답자 n명**을 재표본하는데, 위에서 만든 평행분석 기준선은
+            # 쌍별 유효 N(n_r > n) 기준이라 문턱이 낮다 — 그대로 쓰면 재표본마다 요인이
+            # 과대 유지돼 '안정적'이라는 착시가 생긴다. 재표본 크기에 맞춰 다시 만든다.
+            pa_ref = (efa.parallel_analysis(n, p, iters=max(1, parallel_iter), seed=seed)
+                      if n > p else None)
         bs = efa.bootstrap_stability(
             x, k, reference=rotated, n_boot=int(bootstrap), seed=seed,
             extraction=extraction, rotation=applied_rotation, pa_reference=pa_ref,

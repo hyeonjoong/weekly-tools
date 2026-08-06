@@ -62,6 +62,13 @@ def build_parser() -> argparse.ArgumentParser:
                    help="요인 수 k=1..최대까지 ML 적합도지수를 훑어 표로 제시(--extraction ml 필요)")
     p.add_argument("--correlation", choices=["pearson", "polychoric"], default="pearson",
                    help="상관 방식: pearson(기본) · polychoric(순서형 리커트 잠재상관)")
+    p.add_argument("--missing", choices=["listwise", "pairwise"], default="listwise",
+                   help="상관행렬 추정의 결측 처리: listwise(완전응답자만, 기본) · "
+                        "pairwise(문항쌍마다 둘 다 응답한 사람으로 추정 — 결측이 흩어진 "
+                        "임상 설문에서 표본 손실을 크게 줄임). pairwise는 상관행렬에서 "
+                        "나오는 값(고유값·평행분석·KMO·적재량·잔차)에만 적용되고, "
+                        "α·문항-총점·부트스트랩·요인점수는 언제나 완전응답자 기준이며, "
+                        "ML 적합도지수(χ²·RMSEA·CFI)는 단일 N이 없어 생략됩니다")
     p.add_argument("--rotation", choices=["varimax", "promax", "none"], default="varimax",
                    help="회전 방식: varimax(직교, 기본) · promax(사교, 요인상관 허용) · none")
     p.add_argument("--parallel-iter", type=int, default=100,
@@ -78,6 +85,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--json", action="store_true", help="사람용 보고서 대신 JSON 출력")
     p.add_argument("--csv-out", metavar="경로",
                    help="문항×요인 적재표를 CSV 파일로 저장(논문 부록·엑셀용, utf-8-sig)")
+    p.add_argument("--html-out", metavar="경로",
+                   help="스크리 도표(SVG)·색으로 읽히는 적재표가 들어간 단일 HTML 보고서로 "
+                        "저장(외부 파일 참조 없음 — 공동연구자에게 그대로 전달 가능)")
     p.add_argument("--eigen-out", metavar="경로",
                    help="고유값·평행분석 기준선을 CSV로 저장(엑셀에서 스크리 도표를 그릴 표)")
     p.add_argument("--scores-out", metavar="경로",
@@ -202,6 +212,18 @@ def run(argv: Optional[List[str]] = None) -> int:
             return 2
 
     # 인자 값 검증(잘못된 임계값/범위를 조용히 통과시키지 않음)
+    # 빈 문자열 경로(셸 변수 미설정: --html-out "$OUT")는 조용한 무시가 가장 나쁘다 —
+    # 종료코드 0에 아무 파일도 없어 보고서를 통째로 잃는다.
+    for flag, val in (("--csv-out", args.csv_out), ("--eigen-out", args.eigen_out),
+                      ("--scores-out", args.scores_out), ("--html-out", args.html_out)):
+        if val is not None and not val.strip():
+            print(f"오류: {flag} 에 빈 경로가 지정됐습니다(셸 변수가 비어 있지 않은지 확인하세요).",
+                  file=sys.stderr)
+            return 2
+    if args.seed < 0:
+        # numpy가 영어로 'expected non-negative integer'를 던지는 자리 — 한국어로 먼저 막는다.
+        print("오류: --seed 는 0 이상의 정수여야 합니다.", file=sys.stderr)
+        return 2
     if not (0.0 <= args.min_loading <= 1.0):
         print("오류: --min-loading 은 0.0~1.0 사이여야 합니다.", file=sys.stderr)
         return 2
@@ -271,8 +293,13 @@ def run(argv: Optional[List[str]] = None) -> int:
                 return 2
             if args.group_col not in exclude:
                 exclude.append(args.group_col)
+        # 쌍별 삭제는 '응답률이 낮은 문항을 살리려고' 쓰는 옵션이다. 자동선택의 기본
+        # 문턱(유효값 50% 이상)을 그대로 두면 그런 문항을 먼저 지워 놓고 "결측 없음"
+        # 처럼 보고하게 된다 — 문턱을 5%로 낮춘다(그래도 빠진 열은 사유가 보고된다).
         ds: Dataset = select_items(columns, items=items or None,
-                                   id_cols=exclude, na_values=args.na)
+                                   id_cols=exclude, na_values=args.na,
+                                   min_finite_prop=(0.05 if args.missing == "pairwise"
+                                                    else 0.5))
         if args.group_col and args.group_col in ds.names:
             print(f"⚠ 경고: 집단 열 '{args.group_col}'이 분석 문항에도 들어가 있습니다 "
                   f"(--items 로 명시했기 때문). 집단 변수는 문항이 아니므로 제외하세요.",
@@ -313,6 +340,7 @@ def run(argv: Optional[List[str]] = None) -> int:
             group_labels=group_labels,
             group_name=args.group_col,
             structure=structure,
+            missing=args.missing,
         )
     except (DataError, ValueError) as exc:
         print(f"오류: {exc}", file=sys.stderr)
@@ -343,6 +371,21 @@ def run(argv: Optional[List[str]] = None) -> int:
             print(f"CSV 저장 실패: {exc}", file=sys.stderr)
             return 1
         print(f"✓ 적재표를 저장했습니다: {args.csv_out}", file=sys.stderr)
+
+    if args.html_out:
+        from .report import render_html
+        # 파일명(확장자 제외)을 제목에 써서 여러 척도를 함께 열어도 구분되게 한다.
+        import os as _os
+        stem = _os.path.splitext(_os.path.basename(args.csv))[0] or "factorscan"
+        text = render_html(result, title=f"factorscan 요인분석 보고서 — {stem}")
+        try:
+            with open(args.html_out, "w", encoding="utf-8") as fh:
+                fh.write(text)
+        except OSError as exc:
+            print(f"HTML 저장 실패: {exc}", file=sys.stderr)
+            return 1
+        print(f"✓ HTML 보고서를 저장했습니다: {args.html_out} "
+              f"(브라우저로 열면 스크리 도표가 보입니다)", file=sys.stderr)
 
     if args.eigen_out:
         from .report import eigen_table_csv

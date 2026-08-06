@@ -453,7 +453,7 @@ def _rows_to_columns(rows: List[List[str]]) -> Dict[str, np.ndarray]:
             cols[i].append(str(row[i]))
         n_rows += 1
     if n_rows == 0:
-        raise DataError("데이터 행이 없습니다(헤더만 존재).")
+        raise DataError("데이터 행이 없습니다 — 헤더만 있거나 이후 줄이 모두 비어 있습니다.")
     return {name: np.array(col, dtype=object) for name, col in zip(header, cols)}
 
 
@@ -505,7 +505,7 @@ def _read_rows(fh, delimiter: str = ",") -> Dict[str, np.ndarray]:
             cols[i].append(row[i])
         n_rows += 1
     if n_rows == 0:
-        raise DataError("데이터 행이 없습니다(헤더만 존재).")
+        raise DataError("데이터 행이 없습니다 — 헤더만 있거나 이후 줄이 모두 비어 있습니다.")
     return {name: np.array(col, dtype=object) for name, col in zip(header, cols)}
 
 
@@ -513,11 +513,16 @@ def select_items(columns: Dict[str, np.ndarray],
                  items: Optional[Sequence[str]] = None,
                  id_cols: Sequence[str] = (),
                  na_values: Optional[Sequence[str]] = None,
-                 min_unique: int = 2) -> Dataset:
+                 min_unique: int = 2,
+                 min_finite_prop: float = 0.5) -> Dataset:
     """분석할 문항 열을 골라 실수 행렬로 변환.
 
     items가 주어지면 그 열만, 아니면 id_cols를 제외한 '숫자형' 열 전체를 사용한다.
     분산이 0(모두 동일값)이거나 유효값이 없는 열은 제외한다.
+
+    min_finite_prop: 자동선택에서 '숫자 열'로 인정할 최소 유효값 비율(기본 0.5).
+    쌍별 삭제(--missing pairwise)는 응답률이 낮은 문항을 살리려는 옵션이므로 CLI가
+    이 값을 낮춰 넘긴다. 어떤 값이든 빠진 열은 항상 사유와 함께 dropped에 남는다.
     """
     extra_na = list(na_values or [])
     all_names = list(columns.keys())
@@ -549,11 +554,19 @@ def select_items(columns: Dict[str, np.ndarray],
             # 다만 '왜' 빠졌는지는 남긴다 — 숫자로 보이는데 파싱이 안 되는 열
             # (예: 자릿수구분 쉼표 "1,234", 캐시 없는 수식 셀)이 조용히 사라지면
             # 사용자는 문항 하나가 통째로 분석에서 빠진 걸 눈치채지 못한다.
-            if finite.size < max(2, int(0.5 * vec.size)):
+            if finite.size < max(2, int(min_finite_prop * vec.size)):
                 if bad:
                     dropped[name] = f"숫자로 읽을 수 없는 값 {bad}개(유효값 {finite.size}개)"
                 elif finite.size == 0:
                     dropped[name] = "유효한 숫자값이 없음"
+                else:
+                    # 숫자는 멀쩡한데 '응답률이 낮아' 빠진 열(분기문항·중도추가 문항)이
+                    # 사유 없이 사라지면, 보고서는 결측이 전혀 없는 것처럼 보인다.
+                    # 특히 --missing pairwise 는 바로 그런 문항을 살리려고 쓰는 옵션이라,
+                    # 조용히 지우면 옵션이 자기모순이 된다.
+                    dropped[name] = (
+                        f"응답률이 낮음(유효값 {finite.size}/{vec.size}개 "
+                        f"= {finite.size / max(1, vec.size) * 100:.0f}%)")
                 continue
             if finite.size and np.unique(finite).size < min_unique:
                 # 상수 열은 상관계산 불가 → 자동선택에서 제외(사유는 남김)

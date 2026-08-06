@@ -24,6 +24,86 @@ def correlation_matrix(x: np.ndarray) -> np.ndarray:
     return np.corrcoef(x, rowvar=False)
 
 
+def pairwise_correlation(x: np.ndarray) -> tuple:
+    """쌍별 완전관측(pairwise-complete) 피어슨 상관행렬과 쌍별 유효 표본 수.
+
+    listwise 삭제는 '한 문항만 빠져도' 응답자를 통째로 버린다. 20문항 설문에서 문항별
+    결측이 5%만 무작위로 흩어져 있어도 완전응답자는 0.95²⁰ ≈ 36%만 남는다 — 즉 300명
+    연구가 100명대 연구로 줄어든다. 쌍별 삭제는 각 상관 r_ij 를 **i·j 를 모두 답한
+    응답자**로 계산해 정보를 최대한 살린다(Marsh 1998; Enders 2010의 available-case).
+
+    대가도 분명하다: 셀마다 표본이 달라 결과 행렬이 양의 정부호가 아닐 수 있고, 그러면
+    KMO·Bartlett·ML이 성립하지 않는다. 그래서 쌍별 표본 수를 함께 돌려주고
+    (분석 쪽에서 최솟값을 보수적 유효 N으로 쓴다) 필요하면 smooth_correlation 으로
+    보정한 뒤 그 사실을 보고한다.
+
+    반환: (r, counts) — r은 (p,p) 상관행렬(계산 불가 셀은 NaN),
+          counts는 (p,p) 정수 행렬(대각은 그 문항의 관측 수).
+    """
+    x = np.asarray(x, dtype=float)
+    n, p = x.shape
+    obs = np.isfinite(x)
+    r = np.eye(p, dtype=float)
+    counts = np.zeros((p, p), dtype=np.int64)
+    for i in range(p):
+        counts[i, i] = int(obs[:, i].sum())
+    for i in range(p):
+        for j in range(i + 1, p):
+            m = obs[:, i] & obs[:, j]
+            cnt = int(m.sum())
+            counts[i, j] = counts[j, i] = cnt
+            val = np.nan
+            if cnt >= 3:
+                a = x[m, i]
+                b = x[m, j]
+                a = a - a.mean()
+                b = b - b.mean()
+                denom = math.sqrt(float(a @ a) * float(b @ b))
+                if math.isfinite(denom) and denom > 0:
+                    val = float(np.clip(float(a @ b) / denom, -1.0, 1.0))
+            r[i, j] = r[j, i] = val
+    return r, counts
+
+
+def smooth_correlation(r: np.ndarray, eps: float = 1e-6,
+                       max_iter: int = 100) -> tuple:
+    """양의 정부호가 아닌 상관행렬을 고유값 절단 + 대각 재정규화로 보정한다.
+
+    쌍별 삭제·폴리코릭 추정은 셀마다 다른 정보를 쓰기 때문에 음의 고유값을 가진
+    '상관행렬 비슷한 것'을 만들어 낼 수 있다. 그대로 두면 행렬식이 0 이하가 되어
+    KMO·Bartlett·ML이 전부 불가능해진다. 여기서는 고전적인 eigenvalue clipping(bending):
+    음/미세 고유값을 eps로 올리고 다시 단위 대각으로 재정규화하기를 반복한다.
+
+    반환: (보정행렬, 진단 dict). 진단에는 max_delta(원본 대비 최대 절대변화),
+    min_eig_before(보정 전 최소 고유값), n_clipped(하한에 걸린 고유값 개수)가 들어간다.
+
+    **max_delta만으로 심각도를 읽으면 안 된다**: 문항이 완전히 중복돼 고유값이 정확히 0인
+    경우(가장 나쁜 입력) 보정은 그 값을 eps로 올릴 뿐이라 상관값 변화는 1e-6 수준으로
+    작게 나온다. 그런데 그때 ln|R|은 사실상 ln(eps)가 지배하므로 Bartlett χ²·KMO는
+    **자료가 아니라 하한값이 만들어 낸 숫자**가 된다. 그래서 호출 쪽은 '보정을 했는가'를
+    기준으로 검정을 생략하고, min_eig_before/n_clipped를 함께 보고해야 한다.
+    """
+    r0 = np.asarray(r, dtype=float)
+    out = np.array(r0, dtype=float, copy=True)
+    out = (out + out.T) / 2.0
+    w0 = np.linalg.eigvalsh(out) if out.size else np.array([1.0])
+    min_eig_before = float(w0.min())
+    n_clipped = int(np.sum(w0 <= eps))
+    for _ in range(max_iter):
+        w, v = np.linalg.eigh(out)
+        if float(w.min()) > eps:
+            break
+        w = np.clip(w, eps, None)
+        out = (v * w) @ v.T
+        d = np.sqrt(np.clip(np.diag(out), 1e-12, None))
+        out = out / np.outer(d, d)
+        out = (out + out.T) / 2.0
+        np.fill_diagonal(out, 1.0)
+    delta = float(np.max(np.abs(out - r0))) if out.size else 0.0
+    return out, {"max_delta": delta, "min_eig_before": min_eig_before,
+                 "n_clipped": n_clipped, "eps": float(eps)}
+
+
 def _safe_inv(m: np.ndarray) -> np.ndarray:
     """역행렬. 특이행렬이면 유사역행렬(pinv)로 대체해 예외 없이 진행한다."""
     try:
@@ -58,7 +138,16 @@ def bartlett_sphericity(r: np.ndarray, n: int) -> Bartlett:
         sign, logdet = np.linalg.slogdet(r)
     if sign <= 0:
         raise ValueError("상관행렬의 행렬식이 0 이하입니다(특이/비양정부호) — Bartlett 검정 불가")
-    chi = -((n - 1) - (2 * p + 5) / 6.0) * logdet
+    mult = (n - 1) - (2 * p + 5) / 6.0
+    if mult <= 0:
+        # 표본이 문항 수에 비해 너무 작으면 Bartlett 보정계수가 음수가 되고, χ²가
+        # **음수**로 나온다. chi2_sf가 그걸 p=1.0으로 잘라 내면 "상관행렬이 단위행렬과
+        # 다르지 않다(=요인분석 근거 없음)"로 조용히 읽힌다 — 검정이 성립하지 않는 것과
+        # 귀무가설을 기각하지 못한 것은 완전히 다른 결론이므로 여기서 막는다.
+        raise ValueError(
+            f"표본이 너무 작아 Bartlett 보정계수가 0 이하입니다"
+            f"(n={n}, p={p} → (n−1)−(2p+5)/6 = {mult:.2f}). 검정이 성립하지 않습니다.")
+    chi = -mult * logdet
     df = p * (p - 1) // 2
     return Bartlett(chi_square=float(chi), df=int(df), p_value=float(chi2_sf(chi, df)))
 
@@ -384,6 +473,19 @@ def fit_indices(criterion: float, n: int, p: int, k: int,
         return out
 
     mult = (n - 1) - (2.0 * p + 5.0) / 6.0 - (2.0 * k) / 3.0
+    if mult <= 0:
+        # 보정계수가 0 이하가 되면 χ² = max(mult,0)·F = 0 이 되어 **적합도가 완벽한 것처럼**
+        # 보고된다(RMSEA=0, CI=[0,0], PCLOSE=1, CFI=1). 실제로는 표본이 문항 수에 비해
+        # 너무 작아 검정 자체가 성립하지 않는 것이며, 같은 실행에서 TLI가 음수로 나와
+        # 표가 자기모순에 빠진다. df≤0과 똑같이 '식별 불가'로 처리한다.
+        out.update({"chi_square": None, "p_value": None, "rmsea": None,
+                    "rmsea_lo": None, "rmsea_hi": None, "p_close": None,
+                    "tli": None, "cfi": None, "aic": None, "bic": None,
+                    "identified": False,
+                    "unidentified_reason": (
+                        f"표본이 너무 작아 χ² 보정계수가 0 이하입니다"
+                        f"(n={n}, p={p}, k={k} → {mult:.2f})")})
+        return out
     chi = float(max(mult, 0.0) * criterion)
     out["identified"] = True
     out["chi_square"] = chi
@@ -731,10 +833,22 @@ def item_descriptives(x: np.ndarray, scale_min: Optional[float] = None,
     왜도·첨도는 적률 기반(g1, g2 = 초과첨도)이며 표본분산은 ddof=1을 쓴다.
     scale_min/max가 주어지면 그 값을, 없으면 관측 최솟값/최댓값을 바닥/천장 기준으로 쓴다.
     """
-    n, p = x.shape
+    n_all, p = x.shape
     out: List[Dict] = []
     for i in range(p):
+        # 결측이 섞인 행렬(--missing pairwise)에서도 문항별 '응답한 사람'만으로 계산한다.
+        # listwise 입력에는 결측이 없으므로 동작이 달라지지 않는다.
         col = x[:, i]
+        col = col[np.isfinite(col)]
+        n = int(col.size)
+        if n == 0:
+            out.append({
+                "mean": float("nan"), "sd": 0.0, "skew": 0.0, "kurtosis": 0.0,
+                "min": float("nan"), "max": float("nan"),
+                "floor_prop": 0.0, "ceiling_prop": 0.0, "n_categories": 0,
+                "extreme_threshold": floor_ceiling_threshold(0), "n_obs": 0,
+            })
+            continue
         mu = float(col.mean())
         sd = float(col.std(ddof=1)) if n > 1 else 0.0
         m2 = float(((col - mu) ** 2).mean())
@@ -753,6 +867,7 @@ def item_descriptives(x: np.ndarray, scale_min: Optional[float] = None,
             "floor_prop": floor, "ceiling_prop": ceil,
             "n_categories": int(np.unique(col).size),
             "extreme_threshold": floor_ceiling_threshold(int(np.unique(col).size)),
+            "n_obs": n,
         })
     return out
 
@@ -781,14 +896,19 @@ def category_frequencies(x: np.ndarray, names: Sequence[str],
     n, p = x.shape
     if n == 0 or p == 0:
         return None
-    if np.any(np.abs(x - np.rint(x)) > 1e-8):
+    # 결측(NaN)이 섞여 있어도 '응답한 값'만으로 범주표를 만든다(--missing pairwise).
+    finite = np.isfinite(x)
+    vals = x[finite]
+    if vals.size == 0:
+        return None
+    if np.any(np.abs(vals - np.rint(vals)) > 1e-8):
         return None                     # 연속형 → 범주표가 의미 없음
     # int64로 캐스팅하기 전에 범위를 확인한다. 1e19 같은 값은 조용히 포화(saturate)해
     # 9223372036854775807 이라는 존재하지 않는 '범주'를 100%로 만들어 낸다.
-    if not np.all(np.isfinite(x)) or np.max(np.abs(x)) > 2 ** 53:
+    if float(np.max(np.abs(vals))) > 2 ** 53:
         return None
-    xi = np.rint(x).astype(np.int64)
-    observed = np.unique(xi)
+    xi = np.rint(np.where(finite, x, 0.0)).astype(np.int64)
+    observed = np.unique(np.rint(vals).astype(np.int64))
     if observed.size > CATEGORY_TABLE_MAX:
         return None
 
@@ -805,22 +925,26 @@ def category_frequencies(x: np.ndarray, names: Sequence[str],
         declared = False
 
     rows: List[Dict] = []
+    n_max = 0
     for i in range(p):
-        col = xi[:, i]
+        col = xi[finite[:, i], i]
+        n_i = int(col.size)
+        n_max = max(n_max, n_i)
         counts = [int(np.sum(col == c)) for c in cats]
-        props = [c / n for c in counts]
+        props = [(c / n_i if n_i else 0.0) for c in counts]
         # 선언된 척도 범위를 벗어난 값이 있으면 그 사실을 숨기지 않는다.
-        outside = int(col.size - sum(counts))
+        outside = int(n_i - sum(counts))
         rows.append({
             "item": names[i],
             "counts": counts,
             "props": props,
+            "n": n_i,
             "unused": [cats[j] for j, c in enumerate(counts) if c == 0],
             "rare": [cats[j] for j, pr in enumerate(props)
                      if 0 < pr < RARE_CATEGORY_PROP],
             "outside_range": outside,
         })
-    return {"categories": cats, "declared_range": declared, "n": int(n), "items": rows}
+    return {"categories": cats, "declared_range": declared, "n": int(n_max), "items": rows}
 
 
 # COSMIN 관례의 바닥/천장 기준(총점·다범주 기준). 문항 단위에는 그대로 쓰면 안 된다.
