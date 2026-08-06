@@ -67,7 +67,18 @@ validating an in-house questionnaire or preparing a scale-validation table befor
 - **요인 자동 명명**: 설정에 `structure`를 주면 요인 번호(F1/F2)에 **하위척도 이름**을 붙여
   보고서와 점수 CSV 전체에서 `F1(신체증상)` 처럼 읽히게 합니다(요인 번호는 고유값 크기 순일 뿐
   의미가 없습니다). 대응은 목표 일치계수로 자동 결정합니다
-- **역문항 재점수화**, 결측(listwise) 처리, JSON 출력, **논문 부록용 적재표 CSV 내보내기**(`--csv-out`),
+- **결측 처리 선택**(`--missing listwise|pairwise`): 기본은 완전응답자만 쓰는 listwise지만,
+  임상 설문은 결측이 여러 문항에 흩어져 있어 **한 문항만 빠져도 응답자가 통째로 버려집니다**
+  (12문항 · 문항별 결측 8%가 무작위로 흩어지면 완전응답자는 0.92¹² ≈ 37%, 300명 중 약 110명만
+  남습니다). `--missing pairwise` 는 상관 r_ij를 **i·j를 모두 답한 사람**으로 추정해 유효 표본을
+  되살립니다(같은 조건에서 쌍별 N은 0.92² ≈ 85%, 약 250명).
+  쌍별 상관행렬은 양의 정부호가 아닐 수 있어 필요하면 고유값 보정(smoothing)을 적용하되,
+  보정을 하면 **KMO·Bartlett·ML 적합도는 생략**합니다(이 값들은 |R|·R⁻¹에 의존해 보정 하한값이
+  결과를 지배합니다). Bartlett·평행분석에는 **가장 작은 쌍별 N**을 보수적 유효 N으로 씁니다
+- **단일 파일 HTML 보고서**(`--html-out`): **스크리 도표(SVG)** 와 색으로 크기가 읽히는 적재표,
+  적합성·신뢰도 표를 담은 HTML 하나를 만듭니다. 외부 CSS/JS/이미지를 참조하지 않아 메일 첨부·
+  공유 폴더로 그대로 전달됩니다(matplotlib 등 추가 의존성 없음)
+- **역문항 재점수화**, JSON 출력, **논문 부록용 적재표 CSV 내보내기**(`--csv-out`),
   응답자별 **하위척도 점수 CSV**(`--scores-out`, 합산·평균·**Thurstone 회귀 요인점수**),
   **비례배분 채점**(`--score-missing prorate`) — 하위척도별 결측이 허용치 이하면 응답한 문항
   평균으로 환산해 **결측이 있는 응답자도 점수를 받습니다**(PRO 채점 매뉴얼의 표준 규칙)
@@ -122,6 +133,12 @@ factorscan responses.csv --id-col ID --bootstrap 500
 # 9) 다기관 자료: 사이트별로 요인구조가 재현되는지 Tucker φ로 점검(번들 예시로 바로 실행 가능)
 factorscan examples/multisite_scale.csv --config examples/multisite_config.json \
     --group-col 사이트 --n-factors 2
+
+# 10) 결측이 흩어져 완전응답자가 얼마 안 남을 때: 쌍별 삭제로 표본 되살리기
+factorscan responses.csv --id-col ID --missing pairwise
+
+# 11) 공동연구자에게 보낼 HTML 보고서(스크리 도표 포함) 만들기
+factorscan responses.csv --id-col ID --html-out report.html
 ```
 
 주요 옵션: `--n-factors K`(미지정 시 평행분석 기준 자동, 평행분석 끄면 Kaiser), `--correlation pearson|polychoric`(상관 방식),
@@ -131,6 +148,8 @@ factorscan examples/multisite_scale.csv --config examples/multisite_config.json 
 `--group-col 이름`(집단별 구조 재현성 — Tucker φ),
 `--seed`(재현), `--min-loading 0.40`(주적재/교차적재 임계값, 0~1), `--na 값`(결측 문자열 추가),
 `--sheet 이름`(엑셀 시트 선택), `--delimiter ';'`(구분자 직접 지정), `--encoding cp949`(UTF-8이 아닌 CSV),
+`--missing listwise|pairwise`(상관행렬 추정의 결측 처리),
+`--html-out 경로`(스크리 도표 SVG가 들어간 단일 파일 HTML 보고서),
 `--csv-out 경로`(문항×요인 적재표+요약행을 CSV로 — 논문 부록·엑셀용),
 `--eigen-out 경로`(고유값·평행분석 기준선 CSV — 엑셀에서 스크리 도표),
 `--scores-out 경로 --score-method sum|mean|regression`(응답자별 하위척도 점수를 CSV로 — 후속 타당도 분석용),
@@ -409,6 +428,27 @@ $ factorscan examples/sleep_scale.csv --config examples/sleep_config_가설어�
 
 ## 한계 / Notes
 
+- **쌍별 삭제(`--missing pairwise`)의 범위와 대가**: 쌍별 삭제는 **상관행렬과 거기서 나오는 것**
+  (고유값·평행분석·Velicer MAP·KMO·Bartlett·적재량·공통성·잔차·ML 적합도)에만 적용됩니다.
+  α·문항-총점·제거시 α·부트스트랩·집단 재현성·요인점수는 응답자별 **총점**이 필요해 쌍별로
+  대체할 수 없으므로 **언제나 완전응답자 기준**이며, 보고서가 두 표본 크기를 나란히 표시합니다
+  (논문에는 반드시 둘 다 적으세요). 대가는 셋입니다: ⑴ 셀마다 표본이 달라 결과 행렬이 양의
+  정부호가 아닐 수 있습니다 — 그때는 고유값 보정을 적용해 **적재량 추출은 계속하되 KMO·Bartlett·
+  ML 적합도는 생략**합니다(보정은 최소 고유값을 하한 1e-6으로 올리는데, 그러면 ln|R|이 사실상
+  ln(1e-6)이 되어 Bartlett χ²의 대부분이 자료가 아니라 하한값에서 나옵니다 — 중복 문항 실측에서
+  χ² 6872 중 6841이 하한 몫이었습니다). ⑵ **ML 적합도지수(χ²·RMSEA·CFI·TLI·AIC/BIC)는
+  `--missing pairwise` 에서 아예 계산하지 않습니다**: χ² ≈ (N−1)·F 로 표본 크기에 직접 비례하는데
+  쌍별 삭제에는 단일한 N이 없고, '보수적'이라며 최솟값을 넣으면 오히려 χ²가 줄어 기각될 모형이
+  완벽해 보입니다(실측: 600명·12문항 중 한 문항만 55명이 응답한 자료에서 RMSEA 0.101→0.000,
+  CFI 0.896→1.000). 적합도지수가 필요하면 `--missing listwise` 로 완전응답자 기준 값을 보고하세요.
+  Bartlett·평행분석은 방향이 반대(작은 N일수록 보수적)라 최소 쌍별 N을 그대로 씁니다.
+  ⑶ **MCAR/MAR을 벗어난 결측**에서는 쌍별 추정도 편향됩니다 — 보고서의 '삭제 편향
+  점검'이 신호를 주면 결측 사유를 먼저 확인하세요. 결측이 무작위가 아니라고 판단되면 다중대체(MI)나
+  FIML을 쓰는 전용 도구가 필요하며, factorscan은 그것을 제공하지 않습니다.
+- **HTML 보고서(`--html-out`)** 는 텍스트 보고서와 **같은 값**을 다시 배치할 뿐, 여기서만 계산하는
+  통계는 없습니다. 담는 범위는 적합성·요인 수(스크리 도표)·적재표·신뢰도·적합도 요약이며,
+  결측 구조표·응답 범주표·부트스트랩·집단 재현성 등 세부 절은 텍스트/JSON 출력에만 있습니다.
+  적재표에는 **문항명**이 들어가므로 개인정보는 아니지만 미공개 척도 문항이면 공유에 유의하세요.
 - 추출은 **주성분(PCA, 기본)** · **주축분해(PAF, `--extraction paf`)** · **최대우도(ML, `--extraction ml`)**
   를 제공합니다. PCA는 SPSS 기본과 동일하고, PAF는 SMC 초기·반복 방식, ML은 R의 `factanal`과 같은 계열의
   프로파일 우도 F(Ψ) 최소화(사영 Barzilai-Borwein, scipy 불필요)입니다. **적합도지수(χ²·RMSEA·CFI·TLI)는
@@ -433,7 +473,7 @@ $ factorscan examples/sleep_scale.csv --config examples/sleep_config_가설어�
   다변량 정규성을 가정하므로 폴리코릭 입력과 함께 쓰면 근사이며, 보고서가 그 사실을 알립니다.
 - 회전은 **직교(Varimax)** 와 **사교(Promax)** 를 제공합니다. 기본은 Varimax이며, 요인 상관 추정치가
   크면(|r|≥.32) 보고서가 Promax 검토를 안내합니다. `--rotation promax` 로 사교 패턴적재와 요인 상관행렬 Φ를 얻습니다.
-- 결측은 **listwise** 제거만 지원합니다(대체/pairwise 미지원). 대신 **무엇을 잃었는지 숨기지 않습니다**:
+- 결측 처리는 **listwise 제거(기본)** 와 **쌍별 삭제(`--missing pairwise`)** 두 가지이며, **대체(imputation)·다중대체(MI)·FIML은 지원하지 않습니다**. 어느 쪽이든 **무엇을 잃었는지 숨기지 않습니다**:
   문항별 결측률, 삭제된 표본 규모와 유발 문항, 그리고 완전응답자 vs 삭제된 응답자의 응답 분포 차이를
   **Cohen's d** 로 비교해 결측이 무작위(MCAR)가 아닐 수 있다는 신호를 알립니다. **판정은 d의 크기가
   아니라 d의 신뢰구간이 0을 배제하는지**로 하며, 문항 수만큼 **Bonferroni 보정**합니다 — 고정 임계값
