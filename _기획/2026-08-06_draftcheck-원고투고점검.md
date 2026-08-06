@@ -1,4 +1,4 @@
-STATUS: 대기
+STATUS: 구현완료 (2026-08-06)
 
 # draftcheck-원고투고점검
 
