@@ -7,6 +7,8 @@
 - ``or``  : 오즈비 → 분석은 log(OR) 척도
 - ``rr``  : 위험비 → 분석은 log(RR) 척도
 - ``rd``  : 위험차 (원 단위, -1 ~ 1)
+- ``cor`` : 상관계수 → 분석은 Fisher z 척도, 보고는 r 로 되돌림
+- ``prop``: 단일군 비율(유병률·반응률) → 분석은 logit 척도, 보고는 % 로 되돌림
 - ``generic`` : 이미 계산된 효과크기 + 표준오차(또는 95% CI)
 
 방향 규칙: 모든 2군 지표는 **1군(처치/실험군) 대 2군(대조군)** 이다.
@@ -33,13 +35,30 @@ __all__ = [
     "log_odds_ratio",
     "log_risk_ratio",
     "risk_difference",
+    "fisher_z",
+    "logit_proportion",
     "build_studies",
+    "is_missing",
+    "MEASURE_SCALE",
+    "back_transform",
     "EffectError",
 ]
 
-MEASURES = ("smd", "md", "or", "rr", "rd", "generic")
+MEASURES = ("smd", "md", "or", "rr", "rd", "cor", "prop", "generic")
 #: 로그 척도에서 합성한 뒤 지수변환해서 보고하는 지표
 LOG_MEASURES = ("or", "rr")
+
+#: 지표별 **분석 척도**. 'raw' 는 변환 없음, 나머지는 보고할 때 되돌린다.
+MEASURE_SCALE = {
+    "smd": "raw",
+    "md": "raw",
+    "or": "log",
+    "rr": "log",
+    "rd": "raw",
+    "cor": "fisherz",
+    "prop": "logit",
+    "generic": "raw",
+}
 
 _LABELS = {
     "smd": ("Hedges g", "표준화 평균차"),
@@ -47,8 +66,38 @@ _LABELS = {
     "or": ("OR", "오즈비"),
     "rr": ("RR", "위험비"),
     "rd": ("RD", "위험차"),
+    "cor": ("r", "상관계수"),
+    "prop": ("Proportion", "비율"),
     "generic": ("Effect", "효과크기"),
 }
+
+
+def back_transform(value: float, scale: str) -> float:
+    """분석 척도 값을 보고 척도로 되돌린다.
+
+    극단값에서 오버플로가 나면 예외를 던지는 대신 경계값으로 포화시킨다
+    (리포트에서 실행이 끊기지 않도록).
+    """
+    if scale == "raw":
+        return value
+    if scale == "log":
+        try:
+            return math.exp(value)
+        except OverflowError:
+            return math.inf if value > 0 else 0.0
+    if scale == "fisherz":
+        if value > 20:
+            return 1.0
+        if value < -20:
+            return -1.0
+        return math.tanh(value)
+    if scale == "logit":
+        if value > 700:
+            return 1.0
+        if value < -700:
+            return 0.0
+        return 1.0 / (1.0 + math.exp(-value))
+    raise EffectError("알 수 없는 분석 척도: %r" % (scale,))
 
 
 class EffectError(ValueError):
@@ -181,6 +230,13 @@ def log_risk_ratio(e1: float, n1: float, e2: float, n2: float, cc: float = 0.5):
     if min(a, n1e - a, c, n2e - c) == 0:
         if a == 0 and c == 0:
             raise EffectError("두 군 모두 사건수가 0이라 위험비를 정의할 수 없습니다")
+        if a == n1e and c == n2e:
+            # RR = 1 이 자료가 아니라 산술에서 나온다 — 보정으로 만든 가짜 구간을
+            # 내놓느니 오즈비·위험차와 같은 기준으로 거부한다.
+            raise EffectError(
+                "두 군 모두 전원 발생(100%)이라 위험비에 정보가 없습니다 — "
+                "연속성 보정만으로 만들어진 신뢰구간은 의미가 없습니다"
+            )
         if cc <= 0:
             raise _no_correction_error(cc)
         a, c = a + cc, c + cc
@@ -203,6 +259,49 @@ def risk_difference(e1: float, n1: float, e2: float, n2: float):
     return p1 - p2, vi
 
 
+def fisher_z(r: float, n: float):
+    """상관계수 r 의 Fisher z 변환과 그 분산 1/(n-3).
+
+    r 을 그대로 합성하면 분산이 r 에 의존해 가중치가 왜곡되므로,
+    메타분석 관행대로 z = atanh(r) 척도에서 합성한 뒤 tanh 로 되돌린다.
+    """
+    if not math.isfinite(r):
+        raise EffectError("상관계수가 유한한 값이 아닙니다")
+    if not (-1.0 < r < 1.0):
+        raise EffectError("상관계수는 -1과 1 사이여야 합니다 (±1은 Fisher z가 무한대) (받은 값: %s)" % _fmt(r))
+    if not math.isfinite(n) or n < 4:
+        raise EffectError("상관계수의 표본수 n은 4 이상이어야 합니다 (분산 1/(n-3)) (받은 값: %s)" % _fmt(n))
+    return math.atanh(r), 1.0 / (n - 3.0)
+
+
+def logit_proportion(events: float, n: float, cc: float = 0.5):
+    """단일군 비율의 logit 변환과 그 분산 1/e + 1/(n-e).
+
+    0% 또는 100% 인 연구는 logit 이 무한대라 합성할 수 없으므로,
+    그 연구에 한해 사건수·비사건수에 ``cc`` 를 더한다(관행상 0.5).
+    반환값은 ``(yi, vi, corrected)``.
+    """
+    if not math.isfinite(events) or not math.isfinite(n):
+        raise EffectError("사건수/표본수가 유한한 숫자가 아닙니다")
+    if n <= 0:
+        raise EffectError("표본수는 1 이상이어야 합니다 (받은 값: %s)" % _fmt(n))
+    if events < 0:
+        raise EffectError("사건수는 0 이상이어야 합니다 (받은 값: %s)" % _fmt(events))
+    if events > n:
+        raise EffectError("사건수(%s)가 표본수(%s)보다 큽니다" % (_fmt(events), _fmt(n)))
+    e, non = float(events), float(n) - float(events)
+    corrected = False
+    if e <= 0 or non <= 0:
+        if cc <= 0:
+            raise EffectError(
+                "비율이 0%% 또는 100%% 인데 연속성 보정이 꺼져 있습니다(--cc %g) — logit 이 무한대라 "
+                "이 연구는 계산할 수 없습니다" % cc
+            )
+        e, non = e + cc, non + cc
+        corrected = True
+    return math.log(e / non), 1.0 / e + 1.0 / non, corrected
+
+
 # --------------------------------------------------------------------------
 # 표 → Study 목록
 # --------------------------------------------------------------------------
@@ -214,6 +313,8 @@ REQUIRED_COLUMNS = {
     "or": ("events1", "n1", "events2", "n2"),
     "rr": ("events1", "n1", "events2", "n2"),
     "rd": ("events1", "n1", "events2", "n2"),
+    "cor": ("r", "n"),
+    "prop": ("events", "n"),
     "generic": ("effect",),
 }
 
@@ -229,11 +330,22 @@ def _clip(text: str, limit: int = 60) -> str:
     return text if len(text) <= limit else text[:limit] + "…"
 
 
+#: 엑셀 추출표에서 "값 없음"을 뜻하는 관용 표기. 빈 칸과 똑같이 다룬다 —
+#: 이걸 빈 칸과 다르게 다루면 se 가 'NA' 인 연구가 신뢰구간을 갖고 있는데도
+#: 통째로 버려지고, 그 사실이 "열이 비어 있습니다"라는 엉뚱한 경고로 가려진다.
+_MISSING = {"na", "nan", "n/a", "n.a.", "null", "none", "nd", "n/d", ".", "-", "--", "—", "?"}
+
+
+def is_missing(raw) -> bool:
+    """값이 비었거나 결측 표기인가."""
+    return (raw or "").strip().lower() in _MISSING or not (raw or "").strip()
+
+
 def _num(rec: Dict[str, str], key: str) -> float:
     raw = rec.get(key, "")
     text = (raw or "").strip()
-    if text == "" or text.lower() in {"na", "nan", "n/a", "null", "none", ".", "-"}:
-        raise EffectError("'%s' 열이 비어 있습니다" % key)
+    if is_missing(raw):
+        raise EffectError("'%s' 열이 비어 있습니다(또는 결측 표기입니다)" % key)
     cleaned = text.replace(",", "") if _THOUSANDS.match(text) else text
     try:
         value = float(cleaned)
@@ -254,7 +366,7 @@ def _se_from_record(rec: Dict[str, str], input_conf: float, log_input: bool = Fa
     출력 신뢰수준(--conf)과는 별개다. 둘을 섞으면 모든 가중치가 조용히 틀어진다.
     ``log_input`` 이면 구간의 양 끝에 로그를 취한 뒤 폭을 계산한다.
     """
-    has_ci = (rec.get("ci_low") or "").strip() and (rec.get("ci_high") or "").strip()
+    has_ci = not is_missing(rec.get("ci_low")) and not is_missing(rec.get("ci_high"))
     if log_input:
         if not has_ci:
             raise EffectError(
@@ -269,7 +381,7 @@ def _se_from_record(rec: Dict[str, str], input_conf: float, log_input: bool = Fa
             raise EffectError("신뢰구간 상한(%g)이 하한(%g)보다 커야 합니다" % (high, low))
         z = normal_ppf(0.5 + input_conf / 2.0)
         return (math.log(high) - math.log(low)) / (2.0 * z)
-    if (rec.get("se") or "").strip():
+    if not is_missing(rec.get("se")):
         se = _num(rec, "se")
         if se <= 0:
             raise EffectError("표준오차(se)는 0보다 커야 합니다 (받은 값: %g)" % se)
@@ -334,7 +446,9 @@ def build_studies(
         else:
             seen_labels[label] = 1
 
-        subgroup = _clip(_strip_control(rec.get("subgroup") or ""), 40) or None
+        raw_sub = rec.get("subgroup")
+        # 'NA'·'-' 같은 결측 표기가 진짜 하위군 수준이 되어 Q_between 을 오염시키지 않게 한다.
+        subgroup = None if is_missing(raw_sub) else (_clip(_strip_control(raw_sub or ""), 40) or None)
         try:
             yi, vi, n_total, extra = _one_effect(
                 rec, measure, input_conf, cc, log_input, warnings, row
@@ -347,6 +461,14 @@ def build_studies(
             continue
         if vi <= 0 or not math.isfinite(vi) or not math.isfinite(yi):
             warnings.append("행 %d ('%s') 제외: 효과크기 또는 분산이 유효하지 않습니다." % (row, label))
+            continue
+        # 분산이 준정규수(subnormal)면 역분산 가중치 1/vi 가 무한대로 넘쳐
+        # 합성 전체가 ZeroDivisionError 로 죽는다. 그 행만 버리고 이유를 남긴다.
+        if not math.isfinite(1.0 / vi):
+            warnings.append(
+                "행 %d ('%s') 제외: 표준오차가 너무 작아(분산 %g) 가중치가 계산 범위를 "
+                "벗어납니다 — 자릿수를 확인하세요." % (row, label, vi)
+            )
             continue
         studies.append(
             Study(label=label, yi=yi, vi=vi, subgroup=subgroup, n_total=n_total, row=row, extra=extra)
@@ -363,8 +485,33 @@ def _one_effect(rec, measure, input_conf, cc, log_input, warnings, row):
             if yi <= 0:
                 raise EffectError("--log-input 사용 시 effect는 0보다 커야 합니다 (받은 값: %g)" % yi)
             yi = math.log(yi)
-        n_total = _num(rec, "n") if (rec.get("n") or "").strip() else None
+        # n 은 총 표본수 표시에만 쓰는 선택 열이다 — 여기 값이 이상하다고
+        # 멀쩡한 effect/se 를 버리면 안 된다.
+        n_total = None
+        if not is_missing(rec.get("n")):
+            try:
+                n_total = _num(rec, "n")
+            except EffectError as exc:
+                warnings.append("행 %d: 표본수(n) 열을 읽지 못해 총 N 계산에서 뺐습니다 (%s)." % (row, exc))
         return yi, se * se, n_total, extra
+
+    if measure == "cor":
+        r, n = _num(rec, "r"), _num(rec, "n")
+        yi, vi = fisher_z(r, n)
+        extra["r"] = r
+        return yi, vi, n, extra
+
+    if measure == "prop":
+        e, n = _num(rec, "events"), _num(rec, "n")
+        if e != int(e) or n != int(n):
+            warnings.append("행 %d: 사건수/표본수가 정수가 아닙니다 — 입력을 확인하세요." % row)
+        yi, vi, corrected = logit_proportion(e, n, cc=cc)
+        extra.update({"events": e, "n": n})
+        if corrected:
+            warnings.append(
+                "행 %d: 비율이 0%% 또는 100%% 라 연속성 보정(+%g)을 적용했습니다 — 해석에 주의하세요." % (row, cc)
+            )
+        return yi, vi, n, extra
 
     if measure in ("smd", "md"):
         n1, m1, sd1 = _num(rec, "n1"), _num(rec, "mean1"), _num(rec, "sd1")

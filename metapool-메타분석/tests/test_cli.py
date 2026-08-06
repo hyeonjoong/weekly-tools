@@ -252,7 +252,7 @@ def test_two_studies_skip_egger_and_loo(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "── 출판편향" not in out           # 섹션 자체가 없어야 한다
     assert "── 민감도" not in out
-    assert "Egger 비대칭 검정을 생략" in out   # 대신 왜 생략했는지 경고로 알려준다
+    assert "비대칭 검정을 생략" in out         # 대신 왜 생략했는지 경고로 알려준다
 
 
 def test_partially_bad_rows_are_dropped_with_warning(tmp_path, capsys):
@@ -287,3 +287,100 @@ def test_help_lists_input_formats(capsys):
         main(["--help"])
     out = capsys.readouterr().out
     assert "events1" in out and "--map" in out
+
+
+# --------------------------------------------------------------------------
+# 1.1 에서 추가된 옵션들
+# --------------------------------------------------------------------------
+
+
+def test_csv_output_flag_writes_a_parsable_table(tmp_path, capsys):
+    path = write(tmp_path, "e.csv", "study,effect,se\nA,0.5,0.1\nB,0.3,0.2\nC,0.7,0.15\n")
+    assert main([path, "--csv"]) == 0
+    out = capsys.readouterr().out
+    assert out.splitlines()[0].startswith("row_type,label,")
+    assert out.count("\nstudy,") == 3
+
+
+def test_csv_format_is_chosen_from_the_out_extension(tmp_path, capsys):
+    path = write(tmp_path, "e.csv", "study,effect,se\nA,0.5,0.1\nB,0.3,0.2\nC,0.7,0.15\n")
+    target = str(tmp_path / "결과.csv")
+    assert main([path, "-o", target]) == 0
+    body = open(target, encoding="utf-8").read()
+    assert body.startswith("row_type,")
+    # 표 확장자 경고는 실제로 표를 쓰는 경우에는 뜨지 않아야 한다
+    assert "표가 아닙니다" not in capsys.readouterr().err
+
+
+def test_csv_extension_warns_when_content_is_markdown(tmp_path, capsys):
+    path = write(tmp_path, "e.csv", "study,effect,se\nA,0.5,0.1\nB,0.3,0.2\nC,0.7,0.15\n")
+    assert main([path, "--md", "-o", str(tmp_path / "x.csv")]) == 0
+    assert "표가 아닙니다" in capsys.readouterr().err
+
+
+def test_output_formats_are_mutually_exclusive(tmp_path):
+    path = write(tmp_path, "e.csv", "study,effect,se\nA,0.5,0.1\nB,0.3,0.2\n")
+    with pytest.raises(SystemExit):
+        main([path, "--json", "--csv"])
+    with pytest.raises(SystemExit):
+        main([path, "--md", "--csv"])
+
+
+@pytest.mark.parametrize("method", ["REML", "SJ", "reml"])
+def test_new_tau2_methods_are_accepted(tmp_path, capsys, method):
+    path = write(tmp_path, "e.csv", "study,effect,se\nA,0.5,0.1\nB,0.9,0.2\nC,0.1,0.15\n")
+    assert main([path, "--tau2", method]) == 0
+    assert "tau² 추정: %s" % method.upper() in capsys.readouterr().out
+
+
+def test_baseline_risk_must_be_a_probability(tmp_path):
+    path = write(tmp_path, "b.csv", "study,events1,n1,events2,n2\nA,42,80,30,80\nB,55,120,38,118\n")
+    for bad in ("0", "1", "1.5", "-0.2"):
+        with pytest.raises(SystemExit):
+            main([path, "--baseline-risk", bad])
+
+
+def test_baseline_risk_changes_the_reported_nnt(tmp_path, capsys):
+    path = write(
+        tmp_path, "b.csv",
+        "study,events1,n1,events2,n2\nA,42,80,30,80\nB,55,120,38,118\nC,18,45,12,44\n",
+    )
+    assert main([path, "--baseline-risk", "0.05", "--no-funnel"]) == 0
+    out = capsys.readouterr().out
+    assert "가정 대조군 위험 5.0% (사용자 지정)" in out
+
+
+def test_no_funnel_and_no_trimfill_suppress_their_sections(tmp_path, capsys):
+    path = write(
+        tmp_path, "e.csv",
+        "study,effect,se\nA,0.5,0.10\nB,0.3,0.20\nC,0.7,0.05\nD,0.1,0.30\n",
+    )
+    assert main([path, "--no-funnel", "--no-trimfill"]) == 0
+    out = capsys.readouterr().out
+    assert "깔때기그림 (o 연구" not in out
+    assert "trim-and-fill" not in out
+    assert "Egger 회귀 절편" in out  # 나머지 편향 진단은 그대로 남는다
+
+
+def test_json_output_carries_the_new_blocks(tmp_path, capsys):
+    path = write(
+        tmp_path, "b.csv",
+        "study,events1,n1,events2,n2\nA,42,80,30,80\nB,55,120,38,118\nC,18,45,12,44\nD,20,60,25,60\n",
+    )
+    assert main([path, "--json"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["heterogeneity"]["ci_method"] == "Q-profile"
+    assert data["heterogeneity"]["I2_ci_low"] is not None
+    assert data["begg_test"]["k"] == 4
+    assert "k0" in data["trim_and_fill"]
+    assert data["absolute_effect"]["baseline_source"] == "data"
+    assert data["leave_one_out"][0]["std_residual"] is not None
+
+
+def test_correlation_and_proportion_files_run_end_to_end(tmp_path, capsys):
+    cor = write(tmp_path, "cor.csv", "study,r,n\nA,0.42,88\nB,0.31,120\nC,0.55,64\n")
+    assert main([cor]) == 0
+    assert "r(상관계수)" in capsys.readouterr().out
+    prop = write(tmp_path, "prop.csv", "study,events,n\nA,12,80\nB,25,140\nC,3,40\n")
+    assert main([prop]) == 0
+    assert "Proportion(비율)" in capsys.readouterr().out

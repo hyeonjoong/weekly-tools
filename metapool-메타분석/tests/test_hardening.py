@@ -83,7 +83,8 @@ def test_hk_narrower_than_model_ci_is_flagged(capsys):
     """이질성이 없을 때 HK 구간이 고정효과 구간보다 좁아지는 현상을 알려야 한다."""
     assert main([os.path.join(EXAMPLES, "adherence_or.csv")]) == 0
     out = capsys.readouterr().out
-    assert "Hartung–Knapp 신뢰구간이 모형기반 구간보다 좁아졌습니다" in out
+    assert "Hartung–Knapp 표준오차가 모형기반 표준오차보다 작아졌습니다" in out
+    assert "실제 신뢰구간은 z 구간보다 좁습니다" in out  # 경고가 실제 출력과 어긋나면 안 된다
 
 
 # --------------------------------------------------------------------------

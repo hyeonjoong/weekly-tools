@@ -147,7 +147,7 @@ def test_paule_mandel_is_zero_when_no_heterogeneity():
 
 def test_unknown_tau2_method_raises():
     with pytest.raises(MetaError):
-        random_effects(HETEROGENEOUS, tau2_method="SJ")
+        random_effects(HETEROGENEOUS, tau2_method="HE")
 
 
 def test_prediction_interval_hand_computed():

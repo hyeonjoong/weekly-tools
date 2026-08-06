@@ -17,6 +17,7 @@ __all__ = [
     "t_sf",
     "t_ppf",
     "chi2_sf",
+    "chi2_ppf",
 ]
 
 _SQRT2 = math.sqrt(2.0)
@@ -206,3 +207,34 @@ def chi2_sf(x: float, df: float) -> float:
     if y < a + 1.0:
         return 1.0 - _gamma_p_series(a, y)
     return _gamma_q_cf(a, y)
+
+
+def chi2_ppf(p: float, df: float) -> float:
+    """카이제곱 분위수 (P(X <= x) = p 인 x). tau² 의 Q-profile 신뢰구간에 쓴다.
+
+    상측확률 ``chi2_sf`` 가 단조감소라는 사실만 이용한 이분법이라 느리지만
+    (수십 회 평가) 메타분석 규모에서는 문제가 되지 않으며, 급수/연분수의
+    정확도를 그대로 물려받는다.
+    """
+    if not (0.0 < p < 1.0):
+        raise ValueError("chi2_ppf: p는 0과 1 사이여야 합니다 (받은 값: %r)" % (p,))
+    if df <= 0:
+        raise ValueError("chi2_ppf: 자유도는 양수여야 합니다 (받은 값: %r)" % (df,))
+    target = 1.0 - p  # 상측확률
+    lo = 0.0
+    hi = max(df, 1.0)
+    for _ in range(200):  # 해를 포함할 때까지 상한 확장
+        if chi2_sf(hi, df) <= target:
+            break
+        hi *= 2.0
+        if not math.isfinite(hi):  # pragma: no cover - 도달 불가
+            return math.inf
+    for _ in range(300):
+        mid = 0.5 * (lo + hi)
+        if chi2_sf(mid, df) > target:
+            lo = mid
+        else:
+            hi = mid
+        if hi - lo < 1e-12 * max(1.0, hi):
+            break
+    return 0.5 * (lo + hi)
