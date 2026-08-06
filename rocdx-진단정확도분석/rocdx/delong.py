@@ -16,6 +16,7 @@ from .stats_core import (
     cov_ddof1,
     midranks,
     norm_ppf,
+    norm_sf,
     two_sided_p,
     var_ddof1,
 )
@@ -24,6 +25,7 @@ __all__ = [
     "Placements",
     "AucEstimate",
     "AucComparison",
+    "NonInferiority",
     "placements",
     "delong_variance",
     "auc_ci",
@@ -31,6 +33,7 @@ __all__ = [
     "mann_whitney_p",
     "compare_paired",
     "compare_unpaired",
+    "noninferiority",
 ]
 
 
@@ -68,6 +71,47 @@ class AucComparison:
     p_value: Optional[float]   # None when the variance is not estimable
     paired: bool
     n_used: int
+
+
+@dataclass(frozen=True)
+class NonInferiority:
+    """One-sided non-inferiority verdict for an AUC difference."""
+
+    margin: float          # largest AUC loss still acceptable, e.g. 0.05
+    diff: float            # AUC_a - AUC_b
+    se_diff: float
+    z: Optional[float]
+    p_value: Optional[float]   # one-sided, H0: diff <= -margin
+    alpha_one_sided: float
+    lower_limit: Optional[float]   # lower limit of the two-sided CI actually printed
+    noninferior: Optional[bool]    # None when the variance is not estimable
+    superior: Optional[bool]       # also better than the comparator (lower limit > 0)
+
+
+def noninferiority(cmp_: "AucComparison", margin: float,
+                   alpha: float = 0.05) -> NonInferiority:
+    """Is marker A non-inferior to marker B, within ``margin`` AUC points?
+
+    The verdict is the regulatory one: A is declared non-inferior when the lower
+    limit of the two-sided ``1 - alpha`` interval for ``AUC_a - AUC_b`` lies above
+    ``-margin``. That is exactly the one-sided test at ``alpha / 2``, and the
+    p-value is reported at that level so the two never disagree. A margin has to
+    come from clinical argument, not from the data — the tool cannot check it.
+    """
+    if not margin > 0.0:
+        raise ValueError("non-inferiority margin must be positive")
+    se = cmp_.se_diff
+    if not (math.isfinite(se) and se > 0.0):
+        return NonInferiority(margin=margin, diff=cmp_.diff, se_diff=se, z=None,
+                              p_value=None, alpha_one_sided=alpha / 2.0,
+                              lower_limit=(cmp_.ci[0] if cmp_.ci else None),
+                              noninferior=None, superior=None)
+    z = (cmp_.diff + margin) / se
+    p = norm_sf(z)
+    lower = cmp_.diff - norm_ppf(1.0 - alpha / 2.0) * se
+    return NonInferiority(margin=margin, diff=cmp_.diff, se_diff=se, z=z, p_value=p,
+                          alpha_one_sided=alpha / 2.0, lower_limit=lower,
+                          noninferior=lower > -margin, superior=lower > 0.0)
 
 
 def placements(pos_scores: Sequence[float], neg_scores: Sequence[float]) -> Placements:

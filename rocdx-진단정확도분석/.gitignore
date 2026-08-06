@@ -26,8 +26,10 @@ venv/
 *.sqlite*
 *.zip
 *.pdf
+*.svg
 *.docx
 ~$*
 
 !examples/sepsis_biomarker.csv
 !examples/cognitive_screen_kr.csv
+!examples/lesion_multi_reader.csv
