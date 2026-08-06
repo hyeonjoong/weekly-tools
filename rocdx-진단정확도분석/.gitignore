@@ -1,0 +1,33 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.venv/
+venv/
+.DS_Store
+.coverage
+
+# Never commit real patient/subject data. Any data-shaped file is ignored by
+# default — including the formats this tool reads and the ones researchers keep
+# alongside them — and only the two synthetic example files are allowed back in
+# by name (a blanket "!examples/*.csv" would let a real export dropped into
+# examples/ sail straight into the repository).
+*.[Cc][Ss][Vv]*
+*.[Tt][Ss][Vv]*
+*.[Xx][Ll][Ss]*
+*.txt
+*.sav
+*.dta
+*.parquet
+*.json
+*.sqlite*
+*.zip
+*.pdf
+*.docx
+~$*
+
+!examples/sepsis_biomarker.csv
+!examples/cognitive_screen_kr.csv

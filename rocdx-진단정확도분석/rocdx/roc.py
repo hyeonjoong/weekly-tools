@@ -80,6 +80,7 @@ class Metrics:
     dor_ci: Optional[Tuple[float, float]]
     prevalence: float
     prevalence_source: str  # "sample" or "user"
+    lr_ci_corrected: bool = False  # LR interval came from a 0.5-corrected table
 
 
 def roc_points(scores: Sequence[float], positive: Sequence[bool]) -> List[Point]:
@@ -233,15 +234,41 @@ def metrics_at(point: Point, alpha: float = 0.05,
 
     balanced = (sens + spec) / 2.0
 
-    # Likelihood ratios: Simel's log-scale intervals.
-    plr = sens / (1.0 - spec) if spec < 1.0 else float("inf")
-    nlr = (1.0 - sens) / spec if spec > 0.0 else float("inf")
+    # Likelihood ratios: Simel's log-scale intervals. A perfect cell (sens or
+    # spec exactly 0 or 1) makes the uncorrected SE undefined, which is exactly
+    # when a naive reader would take "LR- = 0.00" at face value; Simel (1991)
+    # prescribes the same 0.5 correction used for the odds ratio, so the
+    # interval is computed from the corrected table and flagged as such.
+    # 0/0 at the two trivial corners is undefined, not infinite: with nobody
+    # called positive LR+ is 0/0, and with everybody called positive LR- is 0/0.
+    # Printing "inf" there would read as overwhelming evidence.
+    if spec < 1.0:
+        plr = sens / (1.0 - spec)
+    else:
+        plr = float("inf") if sens > 0.0 else float("nan")
+    if spec > 0.0:
+        nlr = (1.0 - sens) / spec
+    else:
+        nlr = float("inf") if sens < 1.0 else float("nan")
     plr_ci = nlr_ci = None
-    if n_pos and n_neg and 0 < sens < 1 and 0 < spec < 1:
-        se_plr = math.sqrt((1 - sens) / (sens * n_pos) + spec / ((1 - spec) * n_neg))
-        se_nlr = math.sqrt(sens / ((1 - sens) * n_pos) + (1 - spec) / (spec * n_neg))
-        plr_ci = _log_ratio_ci(plr, se_plr, alpha)
-        nlr_ci = _log_ratio_ci(nlr, se_nlr, alpha)
+    lr_ci_corrected = False
+    if n_pos and n_neg:
+        if 0 < sens < 1 and 0 < spec < 1:
+            se_plr = math.sqrt((1 - sens) / (sens * n_pos) + spec / ((1 - spec) * n_neg))
+            se_nlr = math.sqrt(sens / ((1 - sens) * n_pos) + (1 - spec) / (spec * n_neg))
+            plr_ci = _log_ratio_ci(plr, se_plr, alpha)
+            nlr_ci = _log_ratio_ci(nlr, se_nlr, alpha)
+        else:
+            ca, cb, cc, cd = tp + 0.5, fp + 0.5, fn + 0.5, tn + 0.5
+            np_c, nn_c = ca + cc, cb + cd
+            sens_c, spec_c = ca / np_c, cd / nn_c
+            plr_c = sens_c / (1.0 - spec_c)
+            nlr_c = (1.0 - sens_c) / spec_c
+            se_plr = math.sqrt((1 - sens_c) / (sens_c * np_c) + spec_c / ((1 - spec_c) * nn_c))
+            se_nlr = math.sqrt(sens_c / ((1 - sens_c) * np_c) + (1 - spec_c) / (spec_c * nn_c))
+            plr_ci = _log_ratio_ci(plr_c, se_plr, alpha)
+            nlr_ci = _log_ratio_ci(nlr_c, se_nlr, alpha)
+            lr_ci_corrected = True
 
     # Diagnostic odds ratio with Haldane correction for empty cells.
     a, b, c, d = tp, fp, fn, tn
@@ -260,4 +287,5 @@ def metrics_at(point: Point, alpha: float = 0.05,
         accuracy=accuracy, accuracy_ci=accuracy_ci, balanced_accuracy=balanced,
         plr=plr, plr_ci=plr_ci, nlr=nlr, nlr_ci=nlr_ci, dor=dor, dor_ci=dor_ci,
         prevalence=prev, prevalence_source=prev_src,
+        lr_ci_corrected=lr_ci_corrected,
     )
