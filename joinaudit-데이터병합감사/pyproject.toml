@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "joinaudit"
+version = "0.1.0"
+description = "출처가 다른 여러 CSV/TSV/XLSX(워치 HRV·호흡·EEG 요약·수면일기·설문·UT 로그)를 피험자 × 시점 기준으로 한 장의 분석용 표로 병합하고, 그 과정을 감사합니다. 피험자 ID 표기 정규화(결정론적 규칙만, 유사도 추측 없음), 자정 넘김 야간 귀속, 중복 키 탐지(카테시안 조인 원천 차단), 파일 간 키 겹침 검사, N-흐름(입력→최종, 드롭 사유별 행 목록), 피험자×파일 커버리지 매트릭스, 그리고 논문 Methods 초안까지 냅니다. 확신이 없으면 추측해서 붙이는 대신 종료코드 3으로 멈춥니다. 완전 오프라인·읽기 전용(원본을 수정하지 않음), 표준 라이브러리만 사용"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "hyeonjoong", email = "hyeonjoongk@gmail.com" }]
+keywords = ["data-merge", "join", "record-linkage", "clinical-data",
+            "data-audit", "provenance", "consort", "subject-id", "sleep",
+            "actigraphy", "hrv", "sleep-diary", "questionnaire", "redcap",
+            "csv", "xlsx", "reproducible-research", "offline"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Healthcare Industry",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+    "Topic :: Scientific/Engineering :: Medical Science Apps.",
+    "Environment :: Console",
+    "Natural Language :: Korean",
+]
+
+# 외부 의존성 없음 — .xlsx 는 표준 라이브러리 zipfile + xml.etree 로 직접 읽습니다.
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.scripts]
+joinaudit = "joinaudit.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["joinaudit*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
