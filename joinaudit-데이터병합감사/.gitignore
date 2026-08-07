@@ -1,0 +1,44 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.venv/
+venv/
+.DS_Store
+.coverage
+
+# 진짜 환자 데이터가 실수로 커밋되는 일을 막습니다.
+# 이 툴이 읽는 포맷을 통째로 무시하고, 번들 합성 예제만 '이름으로' 다시
+# 허용합니다. (`!examples/**` 같은 포괄 허용은 examples/ 에 떨어뜨린 진짜
+# 데이터를 그대로 통과시키므로 쓰지 않습니다.)
+*.[Cc][Ss][Vv]*
+*.[Tt][Ss][Vv]*
+*.[Xx][Ll][Ss]*
+*.[Dd][Oo][Cc]*
+*.[Pp][Dd][Ff]
+*.json
+*.txt
+~$*
+
+# 병합 산출물(--out-dir)
+결과/
+결과_*/
+joinaudit_out*/
+merged.csv
+병합감사.md
+문제목록.csv
+키매칭표.csv
+
+# 번들 예제(전부 난수 합성 — 실제 환자 자료 아님)
+!examples/clean/watch_hrv.csv
+!examples/clean/isi.csv
+!examples/clean/diary.xlsx
+!examples/flawed/watch_hrv.csv
+!examples/flawed/isi.csv
+!examples/flawed/diary.xlsx
+!examples/flawed/respiration_tz.csv
+!examples/flawed/alias.csv
+!examples/flawed/spec.json
