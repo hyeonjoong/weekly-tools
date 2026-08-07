@@ -12,6 +12,7 @@
 <!-- 여기에 자유롭게 추가하세요 -->
 
 ## 완료 (자동 실행이 채워 넣음)
+- [x] 2026-08-07 여러 출처 CSV/XLSX(워치 HRV·수면일기·ISI 등)를 피험자×시점으로 병합 + 병합 감사 — ID 표기 정규화(퍼지 매칭 없음)·자정 넘김 야간 귀속·중복 키에서 카테시안 조인 차단·파일 간 키 겹침 검사·N흐름(입력→최종, 사유별)·커버리지 매트릭스·Methods 초안 (stdlib 전용) → `joinaudit-데이터병합감사`
 - [x] 2026-07-13 측정 방법 일치도 분석기 — Bland–Altman·ICC(2,1)/(3,1)·Lin CCC·반복측정 CV (비접촉 호흡/HRV vs PSG 검증, stdlib 전용) → `agreestat-측정일치도`
 - [x] 2026-07-13 단일채널 EEG 대역파워 분석기 — delta~gamma 절대/상대 파워+SWA+SEF, 자체 Welch PSD (BELL-001 서파수면 지표, stdlib 전용) → `eegband-뇌파대역분석`
 - [x] 2026-07-13 심박변이도(HRV) 분석기 — RR/IBI→시간·주파수(자체 FFT/Welch)·비선형(Poincaré/SampEn)+이소성 보정 (BELL-001 RSA/HRV 기전 정량화, stdlib 전용) → `hrvkit-심박변이도분석`
