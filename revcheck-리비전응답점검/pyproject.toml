@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "revcheck"
+version = "0.1.0"
+description = "제출본·개정본·응답서 세 파일을 동시에 읽어, 응답서에 적은 약속이 개정 원고에 실제로 반영됐는지 기계적으로 대조하는 오프라인 CLI — 리뷰어 코멘트 번호 전수 점검(2-4 다음이 2-6이면 치명), 응답서가 인용한 '개정 후 문구'가 개정본에 문자 그대로 있는지 대조(숫자가 다르면 치명, 표현만 다르면 경고), 응답서에 언급되지 않은 채 숫자가 바뀐 문단 탐지, 위치 참조 검증(.docx 는 확인불가로 정직하게 강등), 참고문헌·그림·표 증감 대조. 커버리지 자백을 반드시 출력하고, 번호 체계를 못 잡으면 추측하지 않고 종료코드 3으로 멈춘다. 외부 의존성 0, 네트워크 0, 원본 읽기 전용"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "hyeonjoong", email = "hyeonjoongk@gmail.com" }]
+keywords = ["revision", "peer-review", "response-to-reviewers", "manuscript",
+            "point-by-point", "diff", "docx", "latex", "offline",
+            "reproducibility", "clinical-trial", "korean"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Text Processing :: Markup",
+    "Environment :: Console",
+    "Natural Language :: Korean",
+]
+
+# 외부 의존성 없음 — .docx 는 표준 라이브러리 zipfile + xml.etree 로 직접 읽고,
+# 문단 정렬과 인용 대조는 difflib 만 쓴다. 네트워크 호출은 0건이며,
+# tests/test_safety.py 가 소스에 socket/urllib/http import 가 없음을 정적으로 검증한다.
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.scripts]
+revcheck = "revcheck.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["revcheck*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
