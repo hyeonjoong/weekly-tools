@@ -29,12 +29,26 @@ from typing import Any, List, Optional, Sequence
 from . import __version__
 from .analyze import HRVResult, analyze_rr, flat_metrics
 from .dataio import load_group_manifest, load_manifest, load_series
+from .power import power_grid
 from .report import (group_compare, group_compare_to_csv, metrics_to_csv,
-                     paired_group, paired_group_to_csv, render_batch_table,
+                     paired_group, paired_group_to_csv, power_plan_groups,
+                     power_plan_paired, power_plan_to_csv, render_batch_table,
                      render_comparison, render_group_compare,
-                     render_paired_group, render_text, render_windows,
-                     windows_to_csv)
+                     render_paired_group, render_plan, render_power_plan,
+                     render_text, render_windows, windows_to_csv)
 from .window import DEFAULT_WINDOW_SEC, MIN_WINDOW_BEATS, analyze_windows
+
+
+# --plan-n 상한. 이보다 크면 df 가 1e7 을 넘어 로그밀도 항이 배정밀도 유효
+# 자릿수를 다 먹어 결과에 유의미한 자릿수가 남지 않습니다(1e19 에서는 exp 가
+# OverflowError 로 죽었습니다).
+_MAX_PLAN_N = 10_000_000
+
+# --power 를 CSV 로 낼 때 두 표(통계 / 표본수 설계)는 열 구성이 달라 하나의
+# CSV 로 합칠 수 없습니다. 주 통계표를 **먼저** 내보내(=`head -1` 이 주 헤더)
+# 아래 구분선으로 나눕니다. 구분선은 '#' 로 시작해 이 저장소의 CSV 리더와
+# 대부분의 도구가 주석으로 건너뜁니다.
+_CSV_PLAN_DELIM = "\n# ---- sample-size planning (표본수 설계) ----"
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -119,6 +133,33 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--alpha", type=float, default=0.05,
                    help="유의수준 — Hodges–Lehmann 신뢰구간은 1-alpha 수준으로, "
                         "유의성 판정도 이 값 기준 (기본 0.05 → 95%% CI)")
+    p.add_argument("--power", action="store_true",
+                   help="--paired/--groups 결과에 **다음(본)시험 표본수 설계** "
+                        "블록을 덧붙입니다. 파일럿의 효과크기와 그 신뢰구간의 "
+                        "0 쪽 경계(보수적) 두 가지로 필요 N 을 냅니다. "
+                        "사후 검정력(observed power)은 p값의 단조함수라 "
+                        "정보가 없으므로 계산하지 않습니다")
+    p.add_argument("--target-power", type=float, default=0.80, metavar="P",
+                   help="표본수 설계의 목표 검정력 (기본 0.80). --power 와 "
+                        "--plan 에서 쓰입니다")
+    p.add_argument("--dropout", type=float, default=0.0, metavar="FRAC",
+                   help="예상 탈락률(0 이상 1 미만, 기본 0). 완료 인원 N 을 "
+                        "⌈N/(1−FRAC)⌉ 로 올려 **모집 인원**을 함께 보고합니다")
+    p.add_argument("--plan", action="store_true",
+                   help="파일럿 파일 없이 **가정값만으로** 표본수를 설계합니다. "
+                        "--delta 와 --sd 를 주면 목표 검정력별 필요 N 표를, "
+                        "--plan-n 과 --sd 를 주면 그 N 에서 탐지 가능한 최소 "
+                        "차이(MDD) 표를 냅니다 (둘 다 주면 검정력도 계산)")
+    p.add_argument("--delta", type=float, default=None, metavar="D",
+                   help="--plan: 탐지하려는 차이(원 단위, 예: RMSSD 8 ms)")
+    p.add_argument("--sd", type=float, default=None, metavar="S",
+                   help="--plan: 가정 표준편차. paired 설계면 **개인 내 "
+                        "차이(post−pre)의 SD**, parallel 이면 군 내 합동 SD")
+    p.add_argument("--plan-n", type=int, default=None, metavar="N",
+                   help="--plan: 확보 가능한 표본수(parallel 이면 군당)")
+    p.add_argument("--design", default="paired", choices=["paired", "parallel"],
+                   help="--plan 의 설계 (기본 paired). --power 에서는 사용된 "
+                        "분석 모드(--paired/--groups)로 자동 결정됩니다")
     p.add_argument("--format", default=None,
                    choices=["text", "json", "csv"],
                    help="출력 형식 (기본 text; --json 은 --format json 과 동일)")
@@ -208,16 +249,113 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
               file=sys.stderr)
         return 2
 
+    # 표본수 설계는 t 분위수 t_{1−α/2} 를 씁니다. α 가 배정밀도 해상도보다
+    # 작으면 1−α/2 가 정확히 1.0 으로 반올림돼 분위수 계산이 실패합니다
+    # (예전에는 --power 경로에서 트레이스백으로 죽었습니다). 정확검정 하한
+    # 탐색도 α 가 극단적으로 작으면 비싸집니다.
+    if (args.power or args.plan) and args.alpha < 1e-9:
+        print(f"입력 오류: --alpha 가 너무 작습니다 (받은 값: {args.alpha:g}). "
+              "표본수 설계에는 1e-9 이상이어야 합니다 — 그보다 작은 유의수준은 "
+              "부동소수점 정밀도 안에서 t 분위수를 계산할 수 없습니다.",
+              file=sys.stderr)
+        return 2
+
+    if not (0.0 < args.target_power < 1.0):
+        print("입력 오류: --target-power 는 0과 1 사이여야 합니다 "
+              f"(받은 값: {args.target_power:g}).", file=sys.stderr)
+        return 2
+
+    if not (0.0 <= args.dropout < 1.0):
+        print("입력 오류: --dropout 은 0 이상 1 미만이어야 합니다 "
+              f"(받은 값: {args.dropout:g}). 1 이면 모집 인원이 무한입니다.",
+              file=sys.stderr)
+        return 2
+
     # 분석 모드는 서로 배타적입니다. 조용히 하나를 무시하면 사용자는 자기가 요청한
     # 분석 대신 다른 분석 결과를 보고 있다는 것을 알아채지 못합니다.
     modes = [name for name, on in (("--paired", bool(args.paired)),
                                    ("--groups", bool(args.groups)),
                                    ("--compare", bool(args.compare)),
+                                   ("--plan", bool(args.plan)),
                                    ("--window", args.window is not None)) if on]
     if len(modes) > 1:
         print(f"입력 오류: {', '.join(modes)} 는 함께 쓸 수 없습니다 "
               f"(한 번에 한 가지 분석 모드).", file=sys.stderr)
         return 2
+
+    # --power 는 코호트 요약이 있어야 의미가 있습니다. 조용히 무시하면 사용자는
+    # 표본수 블록을 기대하고 못 받은 채 결과만 보게 됩니다.
+    if args.power and not (args.paired or args.groups):
+        print("입력 오류: --power 는 --paired 또는 --groups 와 함께 써야 합니다 "
+              "(코호트의 효과크기와 SD 가 있어야 표본수를 낼 수 있습니다). "
+              "파일럿 없이 가정값으로 설계하려면 --plan 을 쓰세요.",
+              file=sys.stderr)
+        return 2
+
+    # --plan 전용 인자를 --plan 없이 주면 조용히 무시하지 않고 알려 줍니다.
+    if not args.plan:
+        stray = [n for n, v in (("--delta", args.delta), ("--sd", args.sd),
+                                ("--plan-n", args.plan_n)) if v is not None]
+        if stray:
+            print(f"입력 오류: {', '.join(stray)} 는 --plan 에서만 쓰입니다 "
+                  "(파일럿 자료로 설계하려면 --paired/--groups 에 --power 를 "
+                  "붙이세요). 설계 조건은 파일럿의 효과크기·SD 에서 나오므로 "
+                  "여기서는 무시될 뿐입니다.", file=sys.stderr)
+            return 2
+
+    # ---- 가정값만으로 표본수 설계 (--plan) ----
+    if args.plan:
+        if paths:
+            print("입력 오류: --plan 은 CSV 파일을 받지 않습니다 (가정값만으로 "
+                  "설계합니다). 파일럿 자료로 설계하려면 --paired/--groups 에 "
+                  "--power 를 붙이세요.", file=sys.stderr)
+            return 2
+        if args.sd is None:
+            print("입력 오류: --plan 에는 --sd 가 필요합니다 "
+                  "(paired 면 개인 내 차이의 SD, parallel 이면 군 내 합동 SD).",
+                  file=sys.stderr)
+            return 2
+        if args.plan_n is not None and not (2 <= args.plan_n <= _MAX_PLAN_N):
+            print(f"입력 오류: --plan-n 은 2 이상 {_MAX_PLAN_N:,} 이하여야 합니다 "
+                  f"(받은 값: {args.plan_n}). 그보다 크면 자유도가 배정밀도 범위를 "
+                  "넘어 계산이 무의미해집니다.", file=sys.stderr)
+            return 2
+        # NaN/inf 는 조용히 전부 '—' 인 표를 만들어 '설계 불가'처럼 보이게 합니다.
+        for name, val in (("--delta", args.delta), ("--sd", args.sd)):
+            if val is not None and not math.isfinite(val):
+                print(f"입력 오류: {name} 는 유한한 수여야 합니다 (받은 값: {val}).",
+                      file=sys.stderr)
+                return 2
+        try:
+            grid = power_grid(delta=args.delta, sd=args.sd, n=args.plan_n,
+                              design=args.design, alpha=args.alpha,
+                              dropout=args.dropout,
+                              target_power=args.target_power)
+        except ValueError as exc:
+            print(f"입력 오류: {exc}", file=sys.stderr)
+            return 2
+        if fmt == "json":
+            _print_json({"mode": "plan", **grid})
+        elif fmt == "csv":
+            import csv as _csv
+            w = _csv.writer(sys.stdout)
+            w.writerow(["design", "alpha", "sd", "delta", "n", "dropout",
+                        "target_power", "n_t", "n_nonparam", "n_exact_floor",
+                        "n_recommended", "n_enrol", "mdd", "mdd_nonparam",
+                        "power_at_n"])
+            for r in grid["rows"]:
+                w.writerow([grid["design"], args.alpha, args.sd,
+                            "" if args.delta is None else args.delta,
+                            "" if args.plan_n is None else args.plan_n,
+                            args.dropout, r["target_power"],
+                            r.get("n_t", ""), r.get("n_nonparam", ""),
+                            r.get("n_exact_floor", ""),
+                            r.get("n_recommended", ""), r.get("n_enrol", ""),
+                            r.get("mdd", ""), r.get("mdd_nonparam", ""),
+                            grid.get("power_at_n", "")])
+        else:
+            print(render_plan(grid))
+        return 0
 
     # ---- 평행군(독립 2군) 비교 (--groups MANIFEST) ----
     if args.groups:
@@ -240,15 +378,28 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 print(f"입력/분석 오류: [{tag}] {exc}", file=sys.stderr)
                 return 2
         a_res, b_res = buckets[a_label], buckets[b_label]
+        plan = None
+        if args.power:
+            plan = power_plan_groups(a_res, b_res,
+                                     target_power=args.target_power,
+                                     alpha=args.alpha, dropout=args.dropout)
         if fmt == "json":
             g = group_compare(a_res, b_res, alpha=args.alpha)
-            _print_json({"mode": "groups", "group_a": a_label,
-                         "group_b": b_label, **g})
+            out = {"mode": "groups", "group_a": a_label,
+                   "group_b": b_label, **g}
+            if plan is not None:
+                out["power_plan"] = plan
+            _print_json(out)
         elif fmt == "csv":
             print(group_compare_to_csv(a_res, b_res, alpha=args.alpha), end="")
+            if plan is not None:
+                print(_CSV_PLAN_DELIM)
+                print(power_plan_to_csv(plan), end="")
         else:
             print(render_group_compare(a_res, b_res, a_label=a_label,
                                        b_label=b_label, alpha=args.alpha))
+            if plan is not None:
+                print(render_power_plan(plan))
         return 0
 
     # ---- 짝지은 코호트 통계 (--paired MANIFEST) ----
@@ -268,13 +419,26 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 print(f"입력/분석 오류: [{tag}] {exc}", file=sys.stderr)
                 return 2
             result_pairs.append((b, v))
+        plan = None
+        if args.power:
+            plan = power_plan_paired(result_pairs,
+                                     target_power=args.target_power,
+                                     alpha=args.alpha, dropout=args.dropout)
         if fmt == "json":
             g = paired_group(result_pairs, alpha=args.alpha)
-            _print_json({"mode": "paired", **g})
+            out = {"mode": "paired", **g}
+            if plan is not None:
+                out["power_plan"] = plan
+            _print_json(out)
         elif fmt == "csv":
             print(paired_group_to_csv(result_pairs, alpha=args.alpha), end="")
+            if plan is not None:
+                print(_CSV_PLAN_DELIM)
+                print(power_plan_to_csv(plan), end="")
         else:
             print(render_paired_group(result_pairs, alpha=args.alpha))
+            if plan is not None:
+                print(render_power_plan(plan))
         return 0
 
     if not paths:

@@ -10,9 +10,11 @@ import csv
 import io
 import math
 import os
+import unicodedata
 from typing import List, Sequence
 
 from .analyze import FLAT_COLUMNS, HRVResult, flat_metrics
+from .power import MAX_N, plan_paired, plan_parallel
 from .stats import (benjamini_hochberg, holm_adjust, paired_summary,
                     unpaired_summary)
 from .window import (TREND_METRICS, WindowSeries, long_term_indices,
@@ -21,7 +23,45 @@ from .window import (TREND_METRICS, WindowSeries, long_term_indices,
 __all__ = ["render_text", "render_comparison", "render_batch_table",
            "metrics_to_csv", "paired_group", "render_paired_group",
            "paired_group_to_csv", "render_windows", "windows_to_csv",
-           "group_compare", "render_group_compare", "group_compare_to_csv"]
+           "group_compare", "render_group_compare", "group_compare_to_csv",
+           "power_plan_paired", "power_plan_groups", "power_plan_to_csv",
+           "render_power_plan", "render_plan"]
+
+
+def _disp_width(s: str) -> int:
+    """터미널 표시 폭 — 한글/전각 문자는 2칸을 차지합니다.
+
+    파이썬의 f-string 정렬(`{x:>12}`)은 **문자 수**로 채우므로 헤더에 한글이
+    섞이면 열이 어긋납니다. 표 헤더에 한국어 라벨을 쓰려면 폭 기준 패딩이
+    필요합니다.
+    """
+    return sum(2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+               for ch in s)
+
+
+def _rj(s: str, width: int) -> str:
+    """표시 폭 기준 오른쪽 정렬."""
+    return " " * max(0, width - _disp_width(s)) + s
+
+
+def _lj(s: str, width: int) -> str:
+    """표시 폭 기준 왼쪽 정렬."""
+    return s + " " * max(0, width - _disp_width(s))
+
+
+def _pct(x: float) -> str:
+    """비율을 % 로 — 0/100 으로 **반올림되어 사실이 바뀌는 것**을 막습니다.
+
+    0.999 을 "100%" 로 찍으면 IRB 제출 문서에 "탈락률 100%" 가 들어갑니다.
+    반올림 결과가 0 또는 100 인데 원값이 그렇지 않으면 자릿수를 늘립니다.
+    """
+    v = 100.0 * x
+    for digits in (0, 1, 2, 3, 4, 6):
+        s_ = f"{v:.{digits}f}"
+        f = float(s_)
+        if (f not in (0.0, 100.0)) or (v in (0.0, 100.0)):
+            return s_
+    return f"{v:.10g}"
 
 
 def _num(x, d: int = 2) -> str:
@@ -1085,5 +1125,318 @@ def render_group_compare(a_results: Sequence[HRVResult],
               f"주 지표를 사전 지정해 보정 없는 p를 보고하거나, 표본을 늘리세요.")
     L("    (주의: 무작위배정이 아니면 군간 차이는 인과가 아닙니다. 짝지은 "
       "pre–post 설계라면 --paired 를 쓰세요 — 그쪽이 검정력이 훨씬 높습니다.)")
+    L("")
+    return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------- #
+# 표본수 설계 리포트 (--power / --plan)
+#
+# 왜 여기 있나: --paired/--groups 는 "이 파일럿에서 효과가 있었나"에 답합니다.
+# 임상/제약 연구자가 바로 다음에 묻는 것은 "그럼 본시험은 몇 명인가"이고,
+# 그 답은 같은 요약통계(평균차·SD·효과크기)에서 바로 나옵니다. 같은 실행에서
+# 같은 표로 내야 두 숫자가 다른 전처리에서 나오는 사고를 막습니다.
+# --------------------------------------------------------------------------- #
+def power_plan_paired(pairs: Sequence, *, target_power: float = 0.80,
+                      alpha: float = 0.05, dropout: float = 0.0) -> dict:
+    """짝지은 파일럿에서 지표별 본시험 표본수 계획을 계산.
+
+    반환: {metric_key: power.plan_paired(...) 결과}. '_meta' 에 설계 조건.
+    """
+    bases = [flat_metrics(b) for b, _ in pairs]
+    intervs = [flat_metrics(v) for _, v in pairs]
+    out: dict = {}
+    for key, _label, _d, _dir, _hf in _PAIRED_METRICS:
+        s = paired_summary([bm.get(key) for bm in bases],
+                           [vm.get(key) for vm in intervs], alpha=alpha)
+        out[key] = plan_paired(s, target_power=target_power, alpha=alpha,
+                               dropout=dropout)
+    out["_meta"] = {"design": "paired", "n_pilot": len(pairs),
+                    "target_power": target_power, "alpha": alpha,
+                    "dropout": dropout}
+    return out
+
+
+def power_plan_groups(a_results: Sequence[HRVResult],
+                      b_results: Sequence[HRVResult], *,
+                      target_power: float = 0.80, alpha: float = 0.05,
+                      dropout: float = 0.0) -> dict:
+    """평행군 파일럿에서 지표별 **군당** 본시험 표본수 계획을 계산."""
+    a_flat = [flat_metrics(r) for r in a_results]
+    b_flat = [flat_metrics(r) for r in b_results]
+    out: dict = {}
+    for key, _label, _d, _dir, _hf in _GROUP_METRICS:
+        s = unpaired_summary([fm.get(key) for fm in a_flat],
+                             [fm.get(key) for fm in b_flat], alpha=alpha)
+        out[key] = plan_parallel(s, target_power=target_power, alpha=alpha,
+                                 dropout=dropout)
+    out["_meta"] = {"design": "parallel", "n_pilot_a": len(a_results),
+                    "n_pilot_b": len(b_results), "target_power": target_power,
+                    "alpha": alpha, "dropout": dropout}
+    return out
+
+
+# 표본수 계획 CSV 열.
+# 열 이름은 JSON 키(n_t / n_nonparam / n_recommended / n_enrol)와 같은 어간을
+# 쓰고 접미사로 관측/보수적 기준만 구분합니다.
+_PLAN_CSV_COLS = ["design", "n_pilot", "mean_diff", "sd_used",
+                  "n_exact_floor",
+                  "d_observed", "n_t_observed", "n_nonparam_observed",
+                  "n_recommended_observed", "n_enrol_observed",
+                  "ci_low", "ci_high",
+                  "d_conservative", "n_t_conservative",
+                  "n_nonparam_conservative", "n_recommended_conservative",
+                  "n_enrol_conservative", "target_power", "alpha", "dropout",
+                  "note"]
+
+
+def _plan_row(key: str, p: dict) -> List:
+    obs = p.get("observed") or {}
+    con = p.get("conservative") or {}
+    n_pilot = p.get("n_pilot")
+    if n_pilot is None:
+        n_pilot = f"{p.get('n_pilot_a')}/{p.get('n_pilot_b')}"
+    return [key,
+            p.get("design"), n_pilot,
+            _fmt_cell(p.get("mean_diff"), 4), _fmt_cell(p.get("sd_used"), 4),
+            _fmt_cell(obs.get("n_exact_floor"), 0),
+            _fmt_cell(obs.get("d"), 4), _fmt_cell(obs.get("n_t"), 0),
+            _fmt_cell(obs.get("n_nonparam"), 0),
+            _fmt_cell(obs.get("n_recommended"), 0),
+            _fmt_cell(obs.get("n_enrol"), 0),
+            _fmt_cell(p.get("ci_low"), 4), _fmt_cell(p.get("ci_high"), 4),
+            _fmt_cell(con.get("d"), 4), _fmt_cell(con.get("n_t"), 0),
+            _fmt_cell(con.get("n_nonparam"), 0),
+            _fmt_cell(con.get("n_recommended"), 0),
+            _fmt_cell(con.get("n_enrol"), 0),
+            _fmt_cell(p.get("target_power"), 3), _fmt_cell(p.get("alpha"), 3),
+            _fmt_cell(p.get("dropout"), 3), p.get("note") or ""]
+
+
+def power_plan_to_csv(plan: dict) -> str:
+    """표본수 계획을 지표당 한 행인 CSV로 직렬화(헤더 포함)."""
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["metric"] + _PLAN_CSV_COLS)
+    for key, _label, _d, _dir, _hf in _PAIRED_METRICS:
+        p = plan.get(key)
+        if p is None:
+            continue
+        writer.writerow(_plan_row(key, p))
+    return buf.getvalue()
+
+
+def _n_cell(v) -> str:
+    """표본수 셀 — None 은 '—'(효과가 0을 포함하거나 너무 작아 산출 불가)."""
+    return "—" if v is None else str(int(v))
+
+
+def render_power_plan(plan: dict) -> str:
+    """표본수 계획을 사람이 읽는 블록으로 렌더링 (--paired/--groups 에 덧붙임)."""
+    meta = plan["_meta"]
+    design = meta["design"]
+    tp = meta["target_power"]
+    alpha = meta["alpha"]
+    drop = meta["dropout"]
+    per = "군당 " if design == "parallel" else ""
+    lines: List[str] = []
+    L = lines.append
+    L("[C] 표본수 설계 / Sample-size planning — **다음(본)시험용**")
+    if design == "parallel":
+        L(f"  파일럿 n = {meta['n_pilot_a']}/{meta['n_pilot_b']} (대조/개입), "
+          f"목표 검정력 {_pct(tp)}%, α={alpha:g} 양측"
+          + (f", 탈락률 {_pct(drop)}%" if drop else ""))
+    else:
+        L(f"  파일럿 n = {meta['n_pilot']}, 목표 검정력 {_pct(tp)}%, "
+          f"α={alpha:g} 양측" + (f", 탈락률 {_pct(drop)}%" if drop else ""))
+    L("  (헤더의 n 은 파일럿 전체 인원입니다 — 지표에 따라 NaN 인 기록이 빠져 "
+      "실제 검정에 쓰인 n 은 더 작을 수 있습니다.)")
+    head_obs = f"{per}N(관측)" if not drop else f"{per}N(관측)→모집"
+    head_con = f"{per}N(보수적)" if not drop else f"{per}N(보수적)→모집"
+    L("  " + _lj("metric", 16) + _rj("d(관측)", 12) + _rj(head_obs, 20)
+      + _rj("d(CI경계)", 12) + _rj(head_con, 22))
+    L("  " + "-" * 82)
+    any_row = False
+    floored_any = False
+    floor_n = None
+    for key, label, _d, _dir, _hf in _PAIRED_METRICS:
+        p = plan.get(key)
+        if p is None:
+            continue
+        obs = p.get("observed") or {}
+        con = p.get("conservative") or {}
+        if not obs:
+            L("  " + _lj(label, 16) + _rj("(계획 불가)", 12))
+            continue
+        if floor_n is None:
+            floor_n = obs.get("n_exact_floor")
+        any_row = True
+        n_o = _n_cell(obs.get("n_recommended")) + ("\u2021" if obs.get("floored") else "")
+        n_c = _n_cell(con.get("n_recommended")) + ("\u2021" if con.get("floored") else "")
+        if obs.get("floored") or con.get("floored"):
+            floored_any = True
+        if drop:
+            n_o += f"→{_n_cell(obs.get('n_enrol'))}"
+            n_c += f"→{_n_cell(con.get('n_enrol'))}"
+        L("  " + _lj(label, 16) + _rj(_num(obs.get("d"), 3), 12)
+          + _rj(n_o, 20) + _rj(_num(con.get("d"), 3), 12) + _rj(n_c, 22))
+    L("")
+    if not any_row:
+        notes = {p.get("note") for k, p in plan.items()
+                 if k != "_meta" and p.get("note")}
+        L("  어떤 지표도 표본수를 낼 수 없습니다. 원인:")
+        for note in sorted(notes):
+            L(f"    · {note}")
+        L("")
+        return "\n".join(lines)
+    L(f"  N 은 {per}**완료 인원**(양측 t 검정 기준 N 에 정규분포 하 순위검정 "
+      f"효율 보정 ARE=3/π → +4.7% 적용)")
+    if drop:
+        L(f"  이고, '→' 뒤는 탈락률 {_pct(drop)}% 를 반영해 **모집해야 할** "
+          "인원(⌈N/(1−탈락률)⌉)입니다. 탈락자가 아무 정보도 주지 않는다는 "
+          "가정(완료자 분석)이며, ITT 분석에는 그대로 쓰면 안 됩니다.")
+    L("")
+    L("  [두 N 을 어떻게 읽나] — **범위**로 읽으세요, 하나를 고르는 게 아닙니다.")
+    L("   · d(관측): 파일럿에서 본 효과 그대로. 파일럿 효과크기는 표본오차 때문에")
+    L("     **낙관적으로 치우치므로** 이 N 은 사실상 **하한**입니다.")
+    L("   · d(CI 경계): 평균차 양측 CI 의 0 쪽 경계 = **97.5% 단측 신뢰한계**")
+    if True:
+        L("     (Browne 1995 / Kieser & Wassmer 1996 의 신뢰한계 접근). 이 문헌은")
+        L("     97.5% 한계가 **과도하게 크게 나온다**고 보고하며 60–80% 단측 한계를")
+        L("     권합니다 — 즉 이 N 은 **상한**이고, 파일럿 n 이 작으면 수천 명까지")
+        L("     치솟습니다. 그럴 때 그 숫자는 설계값이 아니라 **'이 파일럿만으로는")
+        L("     표본수를 정할 수 없다'** 는 신호입니다. 그 경우 선행 문헌값이나")
+        L("     임상적 최소 의미차(MCID)를 `--plan --delta` 에 넣어 설계하세요.")
+    L("   · '—' 는 N 을 낼 수 없다는 표시이고 원인은 셋 중 하나입니다:")
+    L("     (1) 그 지표의 CI 가 0을 포함 — 효과 방향조차 확정 못 함(보수적 열),")
+    L("     (2) 관측 효과크기가 정확히 0,")
+    L(f"     (3) 효과가 너무 작아 상한 {MAX_N:,}명으로도 목표 검정력에 못 미침.")
+    L("     어느 쪽이든 숫자를 지어내지 않습니다.")
+    L("   · 여기 쓰인 CI 는 **모수적 t 신뢰구간**(평균차 기준)입니다 — 위 [B] 표의")
+    L("     CI 는 분포무관 Hodges–Lehmann 구간이라 같은 자료에서도 값이 다릅니다.")
+    L("   · d(관측)에는 Hedges 소표본 편의 보정 J(자유도)를 적용했습니다 — 표본")
+    L("     효과크기는 모집단 효과를 과대추정하므로, 보정 없이는 N 이 작게 나옵니다.")
+    L("   · 두 N 모두 **평균차의 불확실성만** 반영합니다. 파일럿의 SD 자체도")
+    L("     불확실하고(n=10이면 σ의 95% CI ≈ [0.69ŝ, 1.83ŝ]), N ∝ 1/d² ∝ ŝ² 이라")
+    L("     그것만으로 3배 가까이 흔들립니다.")
+    L("")
+    if floored_any and floor_n:
+        L(f"  ‡ = 정확검정 하한 {per}{floor_n}명으로 올린 값. {per}이보다 적으면 "
+          f"부호순위/Mann–Whitney")
+        L(f"    정확검정이 낼 수 있는 **최소 p 가 이미 α={alpha:g} 를 넘어** 효과가 "
+          "아무리 커도 기각이")
+        L("    불가능합니다(= 실제 검정력 0). t 기준 N 이 더 작게 나와도 그 설계는 "
+          "쓸 수 없습니다.")
+        L("")
+    L("  ※ 사후 검정력(observed power)은 계산하지 않습니다 — p값의 단조함수라")
+    L("     새 정보가 없고, 유의하지 않은 결과의 사후 변명으로 오용됩니다.")
+    L("     (다만 N(관측)도 관측 효과크기의 단조함수이므로 같은 한계를 공유합니다.)")
+    L(f"  ※ 이 표는 **보정 없는 α={alpha:g}** 로 계산했습니다. 위 [B] 블록은 "
+      f"{len(_PAIRED_METRICS)}개 지표에")
+    L("     Holm/BH 를 겁니다 — 보정된 기준으로 검정할 계획이라면 필요 N 이 약 "
+      "1.7배로 늘어납니다.")
+    L(f"     주 평가변수 하나를 **사전 지정**하거나, "
+      f"`--alpha {alpha / len(_PAIRED_METRICS):.4f}`(=α/{len(_PAIRED_METRICS)}) 로 "
+      "다시 계산하세요.")
+    L("     여러 지표의 N 중 가장 작은 것을 고르면 검정력이 부풀려집니다.")
+    L("  ※ 양측 우월성(superiority) 설계만 지원합니다 — 단측·비열등성(NI)·"
+      "동등성 설계는")
+    L("     여기서 나온 N 을 그대로 쓰면 안 됩니다.")
+    L("  ※ HF power 처럼 오른쪽으로 크게 치우친 지표는 원 척도의 평균/SD 로 낸 N 이")
+    L("     잘 맞지 않습니다 — ln 변환한 값(ln_hf)으로 설계하는 편이 안전합니다.")
+    L("")
+    return "\n".join(lines)
+
+
+def render_plan(grid: dict) -> str:
+    """파일럿 없이 가정값만으로 만든 계획표(--plan)를 렌더링."""
+    design = grid["design"]
+    per = "군당 " if design == "parallel" else ""
+    alpha = grid["alpha"]
+    sd = grid["sd"]
+    delta = grid.get("delta")
+    n = grid.get("n")
+    drop = grid.get("dropout", 0.0)
+    lines: List[str] = []
+    L = lines.append
+    L("=" * 78)
+    L("  hrvkit — 표본수·검정력 설계 / Sample-size planning")
+    L("=" * 78)
+    label = {"paired": "짝지은(pre–post, 동일 피험자)",
+             "parallel": "평행군(독립 2군)"}[design]
+    L(f"  설계: {label}   α={alpha:g} 양측   가정 SD={sd:g}"
+      + (f"   탈락률 {_pct(drop)}%" if drop else ""))
+    if delta is not None:
+        L(f"  탐지하려는 차이 Δ = {delta:g}  →  효과크기 d = {abs(delta) / sd:.3f}")
+    if n is not None:
+        L(f"  확보 가능한 {per}표본수 n = {n}")
+    L("")
+    floored_any = False
+    if delta is not None:
+        L(f"  [필요 {per}표본수]")
+        L("    " + _lj("목표 검정력", 14) + _rj("N(t 검정)", 14)
+          + _rj("N(순위검정)", 16) + (_rj("모집 인원", 14) if drop else ""))
+        L("    " + "-" * (44 + (14 if drop else 0)))
+        for r in grid["rows"]:
+            mark = "\u2021" if r.get("floored") else ""
+            req = "  \u25c0 --target-power" if r.get("requested") else ""
+            row = ("    " + _lj(_pct(r["target_power"]) + "%", 14)
+                   + _rj(_n_cell(r.get("n_t")), 14)
+                   + _rj(_n_cell(r.get("n_recommended")) + mark, 16))
+            if drop:
+                row += _rj(_n_cell(r.get("n_enrol")), 14)
+            L(row + req)
+            if r.get("floored"):
+                floored_any = True
+        L("")
+    if n is not None:
+        L(f"  [탐지 가능한 최소 차이 MDD — {per}n={n} 에서]")
+        L("    " + _lj("목표 검정력", 14) + _rj("MDD(t 검정)", 16)
+          + _rj("MDD(순위검정)", 18) + _rj("= d", 10))
+        L("    " + "-" * 60)
+        for r in grid["rows"]:
+            mdd = r.get("mdd", float("nan"))
+            d_eq = (mdd / sd) if _finite(mdd) else float("nan")
+            req = "  \u25c0 --target-power" if r.get("requested") else ""
+            L("    " + _lj(_pct(r["target_power"]) + "%", 14)
+              + _rj(_num(mdd, 3), 16)
+              + _rj(_num(r.get("mdd_nonparam"), 3), 18)
+              + _rj(_num(d_eq, 3), 10) + req)
+        L("")
+    if "power_at_n" in grid:
+        L(f"  [검정력] {per}n={n}, Δ={delta:g}, SD={sd:g} → "
+          f"검정력 = {_pct(grid['power_at_n'])}% (t 검정 기준)")
+        L("")
+    if delta is not None:
+        L("  N(t 검정) 은 비중심 t 분포를 수치적분(Simpson)해 오차 1e-9 이내로")
+        L("  계산한 값입니다(정규근사식이 아닙니다). N(순위검정) 은 hrvkit 이")
+        L("  실제로 쓰는 Wilcoxon/Mann–Whitney 의 **정규분포 하** 점근상대효율")
+        L("  (ARE = 3/π ≈ 0.955)을 반영해 +4.7% 한 값입니다.")
+    else:
+        L("  MDD 는 비중심 t 분포를 수치적분해 구한 값이고, MDD(순위검정) 은")
+        L("  같은 n 에서 순위검정이 탐지할 수 있는 차이(ARE 반영, ×1/√0.955 ≈ +2.3%)")
+        L("  입니다. 두 값 모두 **정규분포 하** 효율 기준입니다.")
+    L("  ※ ARE 는 점근값이고 정규분포 기준입니다 — 꼬리가 두꺼우면 순위검정이 더")
+    L("     효율적이지만, 최악의 연속분포에서는 ARE 가 0.864 까지 내려가 +15.7% 가")
+    L("     필요할 수 있습니다. 또 순위검정의 귀무가설은 평균차가 아니라 확률적")
+    L("     순서(HL 이동량)이므로, 평균/SD 로 만든 d 에 ARE 를 곱하는 것은 근사적인")
+    L("     다리입니다 — 오른쪽으로 치우친 HRV 지표(HF power 등)에서는 특히 그렇습니다.")
+    if floored_any:
+        floor_n = grid["rows"][0].get("n_exact_floor")
+        L(f"  ‡ = 정확검정 하한 {per}{floor_n}명으로 올린 값 — 이보다 적으면 순위검정이")
+        L(f"     낼 수 있는 최소 p 가 이미 α={alpha:g} 를 넘어 기각이 불가능합니다.")
+    L("  ※ **보정 없는 α** 기준입니다. 여러 지표에 Holm/BH 를 걸 계획이면 필요 N 이")
+    L("     약 1.7배로 늘어납니다 — `--alpha` 를 낮춰 다시 계산하세요.")
+    L(f"  ※ '—' 는 효과가 너무 작아 상한 {MAX_N:,}명으로도 목표 검정력에 도달하지")
+    L("     못한다는 뜻입니다(무한대가 아니라 '이 도구의 탐색 범위 밖').")
+    L("  ※ 양측 우월성 설계 전용입니다(단측·비열등성·동등성 설계 미지원).")
+    L("  ※ --sd 는 점추정치일 뿐이고 그 자체도 불확실합니다. N ∝ 1/d² ∝ SD² 이라")
+    L("     SD 를 10% 잘못 잡으면 N 이 약 21% 틀어집니다 — 보수적으로 잡으세요.")
+    if design == "paired":
+        L("  ※ 짝지은 설계의 SD 는 **개인 내 차이(post−pre)의 SD** 입니다 —")
+        L("     집단 SD 를 넣으면 필요 표본수가 크게 과대추정됩니다.")
+    else:
+        L("  ※ 평행군 설계의 SD 는 **군 내 합동 SD** 이고 N 은 **군당** 인원입니다")
+        L("     (총 인원은 2N).")
     L("")
     return "\n".join(lines)
