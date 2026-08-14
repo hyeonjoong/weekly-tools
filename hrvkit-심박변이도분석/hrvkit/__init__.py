@@ -19,11 +19,15 @@ from .stats import (wilcoxon_signed_rank, paired_summary, hodges_lehmann,
                     hodges_lehmann_2sample, unpaired_summary, mann_kendall)
 from .window import (Window, WindowSeries, analyze_windows, window_trends,
                      long_term_indices)
+from .power import (noncentral_t_cdf, t_test_power, required_n,
+                    detectable_delta, plan_paired, plan_parallel, power_grid)
 from .report import (render_text, render_comparison, render_batch_table,
                      render_paired_group, paired_group, metrics_to_csv,
                      paired_group_to_csv, render_windows, windows_to_csv,
                      group_compare, render_group_compare,
-                     group_compare_to_csv)
+                     group_compare_to_csv, power_plan_paired,
+                     power_plan_groups, power_plan_to_csv, render_power_plan,
+                     render_plan)
 
 __all__ = [
     "clean_rr",
@@ -68,6 +72,18 @@ __all__ = [
     "group_compare",
     "render_group_compare",
     "group_compare_to_csv",
+    "noncentral_t_cdf",
+    "t_test_power",
+    "required_n",
+    "detectable_delta",
+    "plan_paired",
+    "plan_parallel",
+    "power_grid",
+    "power_plan_paired",
+    "power_plan_groups",
+    "power_plan_to_csv",
+    "render_power_plan",
+    "render_plan",
 ]
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"

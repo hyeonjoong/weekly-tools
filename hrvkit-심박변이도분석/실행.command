@@ -21,6 +21,8 @@ echo "    python3 -m hrvkit.cli --paired manifest.csv       (같은 피험자 pr
 echo "    python3 -m hrvkit.cli --groups arms.csv           (평행군 독립 2군 비교)"
 echo "    python3 -m hrvkit.cli 세션.csv --window           (5분 구간별 추이 + 추세)"
 echo "    python3 -m hrvkit.cli 세션.csv --psd lomb         (보간 없는 PSD — 절대 파워 보고용)"
+echo "    python3 -m hrvkit.cli --paired manifest.csv --power  (파일럿 → 본시험 표본수 설계)"
+echo "    python3 -m hrvkit.cli --plan --delta 8 --sd 15    (파일 없이 표본수 설계)"
 echo "=================================================================="
 echo ""
 
@@ -76,8 +78,25 @@ echo ""
 run --paired examples/paired/manifest.csv
 
 echo ""
+echo "### 예제 7) 파일럿 -> 본시험 표본수 설계 (--power)"
+echo "\$ hrvkit --paired examples/paired/manifest.csv --power --dropout 0.15"
+echo "    파일럿의 효과크기와 그 신뢰구간의 0쪽 경계, 두 가지 기준으로 다음 시험의"
+echo "    필요 인원(완료/모집)을 냅니다. 사후 검정력은 계산하지 않습니다."
+echo ""
+run --paired examples/paired/manifest.csv --power --dropout 0.15
+
+echo ""
+echo "### 예제 8) 파일 없이 표본수 설계 (--plan)"
+echo "\$ hrvkit --plan --delta 8 --sd 15"
+echo "    'RMSSD 8 ms 차이를, 차이의 SD 15 ms 가정으로 탐지하려면 몇 명?'"
+echo ""
+run --plan --delta 8 --sd 15
+
+echo ""
 echo "### 요약: 이 합성 예제에서 느린 호흡 쪽이 RMSSD·HF·SD1 ↑, LF/HF ↓ 로 계산됩니다."
 echo "    이는 '느린 호흡→RSA↑→HRV↑' 방향과 일치하지만, 합성 데이터이므로"
 echo "    기전의 증거가 아니라 계산 예시입니다. 실제 판단은 여러분의 데이터로."
 echo ""
-read -p "엔터를 누르면 창이 닫힙니다..."
+# `|| true` — 파이프/리다이렉션으로 실행할 때(예: CI, `< /dev/null`)
+# read 가 EOF 로 실패해 스크립트가 0이 아닌 코드로 끝나는 것을 막습니다.
+read -p "엔터를 누르면 창이 닫힙니다..." || true
