@@ -1,0 +1,4 @@
+metric,group,n,mean,sd,diff,ci_low,ci_high,p
+SWS_week8,intervention,45,43.16,6.44,,,,
+SWS_week8,control,45,31.48,5.90,,,,
+SWS_week8,between,90,,,11.68,4.31,19.05,0.0018

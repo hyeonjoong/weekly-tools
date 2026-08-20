@@ -1,0 +1,4 @@
+metric,group,n,mean,sd,diff,ci_low,ci_high,p
+ISI_week8,intervention,42,12.44,4.08,,,,
+ISI_week8,control,42,15.91,4.63,,,,
+ISI_week8,between,84,,,-3.47,-5.21,-1.79,0.0021
