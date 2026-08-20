@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "visitaudit"
+version = "0.1.0"
+description = "임상시험 방문일정 이탈 점검 — 피험자별 방문 날짜 표와 프로토콜(방문창) JSON 을 받아 방문창 이탈·순서 위반·결측 방문·중도탈락 처리를 날짜 산술로 전수 판정하고, CONSORT 흐름 숫자·PP 집합 후보·KR/EN 문장 초안까지 냅니다. 미도래(창 미마감)·탈락후 방문은 절대 이탈로 세지 않고, 판정 못 한 방문은 커버리지 자백으로 전부 사유별 보고하며 판정률이 임계 미만이면 exit 3 으로 멈춥니다. 애매하면 이탈이 아니라 판정불가로 보냅니다. 완전 오프라인·읽기 전용(원본을 수정하지 않음), 표준 라이브러리만 사용"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "hyeonjoong", email = "hyeonjoongk@gmail.com" }]
+keywords = ["clinical-trial", "protocol-deviation", "visit-window", "consort",
+            "per-protocol", "monitoring", "enrollment", "phase-3", "audit",
+            "reproducible-research", "csv", "offline", "sleep", "insomnia"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Healthcare Industry",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+    "Topic :: Scientific/Engineering :: Medical Science Apps.",
+    "Environment :: Console",
+    "Natural Language :: Korean",
+]
+
+# 외부 의존성 없음 — 날짜 산술은 datetime, CSV 는 csv, 프로토콜은 json 으로 충분합니다.
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.scripts]
+visitaudit = "visitaudit.cli:run"
+
+[tool.setuptools.packages.find]
+include = ["visitaudit*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
