@@ -1,0 +1,8 @@
+{
+  "metric": "adherence",
+  "n": 84,
+  "sessions_expected": 2688,
+  "sessions_completed": 2346,
+  "rate_percent": 87.3,
+  "ae_rate": 0.0625
+}
