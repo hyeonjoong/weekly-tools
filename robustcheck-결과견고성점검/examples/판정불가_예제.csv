@@ -1,0 +1,6 @@
+subject_id,arm,isi_baseline,isi_week4,rmssd_ms,sleep_eff_pct
+S001,active,18,11,42.3,84.0
+S002,active,21,9,38.1,86.2
+S003,sham,19,18,29.7,78.4
+S004,sham,17,,31.2,80.1
+S005,active,22,14,,82.5
