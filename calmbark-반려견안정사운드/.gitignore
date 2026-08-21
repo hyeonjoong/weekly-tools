@@ -1,0 +1,5 @@
+.DS_Store
+*.csv
+결과*/
+node_modules/
+_diag.mjs
