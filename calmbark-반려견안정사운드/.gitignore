@@ -2,4 +2,4 @@
 *.csv
 결과*/
 node_modules/
-_diag.mjs
+_*.mjs

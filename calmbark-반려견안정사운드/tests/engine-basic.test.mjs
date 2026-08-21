@@ -72,3 +72,11 @@ test("기본 루프 길이는 세 프리셋 모두에서 유효하다", () => {
     assert.ok(PRESETS[id].amHz >= 0.7 && PRESETS[id].amHz <= 1.33, `${id} amHz 범위`);
   }
 });
+
+test("잘못된 길이/샘플레이트는 한국어 오류로 거부한다 (라운드 1 M6)", () => {
+  assert.throws(() => renderPreset("brown_waves", SR, 0, 1), /유효하지 않음/);
+  assert.throws(() => renderPreset("brown_waves", SR, -5, 1), /유효하지 않음/);
+  assert.throws(() => renderPreset("brown_waves", SR, NaN, 1), /유효하지 않음/);
+  assert.throws(() => renderPreset("brown_waves", 0, 30, 1), /유효하지 않음/);
+  assert.throws(() => renderPreset("brown_waves", NaN, 30, 1), /유효하지 않음/);
+});

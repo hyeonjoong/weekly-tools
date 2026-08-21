@@ -41,7 +41,11 @@ URL="http://127.0.0.1:${PORT}/"
 
 python3 -m http.server "$PORT" --bind 127.0.0.1 >/dev/null 2>&1 &
 SERVER_PID=$!
-trap 'echo ""; echo "서버를 종료합니다."; kill "$SERVER_PID" 2>/dev/null; exit 0' INT TERM
+# 라운드 1 M3: 어떤 경로로 죽어도(SIGPIPE 포함) 서버가 고아로 남지 않게 —
+# EXIT 트랩이 최종 청소를 맡고, PIPE/HUP 은 명시적으로 exit 시켜 EXIT 트랩을 태운다
+trap 'kill "$SERVER_PID" 2>/dev/null' EXIT
+trap 'echo ""; echo "서버를 종료합니다."; exit 0' INT TERM
+trap 'exit 1' PIPE HUP
 
 # 서버 기동 대기 (최대 ~5초)
 READY=0
