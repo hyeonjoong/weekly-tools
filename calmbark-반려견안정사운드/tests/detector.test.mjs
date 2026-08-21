@@ -145,3 +145,98 @@ test("감도 변경이 문턱에 즉시 반영", () => {
   ];
   assert.equal(ev.length, 0);
 });
+
+// ================================================================ 라운드 1
+
+test("C4: 음소거 마이크(−120 dB 바닥)는 보정을 거부한다 — 유령 짖음 폭풍 차단", () => {
+  const det = createDetector();
+  const ev = feed(det, 0, 3025, -120); // 무음 클램프 수준
+  assert.equal(ev.length, 1);
+  assert.equal(ev[0].type, "calibration_failed");
+  assert.equal(ev[0].floorDb, -120);
+  assert.equal(det.getState(), "CALIBRATING", "감지 시작 금지 — 앱이 세션을 중단해야");
+  assert.equal(det.getNoiseFloor(), null);
+  // 거부 후 어떤 소음도 bark 가 되면 안 된다 (보정이 안 됐으므로)
+  const after = feed(det, 3025, 4000, 60);
+  assert.equal(after.filter((e) => e.type === "bark").length, 0);
+});
+
+test("C4 경계: 바닥이 정확히 −100 dB 여도 거부(≤), −99 dB 는 통과", () => {
+  const d1 = createDetector();
+  const e1 = feed(d1, 0, 3025, -100);
+  assert.equal(e1[0].type, "calibration_failed");
+  const d2 = createDetector();
+  const e2 = feed(d2, 0, 3025, -99);
+  assert.equal(e2[0].type, "calibrated");
+});
+
+test("C4 재시도: 거부 후 정상 입력이 오면 새로 3초 보정해 성공한다", () => {
+  const det = createDetector();
+  feed(det, 0, 3025, -120); // 거부
+  const ev = feed(det, 3025, 6075, 40); // 3초 재보정
+  const cal = ev.filter((e) => e.type === "calibrated");
+  assert.equal(cal.length, 1);
+  assert.equal(cal[0].floorDb, 40);
+});
+
+test("C7: 버스트 중 2시간 프레임 공백 — 7200초 유령 bark 대신 framegap + 폐기", () => {
+  const det = calibrated();
+  feed(det, 3025, 4000, 40);
+  feed(det, 4000, 4200, 60); // BARKING 진입 (200 ms 지속 중)
+  assert.equal(det.getState(), "BARKING");
+  // 2시간 뒤 첫 프레임 (여전히 시끄러움) — bark 가 아니라 framegap 이어야 한다
+  const ev = det.processFrame({ tMs: 4200 + 7200000, bandDb: 60 });
+  assert.equal(ev.length, 1);
+  assert.equal(ev[0].type, "framegap");
+  assert.equal(ev[0].gapSec, 7200);
+  // 갭 이전 버스트는 폐기 — 갭 프레임 자체가 새 CANDIDATE 를 시작하는 것은
+  // 허용한다 (그 버스트의 시작 시각이 갭 이후라 유령 지속시간이 생기지 않음)
+  assert.notEqual(det.getState(), "BARKING", "갭 이전 버스트가 살아남으면 안 됨");
+  // 이후 새 버스트는 정상 감지
+  const ev2 = [
+    ...feed(det, 4200 + 7200000 + STEP, 4200 + 7200000 + 200, 60),
+    ...feed(det, 4200 + 7200000 + 200, 4200 + 7200000 + 300, 40),
+  ];
+  const barks = ev2.filter((e) => e.type === "bark");
+  assert.equal(barks.length, 1);
+  assert.ok(barks[0].endMs - barks[0].tMs < 1000, "유령 장기 bark 없음");
+});
+
+test("C7: 보정 중 공백이면 보정을 처음부터 다시 시작한다", () => {
+  const det = createDetector();
+  feed(det, 0, 1500, 40);           // 보정 절반
+  const ev = det.processFrame({ tMs: 1500 + 60000, bandDb: 40 }); // 1분 공백
+  assert.equal(ev[0].type, "framegap");
+  // 공백 후 3초를 다시 채워야 calibrated
+  const ev2 = feed(det, 61500 + STEP, 61500 + 3050, 40);
+  assert.equal(ev2.filter((e) => e.type === "calibrated").length, 1);
+});
+
+test("M4: NaN/±Inf 프레임은 무시되고 집계된다 (상태 불변)", () => {
+  const det = calibrated();
+  feed(det, 3025, 4000, 40);
+  const before = det.getState();
+  const ev = [
+    ...det.processFrame({ tMs: 4000, bandDb: NaN }),
+    ...det.processFrame({ tMs: 4025, bandDb: Infinity }),
+    ...det.processFrame({ tMs: 4050, bandDb: -Infinity }),
+    ...det.processFrame({ tMs: NaN, bandDb: 40 }),
+  ];
+  assert.equal(ev.length, 0);
+  assert.equal(det.getState(), before);
+  assert.equal(det.getInvalidFrameCount(), 4);
+  assert.equal(det.getNoiseFloor(), 40, "무효 프레임이 바닥을 오염시키지 않음");
+  // 무효 프레임이 framegap 을 유발하지도 않는다 (lastFrame 미갱신)
+  const ok = feed(det, 4075, 4100, 40);
+  assert.equal(ok.length, 0);
+});
+
+test("M4: 보정 중 무효 프레임은 표본에서 제외된다", () => {
+  const det = createDetector();
+  feed(det, 0, 1000, 40);
+  for (let t = 1000; t < 1100; t += STEP) det.processFrame({ tMs: t, bandDb: NaN });
+  const ev = feed(det, 1100, 3025, 40);
+  assert.equal(ev[0].type, "calibrated");
+  assert.equal(ev[0].floorDb, 40);
+  assert.equal(det.getInvalidFrameCount(), 4);
+});

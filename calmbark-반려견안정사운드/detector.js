@@ -36,6 +36,14 @@ export const DETECTOR_DEFAULTS = {
   refractoryMs: 250,     // 버스트 종료 후 재트리거 금지 구간
   floorWindowFrames: 200, // 소음 바닥 롤링 중앙값 창 (25 ms 프레임 기준 ≈ 5 s)
   playbackExtraDb: 6,    // 재생 중 문턱 상향
+  minFloorDb: -100,      // 라운드 1 C4: 보정 바닥이 이 이하(무음 클램프 근처)면
+                         // 마이크 음소거/무입력으로 보고 보정을 거부한다 —
+                         // −120 dB 바닥으로 보정되면 이후 모든 잡음이 "짖음"이
+                         // 되고, 바닥 적응은 문턱 아래 프레임에서만 돌아서
+                         // 영원히 회복 불가(유령 짖음 폭풍)임이 패널에서 재현됨
+  frameGapMs: 5000,      // 라운드 1 C7: 프레임 간격이 이보다 크면(절전/탭 정지)
+                         // 진행 중 버스트를 폐기 — 2시간 갭이 "7200초 짖음 1회"로
+                         // 기록되는 것을 막는다
 };
 
 function median(arr) {
@@ -51,6 +59,8 @@ function median(arr) {
  *
  * processFrame({ tMs, bandDb, playbackActive }) → 이벤트 배열:
  *   { type: "calibrated", tMs, floorDb }
+ *   { type: "calibration_failed", tMs, floorDb }  // C4: 마이크 무입력 의심 — 세션 시작 불가
+ *   { type: "framegap", tMs, gapSec }             // C7: 프레임 공백 — 진행 버스트 폐기
  *   { type: "bark", tMs, endMs, peakDb, duringPlayback }
  */
 export function createDetector(config = {}) {
@@ -64,6 +74,8 @@ export function createDetector(config = {}) {
   let burstPeakDb = -Infinity;
   let burstDuringPlayback = false;
   let refractoryUntilMs = 0;
+  let lastFrameMs = null;     // C7: 프레임 공백 감지
+  let invalidFrames = 0;      // M4: NaN/±Inf 입력 프레임 수
 
   function threshold(playbackActive) {
     return floorDb + cfg.sensitivityDb + (playbackActive ? cfg.playbackExtraDb : 0);
@@ -78,13 +90,41 @@ export function createDetector(config = {}) {
   return {
     processFrame({ tMs, bandDb, playbackActive = false }) {
       const events = [];
+      // 라운드 1 M4: 비유한 입력은 프레임 자체를 무시 (집계만 하고 상태 불변)
+      if (!Number.isFinite(tMs) || !Number.isFinite(bandDb)) {
+        invalidFrames += 1;
+        return events;
+      }
       if (startMs === null) startMs = tMs;
+
+      // 라운드 1 C7: 프레임 공백(절전·탭 정지) — 진행 중 버스트를 "짖음"으로
+      // 내보내지 않고 폐기한다. 보정 중이었다면 보정을 처음부터 다시 시작.
+      if (lastFrameMs !== null && tMs - lastFrameMs > cfg.frameGapMs) {
+        events.push({ type: "framegap", tMs, gapSec: Math.round((tMs - lastFrameMs) / 1000) });
+        if (state === "CALIBRATING") {
+          startMs = tMs;
+          floorSamples = [];
+        } else if (state === "CANDIDATE" || state === "BARKING") {
+          state = "IDLE"; // 갭을 걸친 버스트는 신뢰 불가 — bark 미방출 폐기
+        }
+      }
+      lastFrameMs = tMs;
 
       if (state === "CALIBRATING") {
         floorSamples.push(bandDb);
         if (tMs - startMs >= cfg.calibrationMs) {
+          const floor = median(floorSamples.slice(-cfg.floorWindowFrames));
+          if (floor <= cfg.minFloorDb) {
+            // 라운드 1 C4: 무음 클램프 수준의 바닥 = 마이크 음소거/무입력 의심.
+            // 이대로 보정하면 문턱이 −108 dB 가 되어 모든 프레임이 짖음이 되고,
+            // 바닥 적응은 "문턱 아래" 프레임에서만 돌므로 영원히 회복 불가.
+            floorSamples = [];
+            startMs = tMs; // 재시도 대비 리셋 (앱은 세션을 중단하고 안내한다)
+            events.push({ type: "calibration_failed", tMs, floorDb: floor });
+            return events;
+          }
           floorRing = floorSamples.slice(-cfg.floorWindowFrames);
-          floorDb = median(floorRing);
+          floorDb = floor;
           floorSamples = [];
           state = "IDLE";
           events.push({ type: "calibrated", tMs, floorDb });
@@ -150,6 +190,7 @@ export function createDetector(config = {}) {
       return floorDb === null ? null : threshold(playbackActive);
     },
     setSensitivityDb(db) { cfg.sensitivityDb = db; },
+    getInvalidFrameCount() { return invalidFrames; }, // 라운드 1 M4
     getConfig() { return { ...cfg }; },
   };
 }

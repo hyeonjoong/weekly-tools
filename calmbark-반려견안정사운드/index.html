@@ -90,6 +90,9 @@
 
     <label for="시드">무작위 배정 seed (기록·재현용 — 같은 seed 는 같은 배정 순서)</label>
     <input id="시드" type="number" min="0" step="1">
+    <div class="주의">자동 값은 <b>검증 시드 목록</b>(합성음이 논문 준수 테스트를 통과함이 확인된
+      16종)에서 뽑힙니다. 직접 바꿔도 되지만, 목록 밖 시드는 이벤트 로그에
+      <code>시드(미검증)</code> 으로 기록됩니다.</div>
   </div>
 
   <div class="card">
@@ -104,6 +107,7 @@
       마이크를 허용한 뒤 "세션 시작"을 다시 눌러주세요. 마이크 소리는 <b>저장·전송되지 않으며</b>
       대역 에너지 숫자만 계산 후 즉시 버려집니다.
     </div>
+    <div id="오류안내" class="경고" hidden style="margin-top:10px;"></div>
     <div class="상태줄" style="margin-top:10px;">
       <div><b>상태</b><span id="상태값">대기 (세션 시작 전)</span></div>
       <div><b>현재 레벨 (250–4000 Hz)</b><span id="레벨값">—</span></div>
@@ -135,8 +139,10 @@
       <button id="이벤트CSV" type="button">이벤트 CSV 내려받기</button>
     </div>
     <div class="주의" style="margin-top:6px;">
-      에피소드 CSV(<code>에피소드ID,시작,종료,짖음횟수,지속초,개입여부,모드,seed</code>)는
-      statwise(개입/비개입 비교)·longistat(일차 추이)에 그대로 들어갑니다.
+      에피소드 CSV(<code>에피소드ID,시작,종료,짖음횟수,지속초,개입여부,모드,seed,재생겹침초,후속180초짖음수</code>)는
+      statwise(개입/비개입 비교)에 그대로 들어갑니다. longistat(일차 추이)은 날짜 열을 추가해
+      하루 단위로 요약한 뒤 넣으세요(사용법.md §5). 1차 비교 지표는 <b>후속180초짖음수</b>,
+      <b>재생겹침초&gt;0 인 비개입 행은 오염</b>이므로 per-protocol 비교에서 제외하세요.
     </div>
   </div>
 

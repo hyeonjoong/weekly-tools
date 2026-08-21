@@ -323,3 +323,52 @@ export function envelopePeriodicity(x, sampleRate, periodSec) {
   const overlap = sm.length - lag;
   return (num / overlap) / (den / sm.length);
 }
+
+// ---------------------------------------------------------------- ⑧ 크레스트 (과도/클릭 가드)
+
+/**
+ * ⑧ 크레스트 프록시 (라운드 1 C3): 1 ms 창 피크 vs 그 창을 중심으로 한
+ * 100 ms 국소 RMS 의 비(dB) 최대값. 엔벨로프 평활 기반 지표(②③④⑦)는
+ * 1샘플급 클릭을 희석해 놓칠 수 있으므로, 놀람 반응성 과도(startle
+ * transient)를 표본 수준에서 직접 잡는다 — Tier 1 Event Structure
+ * (minimise transient Lmax) / Onset Dynamics 의 미시 스케일 가드.
+ */
+export function crestFactorDb(x, sampleRate) {
+  const n = x.length;
+  const w1 = Math.max(1, Math.round(0.001 * sampleRate));
+  const w100 = Math.round(0.1 * sampleRate);
+  // 제곱 누적합 (국소 RMS O(1) 조회)
+  const cum = new Float64Array(n + 1);
+  for (let i = 0; i < n; i++) cum[i + 1] = cum[i] + x[i] * x[i];
+  let worst = 0;
+  for (let start = 0; start + w1 <= n; start += w1) {
+    let peak = 0;
+    for (let i = start; i < start + w1; i++) {
+      const a = Math.abs(x[i]);
+      if (a > peak) peak = a;
+    }
+    const c = start + (w1 >> 1);
+    const lo = Math.max(0, c - (w100 >> 1));
+    const hi = Math.min(n, lo + w100);
+    const rms = Math.sqrt((cum[hi] - cum[lo]) / Math.max(hi - lo, 1));
+    const crest = peak / Math.max(rms, 1e-12);
+    if (crest > worst) worst = crest;
+  }
+  return 20 * Math.log10(Math.max(worst, 1e-12));
+}
+
+/**
+ * ⑧ 보조: 인접 샘플 차분의 최대 대 차분 RMS (dB). 저역통과된 엔진 출력에서
+ * 차분 신호는 작으므로, 1샘플 클릭은 여기서 극단적으로 도드라진다 —
+ * AM 마루 근처에 심어 국소 RMS 를 탄 클릭까지 잡는 2차 방어선.
+ */
+export function diffCrestDb(x) {
+  let maxD = 0, sum2 = 0;
+  for (let i = 1; i < x.length; i++) {
+    const d = Math.abs(x[i] - x[i - 1]);
+    if (d > maxD) maxD = d;
+    sum2 += d * d;
+  }
+  const rms = Math.sqrt(sum2 / Math.max(x.length - 1, 1));
+  return 20 * Math.log10(Math.max(maxD, 1e-12) / Math.max(rms, 1e-12));
+}

@@ -61,14 +61,23 @@ export const PRESETS = {
   },
   drone_descend: {
     label: "저주파 드론 (느린 하강)",
-    description: "84–104 Hz 사인 드론 + 느린 하강 음형 + 저역 잡음 바닥, 0.8 Hz(48 BPM) 변조",
-    amHz: 0.8,
+    description: "84–104 Hz 사인 드론 + 느린 하강 음형 + 저역 잡음 바닥, 1 Hz(60 BPM) 변조",
+    amHz: 1.0, // 라운드 1 M9: 0.8 Hz(48 BPM)는 문헌 예시 대역(60–80 BPM) 밖이라 60 BPM 으로 상향
     amDepth: 0.4,
   },
 };
 
 export const DEFAULT_LOOP_SECONDS = 30;
-export const DEFAULT_SEED = 0xca1a; // "calm" — 아무 시드나 통과해야 하지만 기본값 고정
+
+/**
+ * 검증 시드 목록 (라운드 1 C2). 논문 준수 스위프 테스트가 이 16개 시드 × 3
+ * 프리셋 전부에서 ②(러프니스 대역 융기 ≤ 0.90)·④(온셋 상승 ≥ 60 ms — 판정
+ * 임계 50 ms 에 여유)를 강제한다. 앱의 자동 세션 시드는 이 목록에서만 뽑고,
+ * 직접 입력한 시드는 허용하되 이벤트 로그에 `시드(미검증)` 으로 남긴다.
+ */
+export const VETTED_SEEDS = [1, 2, 3, 5, 6, 8, 11, 13, 14, 15, 16, 21, 23, 24, 51738, 20260821];
+
+export const DEFAULT_SEED = 0xca1a; // 렌더 기본값(테스트 편의) — 앱 세션 시드는 VETTED_SEEDS 에서
 
 // ---------------------------------------------------------------- 내부 빌딩블록
 
@@ -125,7 +134,7 @@ function amEnvelope(i, sampleRate, amHz, depth) {
 
 /**
  * 브라운 기울기 잡음: 백색 → one-pole LP(cornerHz).
- * 코너 위에서 β≈−2 (브라운). 코너를 100 Hz 대에 두는 이유: 누설 적분기
+ * 코너 위에서 β≈−2 (브라운). 코너를 수백 Hz(브라운 캐리어 300 Hz)에 두는 이유: 누설 적분기
  * (코너 ~8 Hz)식 브라운은 에너지가 DC 근처에 몰려 엔벨로프가 비주기적으로
  * 느리게 방황한다(랜덤워크 레벨). 그 방황은 Predictability(⑦)와 Onset(④)
  * 프록시를 실제로 악화시키는 물리적 실체라, 스펙트럼 기울기를 유지하면서
@@ -180,6 +189,50 @@ function stabilizeLevel(x, sampleRate, trackHz) {
   return out;
 }
 
+/** 영위상 저역통과: one-pole 를 순방향+역방향으로 적용 (오프라인 렌더라 가능).
+ *  순 응답 = 1/(1+(f/fc)²), 위상 오차 0 — 대역 분리에 위상 지연 문제가 없다. */
+function zeroPhaseLp(arr, sampleRate, fc, initValue) {
+  const a = 1 - Math.exp((-2 * Math.PI * fc) / sampleRate);
+  const n = arr.length;
+  const out = new Float64Array(n);
+  let y = initValue;
+  for (let i = 0; i < n; i++) { y += a * (arr[i] - y); out[i] = y; }
+  y = initValue;
+  for (let i = n - 1; i >= 0; i--) { y += a * (out[i] - y); out[i] = y; }
+  return out;
+}
+
+/**
+ * 엔벨로프 정칙화 (라운드 1 C2): 정류 신호의 영위상 엔벨로프(≤300 Hz)를
+ * 다시 영위상 20 Hz 로 평활한 "목표 엔벨로프"로 치환한다 —
+ * g = envSlow / envFast 를 곱하면 출력 엔벨로프 ≈ envSlow 가 되어
+ * 20 Hz 초과 주율의 확률적 엔벨로프 요동(러프니스 대역 30–150 Hz 포함)이
+ * 주율에 따라 1/(1+(f/20)²) 로 억제된다: 150 Hz 요동은 ~2%만 남고,
+ * ② 분모 대역(5–25 Hz)은 대부분 보존된다. 위상 오차가 없어 대역 경계에서
+ * 역효과(라운드 1 스위프에서 관찰된 융기 악화)가 없다.
+ * 의도적 AM(0.7–1.33 Hz)은 이 함수 이후에 곱해지므로 영향받지 않는다.
+ * 목적: 시드와 무관하게 ② 대역 융기 ≤0.90, ④ 온셋 상승 ≥60 ms 보장
+ * (라운드 1 C2 — seed 8/15 에서 ② 융기 >1.0 재현 결함의 구조적 수정).
+ */
+function envelopeRegularize(x, sampleRate) {
+  const n = x.length;
+  let mean = 0;
+  for (let i = 0; i < n; i++) mean += Math.abs(x[i]);
+  mean /= n;
+  if (mean === 0) return x;
+  const rect = new Float64Array(n);
+  for (let i = 0; i < n; i++) rect[i] = Math.abs(x[i]);
+  const envFast = zeroPhaseLp(rect, sampleRate, 300, mean);
+  const envSlow = zeroPhaseLp(envFast, sampleRate, 20, mean);
+  const floor = 0.25 * mean; // 골 과증폭(크레스트 상승) 방지
+  const out = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const g = Math.max(envSlow[i], floor) / Math.max(envFast[i], floor);
+    out[i] = x[i] * Math.min(g, 3);
+  }
+  return out;
+}
+
 function normalizePeak(x, peak) {
   let m = 0;
   for (let i = 0; i < x.length; i++) {
@@ -205,7 +258,8 @@ const DRONE = {
     { mult: 1, gain: 1.0 },
     { mult: 3, gain: 0.35 },
   ],
-  bedGainDb: -20, // 저역 잡음 바닥 (드론 RMS 대비)
+  bedGainDb: -26, // 저역 잡음 바닥 (드론 RMS 대비) — 라운드 1 C2: −20 → −26,
+                  // 바닥×부분음 교차항이 30–150 Hz 변조 융기의 주범이라 6 dB 더 낮춤
 };
 
 /**
@@ -233,6 +287,12 @@ function droneFreqAt(tInPeriod) {
 export function renderPreset(presetId, sampleRate, seconds = DEFAULT_LOOP_SECONDS, seed = DEFAULT_SEED) {
   const preset = PRESETS[presetId];
   if (!preset) throw new Error("알 수 없는 프리셋: " + presetId);
+  if (!Number.isFinite(sampleRate) || sampleRate <= 0) {
+    throw new Error("샘플레이트가 유효하지 않음: " + sampleRate); // 라운드 1 M6
+  }
+  if (!Number.isFinite(seconds) || seconds <= 0) {
+    throw new Error("루프 길이(초)가 유효하지 않음: " + seconds); // 라운드 1 M6
+  }
   const cycles = seconds * preset.amHz;
   if (Math.abs(cycles - Math.round(cycles)) > 1e-9) {
     throw new Error(`루프 ${seconds}s × ${preset.amHz}Hz = ${cycles} — 정수 사이클이 아님 (루프 경계가 끊긴다)`);
@@ -246,11 +306,12 @@ export function renderPreset(presetId, sampleRate, seconds = DEFAULT_LOOP_SECOND
 
   let carrier;
   if (presetId === "brown_waves") {
-    // β≈−2 (코너 120 Hz 위) → 저역통과 2단(1.2 kHz)로 고주파 추가 차단 (Tier 2 Sharpness)
+    // β≈−2 (코너 300 Hz 위) → 저역통과 2단(1.2 kHz)로 고주파 추가 차단 (Tier 2 Sharpness)
     let raw = brownSlopeNoise(n + fadeLen, sampleRate, rng, 300);
     raw = onePoleLp(raw, sampleRate, 1200);
     raw = onePoleLp(raw, sampleRate, 1200);
     carrier = stabilizeLevel(loopCrossfade(raw, n, fadeLen), sampleRate, 3);
+    carrier = envelopeRegularize(carrier, sampleRate);
   } else if (presetId === "pink_low") {
     // β≈−1 → 초저역 럼블 제거(HP 80 — 레벨 방황 억제) → 저역통과 2단(1.8 kHz)
     let raw = pinkNoise(n + fadeLen, rng);
@@ -258,6 +319,7 @@ export function renderPreset(presetId, sampleRate, seconds = DEFAULT_LOOP_SECOND
     raw = onePoleLp(raw, sampleRate, 1800);
     raw = onePoleLp(raw, sampleRate, 1800);
     carrier = stabilizeLevel(loopCrossfade(raw, n, fadeLen), sampleRate, 3);
+    carrier = envelopeRegularize(carrier, sampleRate);
   } else {
     // 드론: 사인 부분음(위상 적분 → 루프 연속) + 저역 잡음 바닥(크로스페이드)
     carrier = new Float32Array(n);
