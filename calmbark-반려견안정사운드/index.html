@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>calmbark — 반려견 안정 사운드 N-of-1 실험</title>
+<style>
+  :root { --ink:#1c2733; --sub:#5b6b7a; --line:#dfe6ec; --accent:#2e7d32; --warn:#8a5a00; --card:#ffffff; --bg:#f4f6f8; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink);
+         font-family:-apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
+         line-height:1.55; }
+  main { max-width: 860px; margin: 0 auto; padding: 16px; }
+  h1 { font-size: 1.5rem; margin: 8px 0 2px; }
+  h2 { font-size: 1.05rem; margin: 0 0 10px; }
+  .부제 { color: var(--sub); margin: 0 0 14px; font-size:.92rem; }
+  .card { background: var(--card); border:1px solid var(--line); border-radius: 10px; padding: 14px 16px; margin-bottom: 14px; }
+  .경고 { background:#fff7e0; border:1px solid #e6c86e; color:var(--warn); border-radius:10px;
+          padding:10px 14px; margin-bottom:14px; font-size:.92rem; }
+  .주의 { color:var(--sub); font-size:.85rem; }
+  ol.단계 { margin:6px 0 0 0; padding-left: 1.2em; }
+  label { display:block; margin: 8px 0 2px; font-weight: 600; font-size:.92rem; }
+  select, input[type=number] { width: 100%; max-width: 460px; padding:6px 8px; border:1px solid var(--line); border-radius:6px; font-size:.95rem; }
+  input[type=range] { width: 100%; max-width: 340px; vertical-align: middle; }
+  .행 { display:flex; flex-wrap:wrap; gap: 6px 18px; align-items:center; }
+  button { padding: 9px 16px; border-radius: 8px; border:1px solid var(--line); background:#fff; font-size:.95rem; cursor:pointer; }
+  button.주 { background: var(--accent); border-color: var(--accent); color:#fff; font-weight:700; }
+  button:disabled { opacity:.45; cursor:default; }
+  table { border-collapse: collapse; width: 100%; font-size:.9rem; }
+  th, td { border-bottom:1px solid var(--line); padding: 5px 8px; text-align:left; }
+  table.mini { max-width: 420px; margin: 6px 0; }
+  #이벤트로그 { max-height: 180px; overflow-y:auto; font-size:.84rem; color:var(--sub);
+               font-family: ui-monospace, Menlo, monospace; }
+  #레벨틀 { background:#e9edf1; border-radius: 6px; height: 14px; max-width: 340px; overflow:hidden; }
+  #레벨바 { height:100%; width:0; background:var(--accent); transition: width .08s linear; }
+  .상태줄 { display:grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 6px; font-size:.92rem; }
+  .상태줄 b { display:block; font-size:.8rem; color:var(--sub); font-weight:600; }
+  footer { color:var(--sub); font-size:.82rem; margin: 18px 0; }
+  [hidden] { display:none !important; }
+</style>
+</head>
+<body>
+<main>
+  <h1>calmbark <span style="font-size:.9rem; color:var(--sub);">반려견 안정 사운드 N-of-1 실험</span></h1>
+  <p class="부제">짖음을 감지하면 논문 기반 저각성 사운드를 자동 재생하고, 모든 에피소드를 CSV로 남깁니다.
+    효과를 <b>주장하지 않고 측정</b>합니다 — 판단은 statwise 가 합니다.</p>
+
+  <div class="경고">
+    <b>볼륨 주의 — 항상 확인하세요.</b> 개의 청각은 사람보다 민감합니다. 기본 볼륨은 보수적으로
+    낮게 시작하며 상한은 50%입니다. 스피커를 개 가까이 두지 말고, 미리듣기로 사람 귀에 "배경음
+    수준"인지 확인한 뒤 사용하세요. 이 소리에 초음파 성분은 없습니다(엔진이 저역통과 구조).
+    개가 소리에 불안 반응(회피·헐떡임)을 보이면 즉시 중단하세요.
+  </div>
+
+  <div class="card">
+    <h2>시작하기 — 3단계</h2>
+    <ol class="단계">
+      <li><b>① 3초 보정</b> — "세션 시작"을 누르면 3초간 방의 소음 바닥을 잽니다. 조용히 해주세요.</li>
+      <li><b>② 감도 확인</b> — 개가 실제로 짖을 때(또는 박수 등으로 흉내) 아래 레벨바가 빨갛게
+          문턱을 넘는지 확인하고, 안 넘으면 감도를 낮추세요(값이 작을수록 민감).</li>
+      <li><b>③ 모드 선택</b> — <b>관찰</b>(기저선) → <b>무작위</b>(50% 개입, N-of-1 비교) 순서를 권합니다.</li>
+    </ol>
+  </div>
+
+  <div class="card">
+    <h2>설정</h2>
+    <label for="프리셋">안정 사운드 프리셋 (전부 실시간 합성 — 파일·네트워크 0)</label>
+    <div class="행">
+      <select id="프리셋"></select>
+      <button id="미리듣기" type="button">미리듣기</button>
+    </div>
+
+    <label for="감도">감지 감도 — 소음 바닥 대비 초과분 <span id="감도값">12 dB</span></label>
+    <input id="감도" type="range" min="6" max="24" step="1" value="12">
+    <div class="주의">값이 작을수록 민감(오탐↑), 클수록 둔감(미탐↑). TV·문 소리가 자꾸 잡히면 올리세요.</div>
+
+    <label for="볼륨">재생 볼륨 <span id="볼륨값">15%</span></label>
+    <input id="볼륨" type="range" min="0.05" max="0.5" step="0.05" value="0.15">
+
+    <label for="재생길이">개입 재생 길이 <span id="재생길이값">180초</span> (재짖음 시 자동 연장)</label>
+    <input id="재생길이" type="range" min="60" max="600" step="30" value="180">
+
+    <label for="모드">실험 모드</label>
+    <select id="모드">
+      <option value="관찰">관찰 — 감지·기록만 (기저선)</option>
+      <option value="상시">상시 개입 — 모든 에피소드에 재생</option>
+      <option value="무작위" selected>무작위 개입 — 에피소드 단위 50% (권장)</option>
+    </select>
+    <div class="주의" id="모드설명">에피소드 단위 50% 무작위 개입 — seed 로 재현 가능. N-of-1 비교용.</div>
+
+    <label for="시드">무작위 배정 seed (기록·재현용 — 같은 seed 는 같은 배정 순서)</label>
+    <input id="시드" type="number" min="0" step="1">
+  </div>
+
+  <div class="card">
+    <h2>세션</h2>
+    <div class="행">
+      <button id="세션시작" class="주" type="button">세션 시작 (마이크 사용)</button>
+      <button id="세션종료" type="button" disabled>세션 종료</button>
+    </div>
+    <div id="마이크안내" class="경고" hidden style="margin-top:10px;">
+      <b>마이크 권한이 거부되었습니다.</b> 이 앱은 마이크 없이는 짖음을 감지할 수 없습니다.
+      브라우저 주소창의 자물쇠(또는 설정 → 개인정보 보호 → 마이크)에서 이 사이트(127.0.0.1)의
+      마이크를 허용한 뒤 "세션 시작"을 다시 눌러주세요. 마이크 소리는 <b>저장·전송되지 않으며</b>
+      대역 에너지 숫자만 계산 후 즉시 버려집니다.
+    </div>
+    <div class="상태줄" style="margin-top:10px;">
+      <div><b>상태</b><span id="상태값">대기 (세션 시작 전)</span></div>
+      <div><b>현재 레벨 (250–4000 Hz)</b><span id="레벨값">—</span></div>
+      <div><b>소음 바닥</b><span id="바닥값">—</span></div>
+      <div><b>감지 문턱</b><span id="문턱값">—</span></div>
+    </div>
+    <div id="레벨틀" style="margin-top:8px;"><div id="레벨바"></div></div>
+    <div class="주의" style="margin-top:6px;">
+      감지는 휴리스틱(에너지 문턱)입니다 — ML 분류가 아니므로 큰 생활 소음이 짖음으로 기록될 수
+      있습니다. 오탐 의심 행(짖음 1회·지속 0초대)은 CSV에서 사후 식별하세요. 재생 중 감지된
+      짖음은 "짖음(재생중)"으로 따로 표시됩니다(스피커 소리 자기 감지 가능성 포함).
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>이벤트 로그</h2>
+    <div id="이벤트로그"></div>
+  </div>
+
+  <div class="card">
+    <h2>에피소드</h2>
+    <table>
+      <thead><tr><th>ID</th><th>시작</th><th>짖음(회)</th><th>지속(초)</th><th>배정</th></tr></thead>
+      <tbody id="에피소드표"></tbody>
+    </table>
+    <div id="요약내용" style="margin-top:8px;"></div>
+    <div class="행" style="margin-top:10px;">
+      <button id="에피소드CSV" type="button">에피소드 CSV 내려받기</button>
+      <button id="이벤트CSV" type="button">이벤트 CSV 내려받기</button>
+    </div>
+    <div class="주의" style="margin-top:6px;">
+      에피소드 CSV(<code>에피소드ID,시작,종료,짖음횟수,지속초,개입여부,모드,seed</code>)는
+      statwise(개입/비개입 비교)·longistat(일차 추이)에 그대로 들어갑니다.
+    </div>
+  </div>
+
+  <footer>
+    calmbark 는 수의학적 조언이 아니며 치료 효과가 검증된 도구가 아닙니다. 근거 프레임워크는
+    사람 대상 문헌의 종합이고 개 대상 외삽은 미검증입니다(README 정직성 절 참조). 심한 분리불안이
+    의심되면 수의사·행동 전문가와 상담하세요. 모든 처리는 이 기기 안에서만 일어납니다 —
+    네트워크 요청 0 · 녹음 저장 0.
+  </footer>
+</main>
+<script type="module" src="./app.js"></script>
+</body>
+</html>
