@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import argparse
+import codecs
 import csv
 import json
 import math
@@ -17,7 +18,13 @@ from typing import Dict, List, Optional
 from . import __version__
 from .analyze import analyze
 from .config import SCORE_METHODS, ConfigError, auto_config, load_config
-from .dataio import DataError, SurveyData, load_csv
+from .dataio import (
+    DataError,
+    SurveyData,
+    load_csv,
+    normalize_label,
+    sniff_delimiter,
+)
 from .report import render, render_markdown
 
 
@@ -47,6 +54,33 @@ def build_parser() -> argparse.ArgumentParser:
         "Welch t/ANOVA·효과크기(Hedges g)·Holm 보정 p 를 냄. 문항 분석에서는 제외됨",
     )
     p.add_argument(
+        "--time-col",
+        metavar="이름",
+        help="사전-사후(반복측정) 시점 컬럼. 같은 ID를 시점 간에 짝지어 변화량·대응표본 t·"
+        "효과크기(dz)·검사-재검사 ICC·반응자 분석을 냄. 문항 분석에서는 제외됨 "
+        "(--id-col 로 응답자 ID 를 함께 지정해야 함)",
+    )
+    p.add_argument("--time-pre", metavar="라벨", help="사전 시점 라벨(시점이 3개 이상이면 필수)")
+    p.add_argument("--time-post", metavar="라벨", help="사후 시점 라벨(시점이 3개 이상이면 필수)")
+    p.add_argument(
+        "--pair-id",
+        action="append",
+        default=[],
+        metavar="이름",
+        help="사전-사후 짝짓기에 쓸 ID 컬럼(기본: --id-col 전체 조합). 여러 번 지정 가능",
+    )
+    p.add_argument(
+        "--nonparam",
+        action="store_true",
+        help="순위 기반(비모수) 검정을 함께 출력: 집단비교는 Mann-Whitney U/Kruskal-Wallis, "
+        "사전-사후는 Wilcoxon 부호순위. t/ANOVA 를 대체하지 않는 민감도 분석",
+    )
+    p.add_argument(
+        "--encoding",
+        metavar="utf-8",
+        help="CSV 인코딩(기본: UTF-8 로 읽고 실패하면 CP949 자동 시도). 예: cp949, euc-kr",
+    )
+    p.add_argument(
         "--na-number",
         action="append",
         default=[],
@@ -54,7 +88,11 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="값",
         help="결측 코드로 쓰인 숫자(예: --na-number 999). 여러 번 지정 가능",
     )
-    p.add_argument("--delimiter", default=",", help="CSV 구분자 (기본: 콤마). 'tab'/'\\t' 는 탭")
+    p.add_argument(
+        "--delimiter",
+        default=",",
+        help="CSV 구분자 (기본: 콤마). 'tab'/'\\t' 는 탭, 'auto' 는 헤더를 보고 자동 판별",
+    )
     p.add_argument(
         "--score-method",
         choices=SCORE_METHODS,
@@ -131,6 +169,12 @@ def _write_scores_csv(path: str, data: SurveyData, result: Dict[str, object]) ->
     write_group = bool(group_col) and group_col not in id_cols
     if write_group:
         header.append(_csv_safe(_uniq(str(group_col))))
+    # 시점 컬럼도 함께 낸다 — 반복측정 자료에서 시점 없이 점수만 있으면 어느 방문의
+    # 값인지 알 수 없어 병합 자체가 불가능하다.
+    time_col = getattr(data, "time_column", None)
+    write_time = bool(time_col) and time_col not in id_cols
+    if write_time:
+        header.append(_csv_safe(_uniq(str(time_col))))
     for s in subs:
         header.append(_csv_safe(_uniq(str(s["name"]))))
         # 심각도 구간이 정의된 하위척도는 응답자별 구간 라벨도 함께 낸다
@@ -149,6 +193,9 @@ def _write_scores_csv(path: str, data: SurveyData, result: Dict[str, object]) ->
             if write_group:
                 gv = data.group_values[r] if r < len(data.group_values) else ""
                 row.append(_csv_safe(gv))
+            if write_time:
+                tv = data.time_values[r] if r < len(data.time_values) else ""
+                row.append(_csv_safe(tv))
             for s in subs:
                 val = s["scores"][r]
                 # 비유한값(inf/nan)은 셀에 쓰지 않는다 — 엑셀·통계패키지가 텍스트로
@@ -203,10 +250,53 @@ def run(argv: Optional[List[str]] = None) -> int:
         print("오류: --ci-level 은 0과 1 사이여야 합니다.", file=sys.stderr)
         return 2
 
-    delimiter = "\t" if args.delimiter in ("tab", "\\t", "\t") else args.delimiter
+    if args.delimiter == "auto":
+        try:
+            delimiter = sniff_delimiter(args.csv, args.encoding)
+        except OSError as e:
+            print(f"오류: 파일을 읽을 수 없습니다: {e}", file=sys.stderr)
+            return 2
+        shown = {",": "콤마", "\t": "탭", ";": "세미콜론", "|": "파이프"}.get(
+            delimiter, delimiter
+        )
+        print(f"참고: 구분자를 '{shown}' 로 자동 판별했습니다.", file=sys.stderr)
+    else:
+        delimiter = "\t" if args.delimiter in ("tab", "\\t", "\t") else args.delimiter
     if len(delimiter) != 1:
-        print("오류: --delimiter 는 한 글자여야 합니다(탭은 'tab').", file=sys.stderr)
+        print(
+            "오류: --delimiter 는 한 글자여야 합니다(탭은 'tab', 자동판별은 'auto').",
+            file=sys.stderr,
+        )
         return 2
+
+    if args.encoding:
+        try:
+            # 빈 바이트열 decode 는 코덱을 찾지 않고 통과하므로 codecs.lookup 으로 확인한다.
+            codecs.lookup(args.encoding)
+        except LookupError:
+            print(f"오류: 알 수 없는 인코딩입니다: {args.encoding}", file=sys.stderr)
+            return 2
+
+    # 시점 라벨은 자료 쪽과 같은 방식으로 정규화해야 보이지 않는 공백 때문에 매칭이
+    # 조용히 실패하지 않는다(엑셀에서 복사한 라벨에 NBSP 가 흔하다).
+    time_pre = normalize_label(args.time_pre) if args.time_pre is not None else None
+    time_post = normalize_label(args.time_post) if args.time_post is not None else None
+    if (time_pre is None) != (time_post is None):
+        print("오류: --time-pre 와 --time-post 는 함께 지정해야 합니다.", file=sys.stderr)
+        return 2
+    if (time_pre or time_post) and not args.time_col:
+        print("오류: --time-pre/--time-post 는 --time-col 과 함께 써야 합니다.", file=sys.stderr)
+        return 2
+    if args.pair_id and not args.time_col:
+        print("경고: --pair-id 는 --time-col 과 함께 써야 적용됩니다(무시됨).", file=sys.stderr)
+    if args.nonparam and not (args.group_col or args.time_col):
+        # 비교 대상이 없으면 순위 검정이 붙을 표 자체가 없다 — 조용히 아무것도 안 나오면
+        # 사용자는 '비모수로 돌렸다'고 착각한다.
+        print(
+            "경고: --nonparam 은 --group-col 또는 --time-col 과 함께 써야 출력됩니다"
+            "(비교 대상이 없어 무시됨).",
+            file=sys.stderr,
+        )
 
     try:
         data = load_csv(
@@ -215,6 +305,8 @@ def run(argv: Optional[List[str]] = None) -> int:
             na_numbers=args.na_number,
             delimiter=delimiter,
             group_column=args.group_col,
+            time_column=args.time_col,
+            encoding=args.encoding,
         )
     except FileNotFoundError:
         print(f"오류: 파일을 찾을 수 없습니다: {args.csv}", file=sys.stderr)
@@ -226,11 +318,19 @@ def run(argv: Optional[List[str]] = None) -> int:
         print(f"오류: 파일을 읽을 권한이 없습니다: {args.csv}", file=sys.stderr)
         return 2
     except UnicodeDecodeError:
-        print(
-            "데이터 오류: CSV를 UTF-8로 읽을 수 없습니다. "
-            "엑셀이면 'CSV UTF-8'로 다시 저장하세요.",
-            file=sys.stderr,
-        )
+        if args.encoding:
+            print(
+                f"데이터 오류: CSV를 '{args.encoding}' 로 읽을 수 없습니다. 파일의 실제 "
+                "인코딩을 확인하거나, --encoding 을 빼고 다시 실행해 보세요"
+                "(UTF-8 → CP949 순으로 자동 시도합니다).",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                "데이터 오류: CSV를 UTF-8(또는 CP949)로 읽을 수 없습니다. "
+                "--encoding 으로 인코딩을 직접 지정하거나, 엑셀이면 'CSV UTF-8'로 저장하세요.",
+                file=sys.stderr,
+            )
         return 2
     except DataError as e:
         print(f"데이터 오류: {e}", file=sys.stderr)
@@ -286,6 +386,26 @@ def run(argv: Optional[List[str]] = None) -> int:
         print(f"설정 오류: {e}", file=sys.stderr)
         return 2
 
+    # UTF-8 이 아닌 인코딩으로 읽혔으면 알린다(글자가 깨지지 않았는지 확인용).
+    if (
+        getattr(data, "encoding_used", "utf-8-sig") != "utf-8-sig"
+        and not getattr(data, "encoding_forced", False)
+    ):
+        print(
+            f"참고: UTF-8 로 읽히지 않아 '{data.encoding_used}' 로 읽었습니다 — "
+            "리포트의 한글 컬럼명이 깨져 보이면 --encoding 으로 직접 지정하세요.",
+            file=sys.stderr,
+        )
+
+    unknown_pair = [c for c in (args.pair_id or []) if c not in data.id_columns]
+    if unknown_pair:
+        print(
+            "오류: --pair-id 로 지정한 컬럼은 --id-col 로도 지정해야 합니다"
+            "(분석 문항과 구분하기 위함): " + ", ".join(unknown_pair),
+            file=sys.stderr,
+        )
+        return 2
+
     # 점수 방식 CLI 덮어쓰기(config 값보다 우선).
     if args.score_method is not None:
         cfg.score_method = args.score_method
@@ -307,6 +427,10 @@ def run(argv: Optional[List[str]] = None) -> int:
             item_freq=args.item_freq,
             quality_check=args.quality,
             longstring_min=args.longstring_min,
+            use_nonparam=args.nonparam,
+            time_pre=time_pre,
+            time_post=time_post,
+            pair_id_columns=args.pair_id or None,
         )
     except ValueError as e:
         print(f"분석 오류: {e}", file=sys.stderr)
@@ -319,16 +443,6 @@ def run(argv: Optional[List[str]] = None) -> int:
             file=sys.stderr,
         )
         return 2
-
-    # 점수 CSV 내보내기(선택).
-    if args.scores_out:
-        try:
-            _write_scores_csv(args.scores_out, data, result)
-        except OSError as e:
-            print(f"오류: 점수 CSV를 저장할 수 없습니다: {e}", file=sys.stderr)
-            return 2
-        # 알림은 stderr 로 — stdout 에 섞이면 `--format json | jq` 파이프가 깨진다.
-        print(f"점수 저장됨: {args.scores_out}", file=sys.stderr)
 
     fmt = args.format
     if fmt is None:
@@ -368,6 +482,17 @@ def run(argv: Optional[List[str]] = None) -> int:
         print(f"저장됨: {args.output}", file=sys.stderr)
     else:
         print(text)
+
+    # 점수 CSV 내보내기(선택). 리포트를 성공적으로 낸 **뒤에** 쓴다 — 뒤이어 실패하는
+    # 실행이 응답자 단위 임상 점수 파일만 덩그러니 남기지 않도록.
+    if args.scores_out:
+        try:
+            _write_scores_csv(args.scores_out, data, result)
+        except OSError as e:
+            print(f"오류: 점수 CSV를 저장할 수 없습니다: {e}", file=sys.stderr)
+            return 2
+        # 알림은 stderr 로 — stdout 에 섞이면 `--format json | jq` 파이프가 깨진다.
+        print(f"점수 저장됨: {args.scores_out}", file=sys.stderr)
     return 0
 
 

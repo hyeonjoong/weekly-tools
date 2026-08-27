@@ -1,0 +1,23 @@
+{
+  "_메모": "사전-사후(반복측정) 예시 설정. ISI 7문항 총점(0~28) + 주간기능 3문항. mcid·severity_bands 의 값은 이 도구가 검증한 것이 아니라 사용자가 원 논문(ISI: Morin et al., Sleep 2011)에서 옮겨 적어야 하는 값입니다.",
+  "scale_min": 0,
+  "scale_max": 4,
+  "score_method": "sum",
+  "subscales": {
+    "불면증상(ISI)": ["ISI1", "ISI2", "ISI3", "ISI4", "ISI5", "ISI6", "ISI7"],
+    "주간기능": ["DAY1", "DAY2", "DAY3"]
+  },
+  "reverse_items": ["DAY3"],
+  "min_valid_ratio": 0.5,
+  "mcid": {
+    "불면증상(ISI)": 6
+  },
+  "severity_bands": {
+    "불면증상(ISI)": [
+      [0, 7, "임상적 불면증 없음"],
+      [8, 14, "역치하 불면증"],
+      [15, 21, "중등도 임상적 불면증"],
+      [22, 28, "중증 임상적 불면증"]
+    ]
+  }
+}

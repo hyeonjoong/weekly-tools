@@ -168,11 +168,13 @@ def test_all_known_config_keys_accepted():
         "min_valid_ratio": 0.75,
         "score_method": "sum",
         "severity_bands": {"S": [[0, 3, "낮음"], [4, 8, "높음"]]},
+        "mcid": {"S": 2},
     })
     assert set(KNOWN_KEYS) == {
         "subscales", "reverse_items", "scale_min", "scale_max",
-        "min_valid_ratio", "score_method", "severity_bands",
+        "min_valid_ratio", "score_method", "severity_bands", "mcid",
     }
+    assert cfg.mcid == {"S": 2.0}
     assert cfg.reverse_items == ["B"]
     assert cfg.scale_min == 0.0 and cfg.scale_max == 4.0
     assert cfg.min_valid_ratio == 0.75

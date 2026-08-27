@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import csv
 import math
+import unicodedata
 from typing import Dict, List, Optional, Sequence
 
 # 결측으로 간주할 문자열(소문자 비교, 공백 제거 후).
@@ -25,12 +26,21 @@ _INVISIBLE = dict.fromkeys(
 _NBSP_MAP = {ord(" "): " ", ord("　"): " "}
 
 
+def _strip_control(s: str) -> str:
+    """제어문자(Cc) 제거 — ANSI 이스케이프가 JSON·점수 CSV로 새어나가는 것을 막는다.
+
+    텍스트/마크다운 리포트는 렌더링 단계에서도 걸러내지만, `--format json | jq` 나
+    `cat 점수.csv` 는 그 경로를 타지 않는다. 그래서 입력 단계에서 한 번 더 없앤다.
+    """
+    return "".join(ch for ch in s if ch == " " or not unicodedata.category(ch) == "Cc")
+
+
 def normalize_label(raw: str) -> str:
-    """집단 라벨 정규화: 보이지 않는 문자 제거 · 비분리공백→공백 · 양끝 공백 제거.
+    """집단 라벨 정규화: 제어문자·보이지 않는 문자 제거 · 비분리공백→공백 · 양끝 공백 제거.
 
     라벨을 '보이는 대로' 다루기 위한 최소 정규화다. 대소문자·내부 공백은 건드리지 않는다
     (실제로 다른 군일 수 있으므로 임의로 합치지 않는다)."""
-    return str(raw).translate(_NBSP_MAP).translate(_INVISIBLE).strip()
+    return _strip_control(str(raw).translate(_NBSP_MAP).translate(_INVISIBLE)).strip()
 
 
 class SurveyData:
@@ -53,7 +63,18 @@ class SurveyData:
         group_column: Optional[str] = None,
         group_values: Optional[List[str]] = None,
         source_columns: Optional[List[str]] = None,
+        time_column: Optional[str] = None,
+        time_values: Optional[List[str]] = None,
+        encoding_used: str = "utf-8-sig",
+        encoding_forced: bool = False,
     ):
+        # 반복측정(사전-사후) 기준 컬럼과 응답자 행별 시점 라벨. 문항 분석에서는 제외된다.
+        self.time_column = time_column
+        self.time_values = time_values or []
+        # 실제로 성공한 파일 인코딩(UTF-8 이 아니면 리포트에 알린다)과, 그것이 사용자가
+        # --encoding 으로 지정한 값인지(=자동 판별이 아닌지) 여부.
+        self.encoding_used = encoding_used
+        self.encoding_forced = encoding_forced
         self.columns = columns
         self.rows = rows
         # --id-col 로 지정했으나 헤더에 없던 이름들(오타 감지용).
@@ -143,31 +164,114 @@ def _classify_cell(
     return val, "ok"
 
 
+# 인코딩 자동 판별 후보. 한국 임상현장에서 받는 CSV는 UTF-8 아니면 엑셀(Windows)이
+# 저장한 CP949(=EUC-KR 상위집합)가 사실상 전부다. UTF-8 로 못 읽으면 CP949 로 한 번 더
+# 시도하고, 어떤 인코딩으로 읽었는지 리포트에 밝힌다(조용히 글자를 뭉개지 않기 위해).
+ENCODING_CANDIDATES = ("utf-8-sig", "cp949")
+
+# 구분자 자동판별(--delimiter auto) 후보.
+DELIMITER_CANDIDATES = (",", "\t", ";", "|")
+
+
+def sniff_delimiter(path: str, encoding: Optional[str] = None) -> str:
+    """헤더 한 줄을 읽어 구분자를 추정한다(필드가 가장 많이 쪼개지는 후보).
+
+    csv.Sniffer 는 한글 헤더·따옴표 섞인 실제 임상 CSV에서 자주 틀리므로, 후보별로
+    실제 파싱해 필드 수가 가장 많은 것을 고른다(동점이면 콤마 우선). 판별에 실패하면
+    콤마를 돌려준다.
+    """
+    encs = (encoding,) if encoding else ENCODING_CANDIDATES
+    line = None
+    for enc in encs:
+        try:
+            with open(path, "r", encoding=enc, newline="") as fh:
+                for raw in fh:
+                    if raw.strip():
+                        line = raw
+                        break
+            break
+        except UnicodeDecodeError:
+            continue
+    if not line:
+        return ","
+    best, best_n = ",", 0
+    for cand in DELIMITER_CANDIDATES:
+        try:
+            fields = next(csv.reader([line], delimiter=cand))
+        except csv.Error:
+            continue
+        n = len([f for f in fields if f.strip() != ""])
+        if n > best_n:
+            best, best_n = cand, n
+    return best
+
+
 def load_csv(
     path: str,
     id_columns: Optional[Sequence[str]] = None,
     na_numbers: Optional[Sequence[float]] = None,
     delimiter: str = ",",
     group_column: Optional[str] = None,
+    time_column: Optional[str] = None,
+    encoding: Optional[str] = None,
 ) -> SurveyData:
     """설문 CSV를 읽어 SurveyData로 변환.
 
     id_columns: 응답자 ID 등 분석에서 제외할 컬럼 이름들.
     na_numbers: 결측 코드로 쓰인 숫자들(예: 999, -9).
     group_column: 집단 비교 기준 컬럼(치료군·성별 등). 문항 분석에서는 제외된다.
+    time_column: 사전-사후(반복측정) 시점 컬럼. 문항 분석에서는 제외된다.
+    encoding: 파일 인코딩. None 이면 UTF-8 → CP949 순으로 자동 시도한다.
     """
+    encs = (encoding,) if encoding else ENCODING_CANDIDATES
+    first_err: Optional[UnicodeDecodeError] = None
+    for enc in encs:
+        try:
+            return _load_csv_with_encoding(
+                path,
+                encoding=enc,
+                id_columns=id_columns,
+                na_numbers=na_numbers,
+                delimiter=delimiter,
+                group_column=group_column,
+                time_column=time_column,
+                encoding_forced=bool(encoding),
+            )
+        except UnicodeDecodeError as e:
+            # 인코딩 후보를 바꿔 처음부터 다시 읽는다(부분 파싱 결과는 버린다).
+            first_err = first_err or e
+            continue
+    raise first_err  # type: ignore[misc]
+
+
+def _load_csv_with_encoding(
+    path: str,
+    encoding: str,
+    id_columns: Optional[Sequence[str]] = None,
+    na_numbers: Optional[Sequence[float]] = None,
+    delimiter: str = ",",
+    group_column: Optional[str] = None,
+    time_column: Optional[str] = None,
+    encoding_forced: bool = False,
+) -> SurveyData:
+    """load_csv 의 본체. 인코딩 하나를 고정해 읽는다."""
     id_set = set(id_columns or [])
     na_nums = list(na_numbers or [])
     group_column = group_column.strip() if isinstance(group_column, str) else None
     if group_column == "":
         group_column = None
-    with open(path, "r", encoding="utf-8-sig", newline="") as fh:
+    time_column = time_column.strip() if isinstance(time_column, str) else None
+    if time_column == "":
+        time_column = None
+    with open(path, "r", encoding=encoding, newline="") as fh:
         reader = csv.reader(fh, delimiter=delimiter)
         try:
             header = next(reader)
         except StopIteration:
             raise DataError("빈 파일입니다.")
-        header = [h.strip() for h in header]
+        # 헤더도 라벨과 같은 정규화를 거친다. --encoding utf-8 을 직접 준 경우 BOM 이
+        # 남아 첫 컬럼이 '\ufeffID' 가 되고, --id-col ID 가 조용히 매칭에 실패한다.
+        header = [normalize_label(h) for h in header]
         if not header or all(h == "" for h in header):
             raise DataError("헤더(첫 행)가 비어 있습니다.")
         if len(set(header)) != len(header):
@@ -179,12 +283,21 @@ def load_csv(
                 f"--group-col 로 지정한 '{group_column}' 컬럼이 헤더에 없습니다. "
                 "헤더의 컬럼: " + ", ".join(header)
             )
-        # 집단 컬럼은 문항이 아니므로 분석에서 빼되, ID 처럼 중복 판정에는 쓰지 않는다.
-        keep_cols = [h for h in header if h not in id_set and h != group_column]
+        if time_column is not None and time_column not in header:
+            raise DataError(
+                f"--time-col 로 지정한 '{time_column}' 컬럼이 헤더에 없습니다. "
+                "헤더의 컬럼: " + ", ".join(header)
+            )
+        # 집단·시점 컬럼은 문항이 아니므로 분석에서 빼되, ID 처럼 중복 판정에는 쓰지 않는다.
+        keep_cols = [
+            h for h in header
+            if h not in id_set and h != group_column and h != time_column
+        ]
         id_cols_present = [h for h in header if h in id_set]
         rows: List[Dict[str, Optional[float]]] = []
         id_values: List[Dict[str, str]] = []
         group_values: List[str] = []
+        time_values: List[str] = []
         source_lines: List[int] = []
         skipped_blank: List[int] = []
         unreadable: Dict[str, Dict[str, object]] = {}
@@ -203,6 +316,7 @@ def load_csv(
             row: Dict[str, Optional[float]] = {}
             ids: Dict[str, str] = {}
             gval = ""
+            tval = ""
             for name, cell in zip(header, record):
                 # 집단 컬럼은 ID 컬럼으로도 동시에 지정될 수 있으므로 먼저 담는다.
                 if name == group_column:
@@ -211,10 +325,16 @@ def load_csv(
                     # 결측 코드끼리 검정하는 유령 집단이 생긴다 → 라벨 없음으로 본다.
                     if _classify_cell(gval, DEFAULT_NA, na_nums)[1] in ("blank", "na"):
                         gval = ""
+                if name == time_column:
+                    tval = normalize_label(cell)
+                    # 시점 셀의 결측 표기('NA', '.', 999…)는 '시점 없음'으로 본다 —
+                    # 결측코드가 하나의 시점으로 잡히면 유령 시점과 짝지어진다.
+                    if _classify_cell(tval, DEFAULT_NA, na_nums)[1] in ("blank", "na"):
+                        tval = ""
                 if name in id_set:
                     ids[name] = cell.strip()
                     continue
-                if name == group_column:
+                if name in (group_column, time_column):
                     continue
                 val, kind = _classify_cell(cell, DEFAULT_NA, na_nums)
                 row[name] = val
@@ -227,6 +347,7 @@ def load_csv(
             rows.append(row)
             id_values.append(ids)
             group_values.append(gval)
+            time_values.append(tval)
             source_lines.append(lineno)
 
     if not rows:
@@ -244,4 +365,8 @@ def load_csv(
         group_column=group_column,
         group_values=group_values,
         source_columns=list(header),
+        time_column=time_column,
+        time_values=time_values,
+        encoding_used=encoding,
+        encoding_forced=encoding_forced,
     )

@@ -201,3 +201,81 @@ def norm_ppf(p: float) -> float:
         if hi - lo <= 1e-14 * max(1.0, abs(hi)):
             break
     return 0.5 * (lo + hi)
+
+
+def norm_sf(x: float) -> float:
+    """표준정규 상측 꼬리확률 P(Z ≥ x).
+
+    `1 - norm_cdf(x)` 로 계산하면 x≳8 에서 자리수 손실로 **정확히 0** 이 되어
+    p=0 이라는 존재할 수 없는 값이 리포트·JSON에 실린다. erfc 를 직접 써서
+    아주 작은 꼬리(~7e-323, 배정밀도 비정규수 한계)까지 유지한다. 그보다 더 작은
+    꼬리(|x|≳38.5)는 double 로 표현할 수 없어 0.0 이 된다 — 이는 구현의 한계가 아니라
+    부동소수의 한계다(scipy 는 |x|≳38 에서 이미 0.0 을 낸다).
+    """
+    return 0.5 * math.erfc(x / math.sqrt(2.0))
+
+
+def _gamma_p_series(a: float, x: float) -> float:
+    """하측 정규화 불완전 감마 P(a,x) 의 급수전개(x < a+1 에서 빠르게 수렴)."""
+    ap = a
+    total = 1.0 / a
+    delta = total
+    # x < a+1 구간에서 급수는 대략 2a 항이 필요하다. 고정 상한(_MAXIT)만 쓰면 a 가 큰
+    # 경우(카이제곱 df 가 수천 이상) 수렴하지 않은 채 조용히 빠져나와 값이 틀어진다.
+    max_it = max(_MAXIT, int(4.0 * a) + 100)
+    for _ in range(max_it):
+        ap += 1.0
+        delta *= x / ap
+        total += delta
+        if abs(delta) < abs(total) * _EPS:
+            break
+    return total * math.exp(-x + a * math.log(x) - math.lgamma(a))
+
+
+def _gamma_q_cf(a: float, x: float) -> float:
+    """상측 정규화 불완전 감마 Q(a,x) 의 연속분수(x ≥ a+1 에서 빠르게 수렴, Lentz)."""
+    b = x + 1.0 - a
+    c = 1.0 / _FPMIN
+    d = 1.0 / b
+    h = d
+    for i in range(1, _MAXIT + 1):
+        an = -i * (i - a)
+        b += 2.0
+        d = an * d + b
+        if abs(d) < _FPMIN:
+            d = _FPMIN
+        c = b + an / c
+        if abs(c) < _FPMIN:
+            c = _FPMIN
+        d = 1.0 / d
+        delta = d * c
+        h *= delta
+        if abs(delta - 1.0) < _EPS:
+            break
+    return h * math.exp(-x + a * math.log(x) - math.lgamma(a))
+
+
+def gammainc_upper_reg(a: float, x: float) -> float:
+    """상측 정규화 불완전 감마 Q(a,x) = Γ(a,x)/Γ(a). a>0, x≥0. 반환 ∈[0,1]."""
+    if a <= 0:
+        raise ValueError("gammainc_upper_reg: a는 양수여야 합니다.")
+    if x < 0:
+        raise ValueError("gammainc_upper_reg: x는 음수일 수 없습니다.")
+    if x == 0.0:
+        return 1.0
+    if x < a + 1.0:
+        return min(max(1.0 - _gamma_p_series(a, x), 0.0), 1.0)
+    return min(max(_gamma_q_cf(a, x), 0.0), 1.0)
+
+
+def chi2_sf(x: float, df: float) -> float:
+    """카이제곱 분포의 상측 꼬리확률 P(χ²_df ≥ x) = Q(df/2, x/2). df>0.
+
+    Kruskal-Wallis 검정의 p 값에 쓴다. `1-CDF` 가 아니라 상측 꼬리를 직접 계산해
+    큰 H 값(강한 집단차)에서도 p 가 0.0 으로 뭉개지지 않게 한다.
+    """
+    if df <= 0:
+        raise ValueError("chi2_sf: df는 양수여야 합니다.")
+    if x <= 0.0:
+        return 1.0
+    return gammainc_upper_reg(df / 2.0, x / 2.0)

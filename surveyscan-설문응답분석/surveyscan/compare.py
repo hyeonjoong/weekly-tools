@@ -24,7 +24,7 @@ from __future__ import annotations
 import math
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from . import special, stats
+from . import nonparam, special, stats
 
 # 집단 수 상한. 이보다 많으면 사실상 연속형 변수를 그룹으로 지정한 것이라
 # 비교표가 의미를 잃는다(그리고 화면을 뒤덮는다).
@@ -212,12 +212,14 @@ def compare_subscales(
     column: str,
     conf: float = 0.95,
     group_alphas: Optional[Dict[str, Dict[str, object]]] = None,
+    use_nonparam: bool = False,
 ) -> Optional[Dict[str, object]]:
     """하위척도별 집단 비교표를 만든다.
 
     subscales   : analyze_subscale 결과들(‘scores’ 포함, 응답자 순서 유지).
     group_values: 응답자별 집단 라벨(원문 문자열). 빈 값은 '미분류'로 제외.
     group_alphas: {하위척도명: {집단라벨: α}} — 집단별 신뢰도(있으면 표에 함께 표기).
+    use_nonparam: True 면 순위 기반 검정(Mann-Whitney / Kruskal-Wallis)을 함께 낸다.
 
     집단이 2개 미만이거나 MAX_GROUPS 초과면 None(사유 포함 dict)을 돌려준다.
     """
@@ -276,6 +278,7 @@ def compare_subscales(
         usable = [g for g in gstats if int(g["n"]) >= 2]
         test: Optional[Dict[str, object]] = None
         effect: Optional[Dict[str, object]] = None
+        np_test: Optional[Dict[str, object]] = None
         reason: Optional[str] = None
         # 평균차·g 의 부호가 어느 집단 기준인지 리포트가 명시할 수 있도록 남긴다
         # (부호만 보고 반대로 읽는 것이 가장 흔한 해석 오류다).
@@ -288,10 +291,16 @@ def compare_subscales(
             ys = buckets[str(usable[1]["label"])]
             test = welch_ttest(xs, ys, conf)
             effect = hedges_g(xs, ys, conf)
+            if use_nonparam:
+                np_test = nonparam.mannwhitney_u(xs, ys)
             if test is None:
                 reason = "두 집단의 점수 분산이 0이라 t 검정을 계산할 수 없습니다."
         else:
             test = welch_anova([buckets[str(g["label"])] for g in usable])
+            if use_nonparam:
+                np_test = nonparam.kruskal_wallis(
+                    [buckets[str(g["label"])] for g in usable]
+                )
             if test is None:
                 reason = "일부 집단의 점수 분산이 0이라 Welch ANOVA를 계산할 수 없습니다."
         # 점수가 2명 미만인 집단은 검정에서 빠진다 — 조용히 빼면 '전체 비교'로 오해되므로
@@ -309,6 +318,7 @@ def compare_subscales(
                 "diff_labels": diff_labels,
                 "test": test,
                 "effect": effect,
+                "nonparam": np_test,
                 "reason": reason,
                 "p": (test or {}).get("p"),
                 "p_holm": None,
@@ -326,5 +336,6 @@ def compare_subscales(
         "reason": None,
         "n_no_label": n_no_label,
         "n_tests": sum(1 for r in rows if r["p"] is not None),
+        "nonparam": use_nonparam,
         "subscales": rows,
     }

@@ -8,7 +8,7 @@ from __future__ import annotations
 import math
 from typing import Dict, List, Optional
 
-from . import compare, factor, quality, stats
+from . import compare, factor, paired, quality, stats
 from .config import SurveyConfig, band_index, band_label
 from .dataio import SurveyData
 
@@ -289,6 +289,24 @@ def analyze_subscale(
     }
 
 
+def pair_keys(
+    data: SurveyData, pair_id_columns: Optional[List[str]] = None
+) -> List[str]:
+    """응답자 행별 짝짓기 키(ID 값 조합). 값이 하나도 없으면 빈 문자열.
+
+    ID 컬럼이 여러 개면(예: 기관+환자번호) 조합을 하나의 식별자로 본다.
+    --pair-id 로 일부만 골라 쓸 수도 있다(예: ID 는 방문마다 달라지고 환자번호만 같은 경우).
+    """
+    cols = [c for c in (pair_id_columns or data.id_columns) if c in data.id_columns]
+    out: List[str] = []
+    for ids in data.id_values:
+        parts = [str(ids.get(c, "")).strip() for c in cols]
+        out.append(" / ".join(parts) if any(parts) else "")
+    if len(out) < data.n_respondents:
+        out += [""] * (data.n_respondents - len(out))
+    return out
+
+
 def _group_alphas(
     data: SurveyData, cfg: SurveyConfig, items: List[str], group_values: List[str],
 ) -> Dict[str, Optional[float]]:
@@ -361,6 +379,10 @@ def analyze(
     item_freq: bool = False,
     quality_check: bool = False,
     longstring_min: Optional[int] = None,
+    use_nonparam: bool = False,
+    time_pre: Optional[str] = None,
+    time_post: Optional[str] = None,
+    pair_id_columns: Optional[List[str]] = None,
 ) -> Dict[str, object]:
     """전체 분석 실행. config에 명시된 모든 문항/하위척도를 검증·분석한다.
 
@@ -368,6 +390,9 @@ def analyze(
     item_freq: True면 문항별 응답 선택지 빈도표를 함께 계산(척도 범위 정수일 때).
     quality_check: True면 응답자별 부주의응답 선별 지표(longstring·IRV·결측)를 계산.
     longstring_min: longstring 플래그 기준(None이면 max(3, ceil(k/2)) 휴리스틱).
+    use_nonparam: True면 순위 기반 검정(Mann-Whitney/Kruskal-Wallis/Wilcoxon)을 함께 계산.
+    time_pre/time_post: 사전-사후 비교에 쓸 시점 라벨(시점이 3개 이상이면 필수).
+    pair_id_columns: 사전-사후 짝짓기에 쓸 ID 컬럼(없으면 --id-col 전체를 조합해 사용).
     """
     # config 문항이 데이터에 실제로 있는지 확인
     missing_cols = [it for it in cfg.all_items() if it not in data.columns]
@@ -439,8 +464,55 @@ def analyze(
             for s in subscales
         }
         group_compare = compare.compare_subscales(
-            subscales, gvals, group_column, conf, galphas
+            subscales, gvals, group_column, conf, galphas, use_nonparam
         )
+
+    # 사전-사후(반복측정) 비교(--time-col 지정 시).
+    prepost = None
+    time_column = getattr(data, "time_column", None)
+    if time_column:
+        tvals = list(getattr(data, "time_values", []) or [])
+        if len(tvals) < data.n_respondents:
+            tvals += [""] * (data.n_respondents - len(tvals))
+        keys = pair_keys(data, pair_id_columns)
+        gvals_p = list(getattr(data, "group_values", []) or [])
+        if gvals_p and len(gvals_p) < data.n_respondents:
+            gvals_p += [""] * (data.n_respondents - len(gvals_p))
+        prepost = paired.compare_prepost(
+            subscales,
+            keys,
+            tvals,
+            time_column,
+            pre=time_pre,
+            post=time_post,
+            conf=conf,
+            mcid=dict(cfg.mcid),
+            group_values=gvals_p if group_column else None,
+            group_column=group_column,
+            use_nonparam=use_nonparam,
+            id_label=" / ".join(pair_id_columns or data.id_columns),
+        )
+        # 시점별 α — 같은 척도가 두 시점에서 비슷한 신뢰도를 보이는지(측정 안정성) 점검.
+        if prepost.get("usable"):
+            # α는 **짝지어진 행만**으로 계산한다. 시점의 모든 행을 쓰면 짝짓기에서 뺀 행
+            # (중복 입력·한 시점만 있는 ID)까지 섞여, 표에 적힌 N 과 다른 표본의 α가
+            # 나란히 찍힌다(리뷰 지적 D3).
+            info = paired.build_pairs(
+                keys, tvals, str(prepost["pre"]), str(prepost["post"])
+            )
+            used = set()
+            for _key, i_pre, i_post in info["pairs"]:
+                used.add(i_pre)
+                used.add(i_post)
+            tvals = [t if i in used else "" for i, t in enumerate(tvals)]
+            talphas = {
+                str(s["name"]): _group_alphas(data, cfg, list(s["items"]), tvals)  # type: ignore[arg-type]
+                for s in subscales
+            }
+            for row in prepost["subscales"]:
+                a = talphas.get(str(row["name"]), {})
+                row["alpha_pre"] = a.get(str(prepost.get("pre")))
+                row["alpha_post"] = a.get(str(prepost.get("post")))
 
     total_cells = data.n_respondents * len(items_all)
     missing_cells = sum(d["n_missing"] for d in descriptives)
@@ -472,7 +544,14 @@ def analyze(
         "subscale_corr": quality.subscale_correlations(subscales),
         "group_column": group_column,
         "group_compare": group_compare,
-        "duplicate_ids": quality.duplicate_ids(data),
+        "time_column": time_column,
+        "prepost": prepost,
+        "encoding_used": getattr(data, "encoding_used", "utf-8-sig"),
+        "encoding_forced": bool(getattr(data, "encoding_forced", False)),
+        "duplicate_ids": quality.duplicate_ids(
+            data,
+            list(getattr(data, "time_values", []) or []) if time_column else None,
+        ),
         "quality": (
             quality.respondent_quality(data, items_all, longstring_min)
             if quality_check else None
