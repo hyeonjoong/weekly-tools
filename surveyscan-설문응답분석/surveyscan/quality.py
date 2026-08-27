@@ -105,26 +105,39 @@ def respondent_quality(
     }
 
 
-def duplicate_ids(data: SurveyData) -> List[Dict[str, object]]:
+def duplicate_ids(
+    data: SurveyData, time_values: Optional[Sequence[str]] = None
+) -> List[Dict[str, object]]:
     """ID 컬럼 값이 중복된 응답자 그룹(이중입력·병합오류 탐지).
 
     ID 컬럼이 여러 개면 그 조합(튜플)을 하나의 식별자로 본다. 빈 ID 값은 무시한다
     (결측 ID 는 '중복'이 아니라 '없음'이므로 별도 문제).
+
+    time_values 가 주어지면(=반복측정 자료) **(ID, 시점)** 조합으로 판정한다. 같은 사람이
+    시점마다 한 줄씩 있는 것은 정상이므로, 그것까지 '중복'이라 하면 모든 ID가 경고로
+    뜨면서 진짜 이중입력이 묻힌다.
     반환: [{"id": "...", "rows": [행번호...], "count": n}, ...] (중복만).
     """
     if not data.id_columns:
         return []
+    tvals = list(time_values or [])
     seen: Dict[tuple, List[int]] = {}
     for idx, ids in enumerate(data.id_values):
         key = tuple(ids.get(c, "") for c in data.id_columns)
         if all(v == "" for v in key):
             continue  # ID 전부 비어있으면 중복 판정 대상 아님
+        if tvals:
+            key = key + (tvals[idx] if idx < len(tvals) else "",)
         seen.setdefault(key, []).append(idx + 1)
     out: List[Dict[str, object]] = []
     for key, rows in seen.items():
         if len(rows) > 1:
+            shown = key[:-1] if tvals else key
+            label = " / ".join(shown)
+            if tvals:
+                label += f" (시점: {key[-1] or '없음'})"
             out.append(
-                {"id": " / ".join(key), "rows": rows, "count": len(rows)}
+                {"id": label, "rows": rows, "count": len(rows)}
             )
     out.sort(key=lambda d: (-int(d["count"]), str(d["id"])))
     return out

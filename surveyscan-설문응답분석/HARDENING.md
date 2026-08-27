@@ -176,3 +176,66 @@ EFA/CFA 범위 표현 정정, 단위 불일치의 **실제** 증상(미분류가
 `test_review_round3.py`). 패널이 지목한 '살아남는 변이' 7건(응답자별 집단/심각도 열 복사, JSON의
 응답자별 라벨 유출, 집단별 α 풀링, 구간 % 분모, 단측 z, MAX_GROUPS 경계)을 격리 복사본에서
 재현해 **전부 KILLED** 확인. 전 217개 green.
+
+---
+
+## 2026-08-27 — v0.4.0: 사전-사후(반복측정)·비모수 검정·messy CSV 대응 + 리뷰 1라운드(4패널 병렬)
+
+**추가한 기능(신규 코드).**
+- **사전-사후 분석** `surveyscan/paired.py` (신규) — 긴 형식 CSV에서 `--time-col`/`--time-pre`/
+  `--time-post`/`--pair-id` 로 같은 ID를 시점 간 짝지어: 변화량±CI, 대응표본 t, Cohen dz(+CI),
+  검사-재검사 **ICC(2,1) 절대일치 + McGraw & Wong CI**, 재측정 SEM(일치형·절대일치 둘 다),
+  **반응자 분석**(config `mcid` → 재측정 MDC₉₅ → α 기반 MDC₉₅ 순), 시점별 α, `--group-col`
+  동반 시 **집단별 변화량 비교**(Welch t/ANOVA + Hedges g, Holm 보정).
+- **순위 기반 검정** `surveyscan/nonparam.py` (신규, `--nonparam`) — Mann-Whitney U,
+  Kruskal-Wallis H, Wilcoxon 부호순위(소표본 정확검정 + 동순위 보정 정규근사)와 각 효과크기.
+  이를 위해 `special.py` 에 `chi2_sf`(정규화 불완전감마)·`norm_sf`(erfc 직접) 추가.
+- **현장 CSV 대응** — UTF-8 실패 시 **CP949 자동 재시도**(무엇으로 읽었는지 표기), `--encoding`,
+  `--delimiter auto`(콤마/탭/세미콜론/파이프 판별), config JSON 의 BOM 허용.
+- 예시 자료 `examples/sleep_prepost.csv` + `sleep_prepost_config.json`(mcid 포함), 문서 갱신.
+
+**리뷰 1라운드(정확성·엣지케이스·문서정직성·테스트/PII 4패널 병렬).** 순위검정·χ²/정규 꼬리·
+대응표본 t·ICC 점추정과 CI·Holm 은 scipy/공표값과 **1e-11 이하 일치**(Shrout & Fleiss 예시
+ICC(2,1)=0.290, psych CI [0.019, 0.761] 재현). 20,000명×40문항×2시점 12.7초(선형). 아래는 그 위에서
+지적되어 **고친** 결함이다(전부 회귀 테스트 추가).
+
+- **[HIGH] 짝짓기 전멸을 엉뚱하게 설명.** 다기관 자료에서 `--pair-id` 키가 겹쳐 전원이 빠졌는데
+  "ID 표기가 시점마다 다른가"라고 안내하고 제외 인원수는 아예 렌더링되지 않았다 → 원인별 사유
+  분기 + 실패한 경우에도 '짝짓기 제외' 숫자 출력.
+- **[HIGH] 자료에서 온 시점 라벨이 sanitize 없이 렌더링.** 사유 문구 경로가 기존 방어(`_oneline`/
+  `_mdcell`)를 우회해 마크다운에 원시 HTML(`<img onerror=…>`), 터미널에 ANSI 이스케이프가 실렸다
+  → 모든 reason/label 렌더 지점 sanitize + 입력 단계에서 제어문자 제거(JSON·점수 CSV 보호).
+- **[MED-HIGH] 파일 정렬만으로 사전/사후가 뒤집힘.** 한글 라벨은 등장 순서로 추정하므로 엑셀에서
+  시점 기준 정렬 한 번에 변화량 부호가 통째로 반대가 된다 → **추정임을 ⚠ 로 경고**하고
+  `--time-pre/--time-post` 를 안내(문서에도 명시).
+- **[MED] 반응자 임계값이 '모든 시점을 합친' α 기반 MDC₉₅.** 같은 사람이 두 번 들어간 표본에
+  개입 효과로 SD가 부풀려진 값이었다 → **짝 자료에서 나온 재측정 MDC₉₅ 우선**, 무엇을 썼는지
+  라벨로 표기(`MCID(config)` / `MDC₉₅(재측정 기반)` / `MDC₉₅(α 기반·전체 시점 합산)`).
+- **[MED] SEM 정의 혼동.** 절대일치 ICC 옆에 일치형 SEM(√MSE)을 'SEM_agreement' 라 적었다 →
+  두 정의(`sem`·`sem_agreement`)를 모두 산출하고 라벨·문서에서 구분(Weir 2005 vs de Vet 2006).
+- **[MED] 시점별 α가 짝짓지 않은 행까지 포함.** 표의 N(짝 수)과 다른 표본의 α가 나란히 찍혔다 →
+  **짝지어진 행만**으로 계산.
+- **[MED] 쌍 1개에서 Wilcoxon 효과크기 r=±1.00 '큼' 출력**(바로 아래 '검정 불가' 경고와 모순)
+  → 모수 검정과 동일한 n≥2 하한 적용.
+- **[MED] 시점 라벨(=방문일자일 수 있음) 최대 20개가 사유 문구·JSON에 그대로 노출** →
+  집단 비교와 같은 방침으로 5개까지만 미리보기 + 개수 표기.
+- **[LOW-MED] 3시점 이상에서 '두 시점을 합친 값' 이라는 잘못된 안내**(실제로는 모든 시점) →
+  문구 수정 + '비교 대상이 아닌 시점의 행 N개' 카운터 신설. `--encoding` 을 직접 줘도 "자동
+  판별"이라 찍히던 표기, 이미 `--encoding` 을 준 사용자에게 "`--encoding` 을 지정하세요"라던
+  막다른 오류 메시지, `--nonparam` 단독 사용 시 무반응, BOM 이 남아 `--id-col` 이 조용히
+  실패하던 문제, 1e30 같은 큰 값이 표 정렬을 깨뜨리던 문제, `mcid ≤ 0` 이중집계,
+  `nan`/`inf` 시점 라벨이 '숫자 순'으로 처리되던 문제, 비교 대상이 아닌 시점의 빈 ID 행이
+  `n_no_id` 로 잘못 계상되던 문제, 큰 df 에서 불완전감마 급수가 수렴 전에 종료되던 문제,
+  실패한 실행이 응답자 단위 점수 CSV만 남기던 순서 문제, `--group-col == --time-col` 경고 추가.
+
+**문서 정직성.** dz CI가 대표본(Wald) 근사이고 소표본 편향보정이 없다는 점, 완전자료 분석의
+한계, ICC 해석 조건, MDC 출처, 인코딩 자동판별이 UTF-8/CP949 두 가지뿐이라 다른 인코딩은 깨진 채
+읽힐 수 있다는 점, 집단 상한 off-by-one(20 초과 차단), `--scores-out` 의 값 변형(6자리 반올림·
+수식 인젝션 방지 접두 따옴표)을 README/사용법.md에 명시. Wilcoxon 연속성 보정이 scipy 기본값과
+다르다는(우리는 correction=True) 사실도 정정.
+
+**테스트.** 217개 → **336개** (신규 `test_nonparam.py`·`test_paired.py`·`test_prepost_cli.py`·
+`test_encoding_delim.py`·`test_prepost_hardening.py`). 변이(mutation) 검사에서 살아남은 24건 중
+실질 결함으로 이어지는 항목(α 시점 귀속, 반응자 경계값 포함 여부, MAX_TIMEPOINTS 상한, Holm
+값, ICC SEM/MDC 공식, dz의 SE, 집단 변화량 게이트, r_prepost, 라벨 sanitize, 점수 CSV 시점 열
+이스케이프)에 값 고정 테스트를 추가해 모두 KILLED. 전 336개 green.

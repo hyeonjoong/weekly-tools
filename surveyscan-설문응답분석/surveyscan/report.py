@@ -12,6 +12,10 @@ from typing import Dict, Optional
 def _fmt(x: Optional[float], nd: int = 2) -> str:
     if x is None or (isinstance(x, float) and not math.isfinite(x)):
         return "  -  "
+    # 엑셀 오입력(1e308 등)이 그대로 들어오면 309자리 숫자가 찍혀 표가 통째로 어긋난다.
+    # 큰 값은 지수표기로 줄여 표의 가독성을 지킨다(값 자체는 숨기지 않는다).
+    if abs(x) >= 1e12:
+        return f"{x:.2e}"
     return f"{x:.{nd}f}"
 
 
@@ -115,6 +119,242 @@ def alpha_label(a: Optional[float]) -> str:
     return "낮음"
 
 
+def _nonparam_lines(np_test, indent: str) -> list:
+    """순위 기반 검정 결과 한 줄(집단비교·변화량 비교 공용). 없으면 빈 리스트."""
+    if not np_test:
+        return []
+    from .nonparam import rank_effect_label
+
+    if np_test.get("test") == "mannwhitney":
+        r = np_test.get("rank_biserial")
+        return [
+            f"{indent}[비모수] Mann-Whitney U = {_fmt(np_test['U'], 1)}, "
+            f"z = {_fmt(np_test['z'])}, p = {_fmt_p(np_test['p'])}   "
+            f"rank-biserial r = {_fmt(r)} [{rank_effect_label(r)}]"
+        ]
+    if np_test.get("test") == "kruskal":
+        return [
+            f"{indent}[비모수] Kruskal-Wallis H({_fmt(np_test['df'], 0)}) = "
+            f"{_fmt(np_test['H'])}, p = {_fmt_p(np_test['p'])}   "
+            f"ε² = {_fmt(np_test['epsilon_sq'], 3)}"
+        ]
+    if np_test.get("test") == "wilcoxon":
+        r = np_test.get("rank_biserial")
+        how = "정확검정" if np_test.get("exact") else "정규근사(동순위 보정)"
+        zero = (
+            f", 변화 0인 {np_test['n_zero']}명 제외" if np_test.get("n_zero") else ""
+        )
+        return [
+            f"{indent}[비모수] Wilcoxon 부호순위 W = {_fmt(np_test['W'], 1)}, "
+            f"p = {_fmt_p(np_test['p'])}   r = {_fmt(r)} [{rank_effect_label(r)}]",
+            f"{indent}          ({how}, 검정에 쓴 쌍 {np_test['n']}쌍{zero})",
+        ]
+    return []
+
+
+def _pair_diag_lines(pp: Dict[str, object], indent: str) -> list:
+    """짝짓기에서 빠진 인원/행 수. 실패한 경우에도 반드시 보여준다 — '짝이 없다'는 사유만
+    보여주면 사용자는 왜 없는지(중복 키인지, ID 표기가 다른지) 알 방법이 없다."""
+    notes = []
+    if pp.get("n_unpaired"):
+        notes.append(f"한 시점에만 있어 제외 {pp['n_unpaired']}명")
+    if pp.get("n_dup_excluded"):
+        notes.append(f"같은 (ID,시점)이 두 번이라 제외 {pp['n_dup_excluded']}명")
+    if pp.get("n_no_id"):
+        notes.append(f"ID 가 비어 제외 {pp['n_no_id']}행")
+    if pp.get("n_other_time"):
+        notes.append(f"비교 대상이 아닌 시점의 행 {pp['n_other_time']}개")
+    if not notes:
+        return []
+    return [f"{indent}짝짓기 제외: " + ", ".join(notes)]
+
+
+def _prepost_lines(result: Dict[str, object]) -> list:
+    """사전-사후(반복측정) 비교 절 — 텍스트 리포트."""
+    pp = result.get("prepost")
+    if not pp:
+        return []
+    conf_pct = int(round(result.get("conf_level", 0.95) * 100))
+    lines = [""]
+    lines.append(f"[ 사전-사후 비교 (시점 컬럼: {_oneline(str(pp['column']))}) ]")
+    if not pp.get("usable"):
+        lines.append(f"  ⚠ {_oneline(str(pp.get('reason')))}")
+        lines.extend(_pair_diag_lines(pp, "  "))
+        return lines
+    rule = {
+        "numeric": "시점 라벨이 숫자여서 숫자 순",
+        "appearance": "자료에 먼저 나온 시점을 사전으로 봄",
+        "explicit": "--time-pre/--time-post 로 직접 지정",
+    }.get(str(pp.get("order_rule")), "")
+    lines.append(
+        f"  사전 '{_oneline(str(pp['pre']))}' → 사후 '{_oneline(str(pp['post']))}'"
+        f"   ({rule})"
+    )
+    if str(pp.get("order_rule")) == "appearance":
+        lines.append(
+            "  ⚠ 시점 순서는 파일에 나온 순서로 **추정**한 것입니다 — 자료를 시점 기준으로"
+        )
+        lines.append(
+            "    정렬했거나 첫 사람의 기저 행이 없으면 사전/사후가 뒤바뀝니다."
+        )
+        lines.append(
+            "    변화량 부호가 통째로 뒤집히므로 --time-pre/--time-post 로 명시하세요."
+        )
+    if pp.get("id_label"):
+        lines.append(f"  짝짓기 기준 ID: {_oneline(str(pp['id_label']))}")
+    notes = []
+    if pp.get("n_unpaired"):
+        notes.append(f"한 시점에만 있어 제외 {pp['n_unpaired']}명")
+    if pp.get("n_dup_excluded"):
+        notes.append(f"같은 (ID,시점)이 두 번이라 제외 {pp['n_dup_excluded']}명")
+    if pp.get("n_no_id"):
+        notes.append(f"ID 가 비어 제외 {pp['n_no_id']}행")
+    if pp.get("n_other_time"):
+        notes.append(f"비교 대상이 아닌 시점의 행 {pp['n_other_time']}개")
+    lines.append(
+        f"  짝지은 응답자 {pp.get('n_pairs_total', 0)}명"
+        + (f"  ({', '.join(notes)})" if notes else "")
+    )
+    for row in pp["subscales"]:
+        lines.append("")
+        method = "총합" if row.get("score_method") == "sum" else "평균"
+        lines.append(f"  ▶ {_oneline(str(row['name']))}  (점수: {method})")
+        if row.get("n_missing_score"):
+            lines.append(
+                f"     ※ 두 시점 중 한쪽 점수가 없어 빠진 사람 {row['n_missing_score']}명"
+            )
+        if int(row.get("n_pairs", 0)) < 1:
+            lines.append(f"     ⚠ {_oneline(str(row.get('reason')))}")
+            continue
+        lines.append(
+            f"     {_pad('시점', 10)} {_pad('N', 5, 'right')} {_pad('평균', 8, 'right')} "
+            f"{_pad('SD', 8, 'right')} {_pad('중앙', 7, 'right')} {_pad('α', 6, 'right')}"
+        )
+        lines.append("     " + "-" * 48)
+        for key, lab, al in (
+            ("pre", pp["pre"], row.get("alpha_pre")),
+            ("post", pp["post"], row.get("alpha_post")),
+        ):
+            d = row[key]
+            lines.append(
+                f"     {_pad(_oneline(str(lab)), 10)} {_pad(d['n'], 5, 'right')} "
+                f"{_pad(_fmt(d['mean']), 8, 'right')} {_pad(_fmt(d['sd']), 8, 'right')} "
+                f"{_pad(_fmt(d['median'], 1), 7, 'right')} {_pad(_fmt(al, 2), 6, 'right')}"
+            )
+        ch = row["change"]
+        who = f"({_oneline(str(pp['post']))} − {_oneline(str(pp['pre']))})"
+        lines.append(
+            f"     변화량{who} {_fmt(ch['mean'])} ± {_fmt(ch['sd'])}"
+            + (f"  {conf_pct}% CI {_ci(row['change_ci'])}" if row.get("change_ci") else "")
+        )
+        t = row.get("test")
+        if t:
+            lines.append(
+                f"     대응표본 t({_fmt(t['df'], 0)}) = {_fmt(t['t'])}, p = {_fmt_p(t['p'])}"
+                + (
+                    f"   (Holm 보정 p = {_fmt_p(row['p_holm'])})"
+                    if int(pp.get("n_tests", 0)) > 1 else ""
+                )
+            )
+        e = row.get("effect")
+        if e:
+            lines.append(
+                f"     Cohen dz = {_fmt(e['dz'])} {_ci(e['ci'])} [{effect_label(e['dz'])}]"
+                "  (변화량 SD 기준 — 독립표본 g와 직접 비교 불가)"
+            )
+        lines.extend(_nonparam_lines(row.get("wilcoxon"), "     "))
+        icc = row.get("icc")
+        if row.get("r_prepost") is not None or icc:
+            parts = []
+            if row.get("r_prepost") is not None:
+                parts.append(f"사전-사후 r = {_fmt(row['r_prepost'], 3)}")
+            if icc:
+                parts.append(
+                    f"ICC(2,1) = {_fmt(icc['icc'], 3)}"
+                    + (f" {_ci(icc['ci'], 3)}" if icc.get("ci") else "")
+                )
+                parts.append(f"SEM(재측정, √MSE) = {_fmt(icc['sem'])}")
+            lines.append("     " + "   ".join(parts))
+        rsp = row.get("responders")
+        if rsp:
+            src = {
+                "mcid": "MCID(config)",
+                "mdc95_retest": "MDC₉₅(재측정 기반)",
+                "mdc95_alpha": "MDC₉₅(α 기반·전체 시점 합산)",
+            }.get(str(rsp.get("source")), "MDC₉₅")
+            lines.append(
+                f"     반응자(임계값 {_fmt(rsp['threshold'])}, {src}): "
+                f"감소 {rsp['decreased']}명({rsp['decreased_pct']}%) / "
+                f"변화없음 {rsp['unchanged']}명({rsp['unchanged_pct']}%) / "
+                f"증가 {rsp['increased']}명({rsp['increased_pct']}%)"
+            )
+        gc = row.get("group_change")
+        if gc:
+            lines.append(
+                f"     [ 집단별 변화량 비교 — 기준 컬럼: {_oneline(str(pp.get('group_column')))} ]"
+            )
+            lw = max([_dwidth(str(g["label"])) for g in gc["groups"]] + [4])
+            lines.append(
+                f"       {_pad('집단', lw)} {_pad('N', 5, 'right')} "
+                f"{_pad('변화 평균', 10, 'right')} {_pad('SD', 8, 'right')}"
+            )
+            for g in gc["groups"]:
+                lines.append(
+                    f"       {_pad(_oneline(str(g['label'])), lw)} {_pad(g['n'], 5, 'right')} "
+                    f"{_pad(_fmt(g['mean']), 10, 'right')} {_pad(_fmt(g['sd']), 8, 'right')}"
+                )
+            gt = gc.get("test")
+            dl = gc.get("diff_labels") or []
+            gwho = f"({_oneline(str(dl[0]))} − {_oneline(str(dl[1]))})" if len(dl) == 2 else ""
+            if gt and gt.get("test") == "welch_t":
+                lines.append(
+                    f"       Welch t({_fmt(gt['df'], 1)}) = {_fmt(gt['t'])}, "
+                    f"p = {_fmt_p(gt['p'])}"
+                )
+                lines.append(
+                    f"       변화량 차이{gwho} {_fmt(gt['mean_diff'])}  "
+                    f"{conf_pct}% CI {_ci(gt['diff_ci'])}"
+                )
+                ge = gc.get("effect")
+                if ge:
+                    lines.append(
+                        f"       Hedges g{gwho} = {_fmt(ge['g'])} {_ci(ge['ci'])} "
+                        f"[{effect_label(ge['g'])}]"
+                    )
+            elif gt and gt.get("test") == "welch_anova":
+                lines.append(
+                    f"       Welch ANOVA F({_fmt(gt['df1'], 0)}, {_fmt(gt['df2'], 1)}) = "
+                    f"{_fmt(gt['F'])}, p = {_fmt_p(gt['p'])}"
+                )
+            lines.extend(_nonparam_lines(gc.get("nonparam"), "       "))
+            if gc.get("excluded_groups"):
+                lines.append(
+                    "       ※ 변화량이 2명 미만이라 빠진 집단: "
+                    + ", ".join(_oneline(str(x)) for x in gc["excluded_groups"])
+                )
+        if row.get("n_group_conflict"):
+            lines.append(
+                f"     ⚠ 같은 ID 인데 시점마다 집단 라벨이 다른 사람 {row['n_group_conflict']}명은"
+                " 집단별 비교에서 제외했습니다(원자료 확인 필요)."
+            )
+        if row.get("reason"):
+            lines.append(f"     ⚠ {_oneline(str(row['reason']))}")
+    lines.append("")
+    lines.append("      ※ 변화량 = 사후 − 사전. 부호는 척도 방향에 따라 해석하세요")
+    lines.append("        (증상척도는 감소가 호전). 반응자 표는 방향 판단 없이 감소/증가로만 셉니다.")
+    lines.append("        대응표본 t 는 짝이 모두 있는 사람만 씁니다(완전자료 분석) — 중도탈락이")
+    lines.append("        많으면 결과가 낙관적으로 치우칩니다(ITT·혼합모형을 대신하지 않음).")
+    lines.append("        Cohen dz 는 변화량 SD로 표준화한 값이라 독립표본 g와 스케일이 다르고,")
+    lines.append("        CI 는 대표본(Wald) 근사이며 g와 달리 소표본 편향보정이 없습니다.")
+    lines.append("        임계값이 MDC₉₅ 인 경우 그 α·SD 는 '모든 시점을 합친' 자료에서 온 값이라")
+    lines.append("        개입으로 점수가 이동했으면 실제보다 큽니다 — config 의 mcid 사용을 권합니다.")
+    lines.append("        SEM(재측정)=√MSE 는 두 시점의 평균 이동을 제외한 일치(consistency)형입니다.")
+    lines.append("        ICC(2,1)은 두 시점 사이에 개입이 없을 때만 '검사-재검사 신뢰도'입니다 —")
+    lines.append("        치료 전후라면 낮은 ICC 는 신뢰도가 아니라 반응의 개인차를 뜻합니다.")
+    lines.append("        집단별 변화량 비교는 공변량(기저값) 보정을 하지 않은 탐색적 계산입니다.")
+    return lines
+
+
 def render(result: Dict[str, object]) -> str:
     lines = []
     lines.append("=" * 64)
@@ -131,6 +371,20 @@ def render(result: Dict[str, object]) -> str:
     lines.append(f"  점수 방식 : {'총합(sum)' if method == 'sum' else '평균(mean)'}")
     conf = result.get("conf_level", 0.95)
     lines.append(f"  신뢰수준  : {int(round(conf * 100))}% CI")
+    if result.get("time_column"):
+        lines.append(f"  시점 컬럼 : {_oneline(str(result['time_column']))} (반복측정 자료)")
+        lines.append(
+            "    ※ 위의 문항 기술통계·α·하위척도 점수는 파일에 있는 **모든 시점을 합친**"
+        )
+        lines.append("      값입니다(같은 사람이 시점 수만큼 들어감). 비교하지 않는 시점의 행도")
+        lines.append("      여기에는 포함됩니다. 시점별 α와 변화량은 아래 사전-사후 절 참고.")
+    enc = str(result.get("encoding_used") or "utf-8-sig")
+    if enc != "utf-8-sig" or result.get("encoding_forced"):
+        how = (
+            "--encoding 으로 지정" if result.get("encoding_forced")
+            else "UTF-8 로 읽히지 않아 자동 재시도"
+        )
+        lines.append(f"  파일 인코딩: {enc} ({how})")
     lines.append("")
 
     # 범위 이탈(입력 오류 가능) 경고
@@ -483,9 +737,16 @@ def render(result: Dict[str, object]) -> str:
         lines.append("")
         lines.append(f"[ 집단 비교 (기준 컬럼: {_oneline(gc['column'])}) ]")
         if not gc.get("usable"):
-            lines.append(f"  ⚠ {gc.get('reason')}")
+            lines.append(f"  ⚠ {_oneline(str(gc.get('reason')))}")
         else:
             lines.append("  집단: " + ", ".join(_oneline(x) for x in gc["labels"]))
+            if result.get("time_column") and result.get("time_column") == gc["column"]:
+                lines.append(
+                    "  ⚠ 집단 컬럼과 시점 컬럼이 같습니다 — 여기서는 같은 사람이 두 집단에"
+                )
+                lines.append(
+                    "    들어가 독립성 가정이 깨집니다. 시점 비교는 아래 '사전-사후' 절을 보세요."
+                )
             if gc.get("n_no_label"):
                 lines.append(
                     f"  ※ 집단 라벨이 비어 있는 응답자 {gc['n_no_label']}명은 비교에서 제외했습니다."
@@ -541,6 +802,7 @@ def render(result: Dict[str, object]) -> str:
                     lines.append(
                         "     (집단 3개 이상 → 전체 차이 검정. 어느 쌍이 다른지는 사후검정 필요)"
                     )
+                lines.extend(_nonparam_lines(row.get("nonparam"), "     "))
                 exc = row.get("excluded_groups") or []
                 if exc:
                     lines.append(
@@ -574,6 +836,8 @@ def render(result: Dict[str, object]) -> str:
             lines.append(
                 "        분모가 다를 수 있고, 집단이 작으면 α가 음수로도 나옵니다(참고용)."
             )
+
+    lines.extend(_prepost_lines(result))
 
     lines.append("")
     lines.append("  주: α 해석 — .9우수/.8양호/.7수용/.6의심/<.6낮음.")
@@ -610,6 +874,201 @@ def _mdcell(x) -> str:
     )
 
 
+def _nonparam_md(np_test) -> list:
+    """순위 기반 검정 한 줄(Markdown)."""
+    if not np_test:
+        return []
+    from .nonparam import rank_effect_label
+
+    if np_test.get("test") == "mannwhitney":
+        r = np_test.get("rank_biserial")
+        return [
+            f"- (비모수) Mann-Whitney U = {_fmt(np_test['U'], 1)}, z = {_fmt(np_test['z'])}, "
+            f"p = {_fmt_p(np_test['p'])}, rank-biserial r = {_fmt(r)} ({rank_effect_label(r)})"
+        ]
+    if np_test.get("test") == "kruskal":
+        return [
+            f"- (비모수) Kruskal-Wallis H({_fmt(np_test['df'], 0)}) = {_fmt(np_test['H'])}, "
+            f"p = {_fmt_p(np_test['p'])}, ε² = {_fmt(np_test['epsilon_sq'], 3)}"
+        ]
+    if np_test.get("test") == "wilcoxon":
+        r = np_test.get("rank_biserial")
+        how = "정확검정" if np_test.get("exact") else "정규근사(동순위 보정)"
+        zero = f", 변화 0인 {np_test['n_zero']}명 제외" if np_test.get("n_zero") else ""
+        return [
+            f"- (비모수) Wilcoxon 부호순위 W = {_fmt(np_test['W'], 1)}, "
+            f"p = {_fmt_p(np_test['p'])}, r = {_fmt(r)} ({rank_effect_label(r)}) "
+            f"— {how}, 쌍 {np_test['n']}개{zero}"
+        ]
+    return []
+
+
+def _prepost_md(result: Dict[str, object]) -> list:
+    """사전-사후(반복측정) 비교 절 — Markdown."""
+    pp = result.get("prepost")
+    if not pp:
+        return []
+    conf_pct = int(round(result.get("conf_level", 0.95) * 100))
+    L = [f"## 사전-사후 비교 (시점 컬럼: {_mdcell(pp['column'])})", ""]
+    if not pp.get("usable"):
+        L.append(f"> ⚠ {_mdcell(pp.get('reason'))}")
+        for line in _pair_diag_lines(pp, ""):
+            L.append(f"> {line}")
+        L.append("")
+        return L
+    rule = {
+        "numeric": "시점 라벨이 숫자여서 숫자 순",
+        "appearance": "자료에 먼저 나온 시점을 사전으로 봄",
+        "explicit": "`--time-pre`/`--time-post` 로 직접 지정",
+    }.get(str(pp.get("order_rule")), "")
+    L.append(
+        f"- 사전 **{_mdcell(pp['pre'])}** → 사후 **{_mdcell(pp['post'])}** ({rule})"
+    )
+    if str(pp.get("order_rule")) == "appearance":
+        L.append(
+            "- ⚠ 시점 순서는 파일에 나온 순서로 **추정**한 것입니다(정렬 순서가 바뀌면 사전/사후가"
+            " 뒤집혀 변화량 부호가 반대가 됩니다) — `--time-pre`/`--time-post` 로 명시하세요."
+        )
+    notes = []
+    if pp.get("n_unpaired"):
+        notes.append(f"한 시점에만 있어 제외 {pp['n_unpaired']}명")
+    if pp.get("n_dup_excluded"):
+        notes.append(f"같은 (ID,시점) 중복으로 제외 {pp['n_dup_excluded']}명")
+    if pp.get("n_no_id"):
+        notes.append(f"ID 가 비어 제외 {pp['n_no_id']}행")
+    if pp.get("n_other_time"):
+        notes.append(f"비교 대상이 아닌 시점의 행 {pp['n_other_time']}개")
+    L.append(
+        f"- 짝지은 응답자 **{pp.get('n_pairs_total', 0)}명**"
+        + (f" ({', '.join(notes)})" if notes else "")
+    )
+    L.append("")
+    for row in pp["subscales"]:
+        L.append(f"### {_oneline(str(row['name']))}")
+        L.append("")
+        if int(row.get("n_pairs", 0)) < 1:
+            L.append(f"> ⚠ {_mdcell(row.get('reason'))}")
+            L.append("")
+            continue
+        L.append("| 시점 | N | 평균 | SD | 중앙 | α |")
+        L.append("|---|---:|---:|---:|---:|---:|")
+        for key, lab, al in (
+            ("pre", pp["pre"], row.get("alpha_pre")),
+            ("post", pp["post"], row.get("alpha_post")),
+        ):
+            d = row[key]
+            L.append(
+                f"| {_mdcell(lab)} | {d['n']} | {_fmt(d['mean'])} | {_fmt(d['sd'])} "
+                f"| {_fmt(d['median'], 1)} | {_fmt(al, 2)} |"
+            )
+        L.append("")
+        ch = row["change"]
+        who = f"({_mdcell(pp['post'])} − {_mdcell(pp['pre'])})"
+        L.append(
+            f"- 변화량{who} **{_fmt(ch['mean'])} ± {_fmt(ch['sd'])}**"
+            + (f", {conf_pct}% CI {_ci(row['change_ci'])}" if row.get("change_ci") else "")
+        )
+        t = row.get("test")
+        if t:
+            holm = (
+                f", Holm 보정 p = {_fmt_p(row['p_holm'])}"
+                if int(pp.get("n_tests", 0)) > 1 else ""
+            )
+            L.append(
+                f"- 대응표본 t({_fmt(t['df'], 0)}) = {_fmt(t['t'])}, "
+                f"**p = {_fmt_p(t['p'])}**{holm}"
+            )
+        e = row.get("effect")
+        if e:
+            L.append(
+                f"- Cohen dz = {_fmt(e['dz'])} {_ci(e['ci'])} ({effect_label(e['dz'])}) "
+                "— 변화량 SD 기준이라 독립표본 g와 직접 비교 불가"
+            )
+        L.extend(_nonparam_md(row.get("wilcoxon")))
+        icc = row.get("icc")
+        if icc:
+            L.append(
+                f"- 사전-사후 r = {_fmt(row.get('r_prepost'), 3)}, "
+                f"ICC(2,1) = {_fmt(icc['icc'], 3)}"
+                + (f" {_ci(icc['ci'], 3)}" if icc.get("ci") else "")
+                + f", SEM(재측정, √MSE) = {_fmt(icc['sem'])}"
+            )
+        rsp = row.get("responders")
+        if rsp:
+            src = {
+                "mcid": "MCID(config)",
+                "mdc95_retest": "MDC₉₅(재측정 기반)",
+                "mdc95_alpha": "MDC₉₅(α 기반·전체 시점 합산)",
+            }.get(str(rsp.get("source")), "MDC₉₅")
+            L.append(
+                f"- 반응자(임계값 {_fmt(rsp['threshold'])}, {src}): "
+                f"감소 {rsp['decreased']}명({rsp['decreased_pct']}%) / "
+                f"변화없음 {rsp['unchanged']}명({rsp['unchanged_pct']}%) / "
+                f"증가 {rsp['increased']}명({rsp['increased_pct']}%)"
+            )
+        gc = row.get("group_change")
+        if gc:
+            L.append("")
+            L.append(f"**집단별 변화량 비교 (기준 컬럼: {_mdcell(pp.get('group_column'))})**")
+            L.append("")
+            L.append("| 집단 | N | 변화 평균 | SD |")
+            L.append("|---|---:|---:|---:|")
+            for g in gc["groups"]:
+                L.append(
+                    f"| {_mdcell(g['label'])} | {g['n']} | {_fmt(g['mean'])} | {_fmt(g['sd'])} |"
+                )
+            L.append("")
+            gt = gc.get("test")
+            dl = gc.get("diff_labels") or []
+            gwho = f"({_mdcell(dl[0])} − {_mdcell(dl[1])})" if len(dl) == 2 else ""
+            if gt and gt.get("test") == "welch_t":
+                L.append(
+                    f"- Welch t({_fmt(gt['df'], 1)}) = {_fmt(gt['t'])}, "
+                    f"**p = {_fmt_p(gt['p'])}**"
+                )
+                L.append(
+                    f"- 변화량 차이{gwho} {_fmt(gt['mean_diff'])}, "
+                    f"{conf_pct}% CI {_ci(gt['diff_ci'])}"
+                )
+                ge = gc.get("effect")
+                if ge:
+                    L.append(
+                        f"- Hedges g{gwho} = {_fmt(ge['g'])} {_ci(ge['ci'])} "
+                        f"({effect_label(ge['g'])})"
+                    )
+            elif gt and gt.get("test") == "welch_anova":
+                L.append(
+                    f"- Welch ANOVA F({_fmt(gt['df1'], 0)}, {_fmt(gt['df2'], 1)}) = "
+                    f"{_fmt(gt['F'])}, **p = {_fmt_p(gt['p'])}**"
+                )
+            L.extend(_nonparam_md(gc.get("nonparam")))
+            if gc.get("excluded_groups"):
+                L.append(
+                    "- 변화량이 2명 미만이라 빠진 집단: "
+                    + ", ".join(_mdcell(x) for x in gc["excluded_groups"])
+                )
+        if row.get("n_group_conflict"):
+            L.append(
+                f"- ⚠ 같은 ID 인데 시점마다 집단 라벨이 다른 {row['n_group_conflict']}명은 "
+                "집단별 비교에서 제외(원자료 확인 필요)"
+            )
+        if row.get("reason"):
+            L.append(f"- ⚠ {_mdcell(row['reason'])}")
+        L.append("")
+    L.append(
+        "> 변화량 = **사후 − 사전**(부호는 척도 방향에 따라 해석 — 증상척도는 감소가 호전). "
+        "짝이 모두 있는 사람만 쓰는 완전자료 분석이라 중도탈락이 많으면 낙관적으로 치우칩니다"
+        "(ITT·혼합모형을 대신하지 않음). Cohen dz 는 변화량 SD 기준이라 독립표본 g와 스케일이 "
+        "다르고, 그 CI 는 대표본(Wald) 근사이며 소표본 편향보정이 없습니다. 임계값이 MDC₉₅ 인 "
+        "경우 그 α·SD 는 '모든 시점을 합친' 자료에서 온 값이라 개입으로 점수가 이동했으면 실제보다 "
+        "큽니다(config 의 `mcid` 권장). ICC(2,1)은 두 시점 사이에 **개입이 없을 때만** 검사-재검사 "
+        "신뢰도이며, 함께 나오는 SEM(재측정)=√MSE 는 평균 이동을 제외한 일치(consistency)형입니다. "
+        "집단별 변화량 비교는 기저값 보정을 하지 않은 탐색적 계산입니다."
+    )
+    L.append("")
+    return L
+
+
 def render_markdown(result: Dict[str, object]) -> str:
     """분석 결과를 Markdown 으로 렌더링(논문 초안·GitHub·노션에 붙여넣기 용)."""
     conf_pct = int(round(result.get("conf_level", 0.95) * 100))
@@ -625,6 +1084,20 @@ def render_markdown(result: Dict[str, object]) -> str:
     method = result.get("score_method", "mean")
     L.append(f"- 점수 방식: {'총합(sum)' if method == 'sum' else '평균(mean)'}")
     L.append(f"- 신뢰수준: {conf_pct}% CI")
+    if result.get("time_column"):
+        L.append(f"- 시점 컬럼: {_mdcell(result['time_column'])} (반복측정 자료)")
+        L.append(
+            "  - ⚠ 아래 문항 기술통계·α·하위척도 점수는 파일의 **모든 시점을 합친** 값입니다"
+            "(같은 사람이 시점 수만큼 들어가며, 비교하지 않는 시점의 행도 포함). "
+            "시점별 α와 변화량은 '사전-사후 비교' 절 참고."
+        )
+    enc = str(result.get("encoding_used") or "utf-8-sig")
+    if enc != "utf-8-sig" or result.get("encoding_forced"):
+        how = (
+            "`--encoding` 으로 지정" if result.get("encoding_forced")
+            else "UTF-8 로 읽히지 않아 자동 재시도"
+        )
+        L.append(f"- 파일 인코딩: `{enc}` ({how})")
     L.append("")
 
     oor = result.get("out_of_range") or []
@@ -883,12 +1356,18 @@ def render_markdown(result: Dict[str, object]) -> str:
         L.append(f"## 집단 비교 (기준 컬럼: {_mdcell(gc['column'])})")
         L.append("")
         if not gc.get("usable"):
-            L.append(f"> ⚠ {gc.get('reason')}")
+            L.append(f"> ⚠ {_mdcell(gc.get('reason'))}")
             L.append("")
         else:
             if gc.get("n_no_label"):
                 L.append(
                     f"> 집단 라벨이 비어 있는 응답자 {gc['n_no_label']}명은 비교에서 제외했습니다."
+                )
+                L.append("")
+            if result.get("time_column") and result.get("time_column") == gc["column"]:
+                L.append(
+                    "> ⚠ 집단 컬럼과 시점 컬럼이 같습니다 — 같은 사람이 두 집단에 들어가 독립성 "
+                    "가정이 깨집니다. 시점 비교는 아래 '사전-사후 비교' 절을 보세요."
                 )
                 L.append("")
             for row in gc["subscales"]:
@@ -929,6 +1408,7 @@ def render_markdown(result: Dict[str, object]) -> str:
                         f"{_fmt(t['F'], 2)}, **p = {_fmt_p(t['p'])}**{holm}"
                     )
                     L.append("- 집단 3개 이상 → 전체 차이 검정(어느 쌍이 다른지는 사후검정 필요)")
+                L.extend(_nonparam_md(row.get("nonparam")))
                 exc = row.get("excluded_groups") or []
                 if exc:
                     L.append(
@@ -947,6 +1427,8 @@ def render_markdown(result: Dict[str, object]) -> str:
                 "집단이 작으면 α가 음수로도 나옵니다(참고용)."
             )
             L.append("")
+
+    L.extend(_prepost_md(result))
 
     L.append("---")
     L.append("*α 해석: .9 우수 / .8 양호 / .7 수용 / .6 의심 / <.6 낮음. "

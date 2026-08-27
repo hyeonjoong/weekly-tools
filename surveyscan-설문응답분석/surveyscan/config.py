@@ -37,7 +37,7 @@ SCORE_METHODS = ("mean", "sum")
 # '_' 로 시작하는 키는 주석용으로 허용한다(예: "_메모": "2026-07 ISI 설정").
 KNOWN_KEYS = frozenset(
     {"subscales", "reverse_items", "scale_min", "scale_max",
-     "min_valid_ratio", "score_method", "severity_bands"}
+     "min_valid_ratio", "score_method", "severity_bands", "mcid"}
 )
 
 
@@ -48,6 +48,10 @@ class SurveyConfig:
     # 하위척도별 임상 심각도 구간: {하위척도명: [(하한, 상한, 라벨), ...]} (양끝 포함).
     # 예: ISI 총점 0-7 없음 / 8-14 역치하 / 15-21 중등도 / 22-28 중증.
     severity_bands: Dict[str, List[Tuple[float, float, str]]] = field(default_factory=dict)
+    # 하위척도별 임상적 최소중요차이(MCID, minimal clinically important difference).
+    # 사전-사후 분석의 '반응자' 판정 임계값으로 쓴다(없으면 α 기반 MDC₉₅ 를 쓴다).
+    # 값은 도구가 아는 것이 아니라 사용자가 원 논문에서 옮겨 적는 값이다.
+    mcid: Dict[str, float] = field(default_factory=dict)
     scale_min: Optional[float] = None
     scale_max: Optional[float] = None
     # 응답자별 하위척도 점수를 계산할 때, 최소 이 비율 이상 응답해야 점수를 부여.
@@ -71,7 +75,9 @@ class SurveyConfig:
 
 def load_config(path: str) -> SurveyConfig:
     """JSON 파일에서 config를 읽어 검증한다."""
-    with open(path, "r", encoding="utf-8") as fh:
+    # utf-8-sig: 윈도우 메모장이 'UTF-8'로 저장하면 BOM 이 붙는데, 그대로 읽으면
+    # json 이 'Unexpected UTF-8 BOM' 으로 죽는다(데이터 CSV 는 이미 BOM 을 허용한다).
+    with open(path, "r", encoding="utf-8-sig") as fh:
         raw = json.load(fh)
     return _from_dict(raw)
 
@@ -154,6 +160,7 @@ def _from_dict(raw: dict) -> SurveyConfig:
         )
 
     bands = _parse_bands(raw.get("severity_bands"), parsed)
+    mcid = _parse_mcid(raw.get("mcid"), parsed)
 
     return SurveyConfig(
         subscales=parsed,
@@ -163,7 +170,35 @@ def _from_dict(raw: dict) -> SurveyConfig:
         scale_max=float(scale_max) if scale_max is not None else None,
         min_valid_ratio=float(min_valid_ratio),
         score_method=score_method,
+        mcid=mcid,
     )
+
+
+def _parse_mcid(raw_mcid: object, subscales: Dict[str, List[str]]) -> Dict[str, float]:
+    """mcid 파싱·검증: {"하위척도명": 양수} — 반응자 분석의 임계값.
+
+    이름 오타를 조용히 무시하면 임계값이 통째로 빠진 채 MDC₉₅ 로 계산되어, 사용자는
+    자기가 적은 MCID 가 쓰인 줄 안다. 그래서 오타는 오류로 막는다.
+    """
+    if raw_mcid is None:
+        return {}
+    if not isinstance(raw_mcid, dict) or not raw_mcid:
+        raise ConfigError("'mcid'는 비어있지 않은 객체여야 합니다(예: {\"불면증상\": 6}).")
+    out: Dict[str, float] = {}
+    for name, val in raw_mcid.items():
+        if name not in subscales:
+            raise ConfigError(
+                f"mcid 의 '{name}' 은 subscales 에 없는 하위척도입니다"
+                f" (사용 가능: {', '.join(subscales)})"
+            )
+        if isinstance(val, bool) or not isinstance(val, (int, float)):
+            raise ConfigError(f"mcid['{name}'] 는 숫자여야 합니다: {val!r}")
+        if not (float(val) > 0):
+            raise ConfigError(
+                f"mcid['{name}'] 는 0보다 큰 값이어야 합니다(변화량의 크기): {val!r}"
+            )
+        out[str(name)] = float(val)
+    return out
 
 
 def _parse_bands(
