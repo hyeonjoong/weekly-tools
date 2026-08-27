@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "circadia"
+version = "0.1.0"
+description = "일주기리듬(circadian rhythm) 분석기 — 워치에서 내보낸 연속 시계열(심박·걸음·수면구간) CSV로부터 코사이너(MESOR·진폭·정점위상·zero-amplitude F검정), 비모수 리듬 지표(IS·IV·RA·L5/M10), 수면 규칙성(SRI·중간수면·사회적 시차), 심박 야간 강하를 계산하고, 문헌 참고범위와 대조한 한국어 건강정보 리포트와 48시간 더블플롯 텍스트 액토그램을 출력합니다. 진단하지 않습니다 — 지표를 계산하고 출처 있는 참고범위를 보여주고, 데이터가 부족하면 부족하다고 말합니다 (표준 라이브러리만)"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "hyeonjoong", email = "hyeonjoongk@gmail.com" }]
+keywords = ["circadian", "cosinor", "actigraphy", "interdaily-stability",
+            "intradaily-variability", "relative-amplitude", "L5", "M10",
+            "sleep-regularity-index", "social-jetlag", "midsleep", "actogram",
+            "wearable", "heart-rate", "steps", "sleep", "clinical", "csv"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Medical Science Apps.",
+]
+
+# 외부 의존성 없음 — 코사이너 최소제곱(3×3 정규방정식), F분포 폐형식 p값,
+# IS/IV/RA/L5/M10, SRI(분 단위 상태쌍), 원형 통계 없이 정오 기준 프레임까지
+# 전부 표준 라이브러리로 구현했습니다.
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+circadia = "circadia.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["circadia*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
