@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "deidaudit"
+version = "0.1.0"
+description = "공유 전 비식별화 점검 — 피험자 단위 CSV/TSV/XLSX 를 밖으로 내보내기 직전에 전수 스캔해서 직접식별자(주민등록번호 체크섬·휴대전화·이메일·한글 성명·생년월일·89세 초과 연령), 자유텍스트에 숨은 인명, 엑셀 숨김 시트·숨김 열/행·셀 주석·문서 작성자 메타데이터, 그리고 가명화해도 남는 재식별 위험(정확 날짜 + 준식별자 동치류 크기 k)을 파일·시트·행·열까지 찍어 보고합니다. 요청하면 분석을 깨지 않는 방식으로 가명화·날짜이동한 내보내기 사본을 만들고, 그 사본을 처음부터 다시 감사합니다. 증거는 항상 마스킹되고 키 파일은 내보내기 폴더 밖으로 강제됩니다. 완전 오프라인·읽기 전용, 표준 라이브러리만 사용"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "hyeonjoong", email = "hyeonjoongk@gmail.com" }]
+keywords = ["de-identification", "deidentification", "anonymization", "pseudonymization",
+            "k-anonymity", "privacy", "phi", "pii", "clinical-trial", "irb",
+            "korean", "rrn", "csv", "xlsx", "audit", "offline", "date-shifting"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Healthcare Industry",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+    "Topic :: Security",
+    "Environment :: Console",
+    "Natural Language :: Korean",
+]
+
+# 외부 의존성 없음 — XLSX 는 zipfile+ElementTree 로 직접 파싱하고, CSV 는 csv 로 충분합니다.
+# (tests/test_offline.py 가 이 줄과 소스의 import 를 정적으로 검사합니다.)
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.urls]
+Homepage = "https://github.com/hyeonjoong/weekly-tools"
+
+[project.scripts]
+deidaudit = "deidaudit.cli:run"
+
+[tool.setuptools.packages.find]
+include = ["deidaudit*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

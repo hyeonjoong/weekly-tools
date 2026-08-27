@@ -1,0 +1,28 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+.DS_Store
+
+# 실행 산출물 — 절대 커밋하지 않습니다.
+점검결과/
+내보내기/
+내보내기_*/
+결과/
+out/
+*_키.csv
+키.csv
+키_솔트.txt
+
+# 실제 데이터는 이 저장소에 들어오면 안 됩니다.
+# (examples/ 안의 파일만 예외 — 전부 합성입니다.)
+*.xls
+*.sav
+*.dta
