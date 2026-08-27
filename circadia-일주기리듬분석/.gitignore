@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.venv/
+리듬결과/
+예시출력/
+
+# 실데이터 유입 차단(라운드 1 C4) — 이 저장소에 추적되는 CSV는 합성 예시뿐.
+# 사용자가 자기 건강데이터를 폴더에 두고 실행해도 커밋되지 않게 한다.
+*.csv
+!examples/**/*.csv
+export.xml
+*.zip
