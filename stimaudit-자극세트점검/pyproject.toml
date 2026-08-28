@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stimaudit"
+version = "0.1.0"
+description = "자극 세트 점검 — 실험에 쓸 소리 파일 여러 개를 한꺼번에 읽어, 조건 간 레벨이 맞춰져 있는지(LUFS·LAeq·LAmax·다이내믹 레인지)와 파일 위생(클리핑·DC·무음·시작 클릭·좌우 불균형)을 전수 대조하고, 설계 JSON 이 주장하는 파라미터(반송주파수·맥놀이·변조율·길이)가 실제 신호에 있는지 확인해 자극 기술표와 Methods 문단 초안까지 냅니다. 파일 하나에 점수를 매기지 않습니다 — 파일들 사이만 봅니다 (표준 라이브러리만)"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "hyeonjoong", email = "hyeonjoongk@gmail.com" }]
+keywords = ["audio", "stimulus", "loudness", "LUFS", "BS.1770", "EBU-R128",
+            "LAeq", "LAmax", "A-weighting", "IEC-61672", "true-peak", "clipping",
+            "psychoacoustics", "experiment-design", "stimulus-set", "confound",
+            "auditory-stimuli", "sleep", "arousal", "reproducibility", "wav"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Intended Audience :: Science/Research",
+    "Topic :: Multimedia :: Sound/Audio :: Analysis",
+    "Topic :: Scientific/Engineering :: Medical Science Apps.",
+]
+
+# 외부 의존성 없음 — WAV 파싱(24비트 부호확장 포함), radix-2 FFT,
+# ITU-R BS.1770-4 K-weighting 과 게이팅, IEC 61672 A-weighting(쌍선형 변환),
+# 트루피크 오버샘플 보간까지 전부 표준 라이브러리로 구현했습니다.
+# `ffmpeg` 는 WAV 가 아닌 파일을 열 때만 쓰는 **선택적** 통로이고, 분석은
+# 한 줄도 맡기지 않습니다. 없으면 그 파일을 '못 읽음'으로 세고 종료코드 3 입니다.
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+stimaudit = "stimaudit.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["stimaudit*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,17 @@
+{
+  "study": "예제 — 어긋난 세트",
+  "conditions": {
+    "active":  ["B_active_loud.wav", "B_clipped_dc.wav"],
+    "control": ["B_control_pink.wav"],
+    "binaural": ["B_binaural_wrong.wav"]
+  },
+  "claims": {
+    "B_binaural_wrong.wav": { "carrier_hz": 360.0, "beat_hz": 40.0, "duration_s": 3.0 },
+    "B_active_loud.wav":    { "carrier_hz": 200.0, "duration_s": 3.0 }
+  },
+  "pairs": {
+    "B_active_loud.wav":     "A_active_drone.wav",
+    "B_control_pink.wav":    "A_control_pink.wav",
+    "B_binaural_wrong.wav":  "A_binaural_360-400.wav"
+  }
+}

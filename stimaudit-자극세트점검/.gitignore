@@ -1,0 +1,75 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.venv/
+
+# ── 실제 오디오 자산 유입 차단 ────────────────────────────────────────────
+# 이 툴은 사람들이 자기 실험 자극(수십 MB WAV)을 폴더에 끌어다 놓고 돌리게
+# 되어 있습니다. 저장소에 추적되는 오디오는 아래에 **파일 이름으로 하나씩**
+# 허용한 합성 예제뿐이며, 회사 자산은 용량과 권리 양쪽 문제로 커밋하지 않습니다.
+# (`!examples/**/*.wav` 같은 폴더 단위 예외는 안 됩니다 — 실제 자산을
+#  examples/ 에 떨어뜨리면 그대로 추적 대상이 됩니다.)
+*.wav
+*.WAV
+*.wave
+*.mp3
+*.MP3
+*.m4a
+*.m4b
+*.mp4
+*.aac
+*.flac
+*.ogg
+*.oga
+*.opus
+*.aif
+*.aiff
+*.aifc
+*.caf
+*.w64
+*.au
+*.wv
+*.wma
+*.raw
+*.pcm
+
+# 허용: 합성 예제 (파일 이름을 하나씩 명시)
+!examples/맞은세트/A_active_drone.wav
+!examples/맞은세트/A_active_so-pulse.wav
+!examples/맞은세트/A_binaural_360-400.wav
+!examples/맞은세트/A_control_pink.wav
+!examples/어긋난세트/B_active_loud.wav
+!examples/어긋난세트/B_binaural_wrong.wav
+!examples/어긋난세트/B_clipped_dc.wav
+!examples/어긋난세트/B_control_pink.wav
+!examples/판정불가세트/C_broken.wav
+!examples/판정불가세트/C_ok_24bit_48k.wav
+!examples/판정불가세트/C_ok_pink.wav
+
+# ── 실데이터·산출물 유입 차단 ─────────────────────────────────────────────
+*.csv
+*.tsv
+*.xlsx
+*.xls
+!examples/맞은세트/DEBUSSY지표_예시.csv
+
+# 설계 JSON (사람이 자기 연구 정보를 적는 파일)
+설계*.json
+*설계*.json
+design*.json
+*_design.json
+*-design.json
+!examples/맞은세트/설계.json
+!examples/어긋난세트/설계.json
+
+# 산출물 (--out-dir 는 이름이 자유롭습니다 — 파일 이름으로 막습니다)
+자극점검.md
+자극기술표.md
+문장초안.md
+자극점검_*/
+버전대조*/
+결과/
+예시출력/
