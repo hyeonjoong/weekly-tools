@@ -1,0 +1,5 @@
+file,roughness_asper,sharpness_acum,spectral_centroid_hz,modulation_peak_hz,spectral_slope_beta,hnr_db
+A_active_drone.wav,0.05,0.62,201.4,0.0,-6.1,28.4
+A_active_so-pulse.wav,0.07,0.71,940.2,1.2,-5.8,3.1
+A_control_pink.wav,0.06,0.68,930.7,0.0,-5.9,2.8
+A_binaural_360-400.wav,0.04,0.65,380.1,0.0,-6.3,27.9
