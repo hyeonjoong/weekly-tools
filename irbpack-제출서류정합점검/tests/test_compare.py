@@ -275,3 +275,37 @@ def test_same_basename_in_two_folders_are_separate_docs(tmp_path):
     res, fatal = cli.run_packet(files, [], None)
     assert fatal == [] and "visits" in items_of(by_sev(res, CRITICAL))
     assert len({d.name for d in res.docs}) == 3
+
+
+# ------------------------------------------------------------ 라운드 2
+
+def test_crf_extra_form_caught_even_when_protocol_extracts_nothing(tmp_path):
+    proto = md_protocol().replace("평가 항목은 다음과 같다: 불면증심각도척도(ISI), 수면일지, 삶의질 설문지.", "설문을 시행한다.")
+    icf = md_icf().replace("방문 시 불면증심각도척도(ISI) 와 수면일지, 삶의질 설문지를 작성합니다.", "설문에 답합니다.")
+    res, _ = run(full_packet(tmp_path, protocol=proto, icf=icf, crf=md_crf(forms=("불면증심각도척도 (ISI)", "우울척도 (PHQ-9)"))))
+    warn = _issues(res, WARNING, "assessments")
+    assert len(warn) == 1 and "동의 범위 밖" in warn[0].title and "우울척도" in warn[0].evidence[0].value
+    assert "평가·검사 항목" in res.coverage.items_compared
+
+
+def test_doc_with_two_visit_counts_is_conflict_not_propagation(tmp_path):
+    """동의서가 '총 4회 방문' 과 'Visit 1~3' 을 같이 말하면 합집합을 다 말한 게 아니라 충돌이다."""
+    icf = md_icf(visits="총 4회 방문", extra="| Visit 1 | 스크리닝 |\n|---|---|\n| Visit 2 | 4주 |\n| Visit 3 | 8주 |")
+    res, _ = run(full_packet(tmp_path, protocol=md_protocol(visits="3"), icf=icf, crf=md_crf(visits=3)))
+    assert _issues(res, CRITICAL, "visits") and _issues(res, WARNING, "visits") == []
+
+
+def test_two_pis_in_one_doc_is_conflict(tmp_path):
+    res, _ = run(full_packet(tmp_path, icf=md_icf(extra="연구책임자: 최가상")))
+    assert _issues(res, CRITICAL, "pi")
+
+
+def test_set_valued_item_still_uses_union_rule(tmp_path):
+    res, _ = run(full_packet(tmp_path, icf=md_icf(n="총 90명"), ad=md_ad(n="시험군 45명")))
+    assert _issues(res, CRITICAL, "n") == [] and _issues(res, WARNING, "n")
+
+
+def test_crf_checklist_criteria_match_protocol(tmp_path):
+    crf = md_crf() + "\n## 선정기준\n| 기준 | 예 | 아니오 |\n|---|---|---|\n| ① 불면증 진단을 받은 자 | □ | □ |\n| ② 서면 동의한 자 | □ | □ |\n## 제외기준\n| 기준 | 예 | 아니오 |\n|---|---|---|\n| ① 수면제 복용 중인 자 | □ | □ |\n"
+    res, _ = run(full_packet(tmp_path, crf=crf))
+    assert _issues(res, WARNING, "criteria") == [] and _issues(res, MATCH, "criteria")

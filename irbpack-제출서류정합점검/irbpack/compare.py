@@ -23,6 +23,10 @@ from .model import (CRITICAL, Coverage, Doc, Evidence, Extraction, ITEM_KEYS, IT
 
 #: 서술형이라 값 단위 비교가 약한 항목 — 항목 단위 차이는 '대조불가' 로 넘기고 개수만 봅니다.
 NARRATIVE_ITEMS = ("criteria", "assessments")
+#: 문서당 값이 하나여야 하는 (항목, 하위키) — 여기서는 합집합 규칙 대신 **완전 일치**만 봅니다.
+#: (방문 횟수 4회와 3회를 한 문서가 같이 말하면 그 자체가 충돌이지, 다른 문서의 '전파 누락'이 아니다)
+SINGLE_VALUED = {("title", "국문"), ("title", "영문"), ("version", "버전"), ("version", "날짜"), ("pi", "책임자"),
+                 ("pi", "기관"), ("visits", "방문횟수"), ("visits", "참여기간"), ("retention", "")}
 
 
 class Table:
@@ -111,7 +115,10 @@ def _compare_sets(item: str, sub: str, table: Table, issues: List[Issue], cov: C
     union: Set[str] = set()
     for v in sets.values():
         union |= v
-    conflict = not any(sets[n] == union for n in names)
+    if (item, sub) in SINGLE_VALUED:
+        conflict = len({frozenset(v) for v in sets.values()}) > 1
+    else:
+        conflict = not any(sets[n] == union for n in names)
     if conflict:
         ref = sets[names[0]]
         ev = [_evidence(per_doc[n], table, differs=(sets[n] != ref)) for n in names]
@@ -257,6 +264,15 @@ def compare(extractions: Sequence[Extraction], docs: Sequence[Doc], cov: Coverag
         with_docs = table.docs_with(item)
         if item == "assessments" and not any(d.role == ROLE_CRF for d in readable):
             cov.items_uncomparable.append((ITEM_NAMES[item], "CRF 문서 없음 — 평가항목은 CRF 폼 대 프로토콜·동의서로만 대조"))
+            continue
+        if item == "assessments" and with_docs:
+            # CRF 폼 대 프로토콜·동의서 **본문** 대조라, 프로토콜 쪽 추출이 0 이어도 성립한다
+            v = _compare_assessments(table, issues, cov)
+            if v is None:
+                cov.items_uncomparable.append((ITEM_NAMES[item], "CRF 에서 폼 이름이 추출되지 않음" if not any(table.role(n) == ROLE_CRF for n in with_docs) else "대조할 프로토콜·동의서가 없음"))
+                cov.manual_only.append(ITEM_NAMES[item])
+            else:
+                cov.items_compared.append(ITEM_NAMES[item])
             continue
         if not with_docs:
             cov.items_uncomparable.append((ITEM_NAMES[item], "어느 문서에서도 추출되지 않음" + (" (서술형이라 정규식이 약함)" if item in NARRATIVE_ITEMS else "")))

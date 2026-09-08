@@ -257,3 +257,45 @@ def test_mask_linear_on_long_ascii():
 def test_contact_plus82_normalised():
     exts = X.extract_contact(_doc("문의 +82-10-1234-5678"))
     assert _norms(exts, "전화") == {"01012345678"}
+
+
+# ------------------------------------------------------------ 라운드 2
+
+def test_crf_checklist_header_row_not_counted():
+    d = _doc("선정기준\n기준\t예\t아니오\n① 만 19세 이상\t□\t□\n② 서면 동의\t□\t□\n제외기준\n기준\t예\t아니오\n① 임신부\t□\t□", role=ROLE_CRF, name="CRF.md")
+    exts = X.extract_criteria(d)
+    assert _norms(exts, "선정기준 개수") == {"2"} and _norms(exts, "제외기준 개수") == {"1"}
+
+
+def test_two_level_heading_is_not_assessment():
+    d = Doc(path="p", name="p", role=ROLE_PROTOCOL, label="프로토콜")
+    d.paras = [Para(idx=0, text="4.3 평가 항목", section="4.3 평가 항목"), Para(idx=1, text="4.3.1 주요 평가 변수", section="4.3.1 주요 평가 변수"),
+               Para(idx=2, text="평가 항목은 다음과 같다: 불면증심각도척도(ISI).", section="4.3 평가 항목")]
+    assert _norms(X.extract_assessments(d)) == {"불면증심각도척도"}
+
+
+@pytest.mark.parametrize("line,expect", [
+    ("탈락 및 불성실 응답을 고려하여 최대 220명까지 모집할 수 있다.", set()),
+    ("표본이 작거나(대부분 100명 미만) 단일 대학에 국한되어 있었다.", set()),
+    ("성인을 대상으로 한 연구는 대개 50명 이하였다.", set()),
+    ("총 200명을 모집한다.", {"200"}),
+])
+def test_n_caps_and_bounds(line, expect):
+    assert _norms(X.extract_n(_doc(line))) == expect
+
+
+def test_assessment_honorific_and_leadin():
+    d = _doc("귀하는 지각된 스트레스 척도(PSS)를 작성하시게 됩니다.\n측정 도구: 다음 설문을 실시한다.\n스마트폰 중독 자가진단 척도(S-Scale), 우울 척도(PHQ-9).")
+    got = _norms(X.extract_assessments(d))
+    assert {"지각된스트레스척도", "스마트폰중독자가진단척도", "우울척도"} <= got
+
+
+def test_assessment_suffix_chain_not_truncated():
+    assert _norms(X.extract_assessments(_doc("통증숫자평가척도(NRS)를 평가한다."))) == {"통증숫자평가척도"}
+
+
+def test_pi_cover_cell_and_paren_org():
+    exts = X.extract_pi(_doc("연구책임자 소속/직위/성명\t가상대학교병원 재활의학과 / 교수 / 김가상"))
+    assert _norms(exts, "책임자") == {"김가상"} and _norms(exts, "기관") == {"가상대학교병원"}
+    exts = X.extract_pi(_doc("연구책임자\t김가상 (가상대학교병원 재활의학과 교수)"))
+    assert _norms(exts, "책임자") == {"김가상"} and _norms(exts, "기관") == {"가상대학교병원"}

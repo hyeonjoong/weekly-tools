@@ -130,6 +130,15 @@ _PI_RX = re.compile(
     r"([가-힣]{2,4}|[A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})(?=\s|$|\t|[(,·/]|교수|박사|선생|원장|소장|과장)", re.IGNORECASE)
 _ORG_RX = re.compile(
     r"(?:연구\s*기관|실시\s*기관|시험\s*기관|소속\s*기관|기관명|소속|institution|site)\s*(?:명)?\s*[:：\t]\s*([^\t\n,;(]{2,40}?)\s*(?:$|\t|,|;|\()", re.IGNORECASE)
+_PI_COVER = re.compile(r"(?:연구\s*책임자|책임\s*연구자)\s*((?:소속|직위|직책|성명|이름|기관)(?:\s*[/·,]\s*(?:소속|직위|직책|성명|이름|기관))+)\s*[:：\t]\s*(.+)$")
+_ORG_WORD = re.compile(r"[가-힣A-Za-z]*(?:병원|대학교|대학|의료원|센터|연구소|연구원|의원|클리닉|Hospital|University|Institute|Center)[가-힣A-Za-z]*")
+
+
+def _org_token(text: str) -> str:
+    m = _ORG_WORD.search(text)
+    return m.group(0) if m else ""
+
+
 _NOT_NAME = {"이름", "성명", "소속", "연락처", "서명", "직위", "직책", "전화", "이메일", "기관", "날짜", "확인", "담당", "정보", "연구자"}
 #: 라벨 바로 뒤에 붙는 두 글자 이상 조사·접속어 — 한 글자 조사(가·는·의…)는 이름 최소 길이(2)에 걸려 애초에 안 잡힙니다.
 _PARTICLE_START = re.compile(r"^(?:에게|로부터|또는|께서|이며|에게서|에서|한테|으로|이다|입니다|이고|이나|이라|그리고|혹은)")
@@ -139,11 +148,29 @@ def extract_pi(doc: Doc) -> List[Extraction]:
     out: List[Extraction] = []
     for p in doc.paras[:600]:
         for s in _sentences(p):
+            cover = _PI_COVER.search(s)
+            if cover:  # 표지 표: "연구책임자 소속/직위/성명 \t 가상대학교병원 재활의학과 / 교수 / 김가상"
+                labels = [x.strip() for x in re.split(r"[/·,]", cover.group(1))]
+                values = [x.strip() for x in re.split(r"[/·,]", cover.group(2))]
+                if len(labels) == len(values):
+                    for lab, val in zip(labels, values):
+                        if re.search(r"성명|이름", lab) and re.fullmatch(r"[가-힣]{2,4}", val):
+                            out.append(_mk("pi", "책임자", doc, val, textnorm.squash(val), p, s, ("공백·문장부호 제거",)))
+                        elif re.search(r"소속|기관", lab) and len(val) >= 2:
+                            org = _org_token(val)
+                            if org:
+                                out.append(_mk("pi", "기관", doc, org, textnorm.squash(org), p, s, ("공백·문장부호 제거",)))
+                    continue
             m = _PI_RX.search(s)
             if m:
                 name = m.group(1).strip()
                 if name not in _NOT_NAME and not re.match(r"^(?:이름|성명|소속)", name) and not _PARTICLE_START.match(name):
                     out.append(_mk("pi", "책임자", doc, name, textnorm.squash(name), p, s, ("공백·문장부호 제거",)))
+                    paren = re.match(r"\s*\(([^)]{2,60})\)", s[m.end():])
+                    if paren:
+                        org = _org_token(paren.group(1))
+                        if org:
+                            out.append(_mk("pi", "기관", doc, org, textnorm.squash(org), p, s, ("공백·문장부호 제거",)))
             m2 = _ORG_RX.search(s)
             if m2:
                 org = m2.group(1).strip()
@@ -177,7 +204,9 @@ def extract_contact(doc: Doc) -> List[Extraction]:
 _N_CTX = re.compile(r"대상자|참여자|참가자|피험자|모집|표본|인원|환자|군|명\s*을|명\s*이|명\s*으로|subjects?|participants?", re.IGNORECASE)
 _N_STAFF = re.compile(r"연구자|연구원|간호사|담당자|연구진|심사위원|위원|평가자|검사자|의사\s*[0-9]")
 _N_STAFF_ADJ = re.compile(r"(?:연구자|연구원|간호사|담당자|위원|평가자|검사자|의사)\s*(?:은|는|이|가|을|를|약)?\s*$")
-_N_BACKGROUND = re.compile(r"선행\s*연구|기존\s*연구|문헌|보고(?:되|된|하였)|메타\s*분석|연구에서는|에서\s*[0-9,]+\s*명을?\s*(?:분석|보고|대상으로\s*한\s*연구)|유병률|추정된다")
+_N_BACKGROUND = re.compile(r"선행\s*연구|기존\s*연구|문헌|보고(?:되|된|하였)|메타\s*분석|연구에서는|을?\s*대상으로\s*한\s*연구|에서\s*[0-9,]+\s*명을?\s*(?:분석|보고)|유병률|추정된다|국한|한계가")
+_N_CAP_TAIL = re.compile(r"\s*(?:미만|초과|까지|이내|내외|가량|안팎)")
+_N_CAP_HEAD = re.compile(r"(?:최대|최소|대부분|평균|많아야|적어도|최소한)\s*$")
 _N_NUM = re.compile(r"(?:총\s*)?(?<![0-9.,])([0-9]{1,3}(?:,[0-9]{3}){0,3})\s*명(?![0-9])")
 
 
@@ -205,6 +234,8 @@ def extract_n(doc: Doc) -> List[Extraction]:
                     continue  # "연구간호사 2명" · "1명의 연구자" — 대상자가 아니다
                 if re.match(r"\s*(?:당|씩|마다|별)", tail):
                     continue  # "대상자 1명당" — 인원이 아니라 단위
+                if _N_CAP_TAIL.match(tail) or _N_CAP_HEAD.search(prefix):
+                    continue  # "최대 220명까지", "100명 미만" — 상한·하한이지 표본수가 아니다
                 out.append(_mk("n", "", doc, m.group(0).strip(), str(n), p, s))
     return _dedupe(out)
 
@@ -379,6 +410,9 @@ def extract_criteria(doc: Doc) -> List[Extraction]:
                 style = _marker_style(q.text)
             elif _CRIT_ITEM.match(q.text) and _marker_style(q.text) != style:
                 break  # 번호 스타일이 바뀌면 (1) 2) … 다음 "4. 절제목") 목록이 끝난 것
+            if q.table and _is_checklist_header(q.text):
+                j += 1
+                continue  # CRF 체크리스트의 헤더 행(기준 | 예 | 아니오)은 기준 항목이 아니다
             if _CRIT_ITEM.match(q.text) or (q.table and q.text.strip()):
                 body = re.sub(r"^(?:[0-9]{1,2}[.)]|\([0-9]{1,2}\)|[①-⑳]|[-•·▪◦]|[가-힣][.)]|[a-z][.)])\s*", "", q.text).strip()
                 if body:
@@ -392,6 +426,17 @@ def extract_criteria(doc: Doc) -> List[Extraction]:
                 out.append(_mk("criteria", kind + "항목", doc, it[:120], textnorm.squash(it)[:80], p, it, ("공백·문장부호 제거",)))
         i = max(j, i + 1)
     return _dedupe(out)
+
+
+_CHECK_VOCAB = {"기준", "번호", "항목", "예", "아니오", "yes", "no", "y", "n", "충족", "미충족", "확인", "해당", "비해당", "판정", "결과", "no.", "#", "내용", "선정기준", "제외기준", "비고", "체크"}
+
+
+def _is_checklist_header(row_text: str) -> bool:
+    cells = [c.strip().lower() for c in row_text.split("\t") if c.strip()]
+    if not cells:
+        return True
+    return all(c in _CHECK_VOCAB or re.fullmatch(r"[□☐☑✓✔○×xv\-_ ]*", c) for c in cells) or (
+        len(cells) >= 2 and sum(1 for c in cells if c in _CHECK_VOCAB) >= len(cells) - 1 and any(c in ("예", "아니오", "yes", "no", "충족", "미충족") for c in cells))
 
 
 _HEAD_NOUN = re.compile(r"(?:항목|기준|방법|절차|목적|배경|설계|보상|정보|일정|기간|평가|분석|관리|보호|연락처|모집|개요|요약)$")
@@ -432,8 +477,9 @@ def _looks_like_heading_break(text: str) -> bool:
 
 _ASSESS_SUFFIX = r"(?:검사|척도|설문지|설문|질문지|지수|일지|평가지|평가|측정|Index|Scale|Inventory|Questionnaire|Test|Diary|Assessment)"
 _FORM_LINE = re.compile(r"^(?:[0-9]{1,2}[.)]\s*|[①-⑳]\s*|[-•·]\s*)?([A-Za-z가-힣0-9][A-Za-z가-힣0-9\-\s()/]{1,38}?" + _ASSESS_SUFFIX + r")\s*(?:\(([A-Za-z][A-Za-z0-9\- ]{1,24})\))?\s*$")
-_ASSESS_CTX = re.compile(r"평가\s*항목|검사\s*항목|측정\s*항목|평가\s*변수|평가\s*도구|측정\s*도구|평가는|검사는|측정은|다음\s*(?:검사|평가|측정)|다음과\s*같은\s*(?:검사|평가|설문)|(?:검사|평가|설문|척도|지수|설문지|일지)\s*(?:\([^)]{1,24}\))?\s*[)）]?\s*(?:를|을|와|과|및|,)?\s*(?:실시|시행|수행|평가|측정|작성)(?:한다|합니다|하며|하고|됩니다|하게)", re.IGNORECASE)
-_ASSESS_TOK = re.compile(r"([A-Za-z가-힣0-9][A-Za-z가-힣0-9\- ]{1,30}?" + _ASSESS_SUFFIX + r")(?:\s*\(([A-Za-z][A-Za-z0-9\- ]{1,24})\))?")
+_ASSESS_CTX = re.compile(r"평가\s*항목|검사\s*항목|측정\s*항목|평가\s*변수|평가\s*도구|측정\s*도구|평가는|검사는|측정은|다음\s*(?:검사|평가|측정)|다음과\s*같은\s*(?:검사|평가|설문)|(?:검사|평가|설문|척도|지수|설문지|일지)\s*(?:\([^)]{1,24}\))?\s*[)）]?\s*(?:를|을|와|과|및|,)?\s*(?:실시|시행|수행|평가|측정|작성)(?:한다|합니다|하며|하고|됩니다|하게|하시게|받으시게|받게|받습니다|하십니다|하시고|되며)", re.IGNORECASE)
+_ASSESS_TOK = re.compile(r"([A-Za-z가-힣][A-Za-z가-힣0-9\- ]{1,30}?(?:" + _ASSESS_SUFFIX + r")+)(?:\s*\(([A-Za-z][A-Za-z0-9\- ]{1,24})\))?")
+_ASSESS_LEADIN = re.compile(r"(?:다음|아래)(?:과\s*같은|의|과\s*같이)?\s*(?:설문|검사|평가|측정|도구|항목|척도)[^.]{0,20}(?:실시|시행|수행|평가|측정|작성|사용)|[:：]\s*$")
 _ASSESS_LEAD = re.compile(r"^(?:다음|아래|위|해당|이|그|각|모든|본|재|전|후|주요|기타|같은|등의|위한|및|또는|그리고|필요한|추가|관련)$")
 
 
@@ -449,6 +495,7 @@ _ASSESS_STOP = {"평가", "검사", "측정", "설문", "척도", "지수", "일
 
 def extract_assessments(doc: Doc) -> List[Extraction]:
     out: List[Extraction] = []
+    carry = 0
     for p in doc.paras:
         if doc.role == ROLE_CRF:
             cells = p.text.split("\t") if p.table else [p.text]
@@ -461,9 +508,18 @@ def extract_assessments(doc: Doc) -> List[Extraction]:
                         continue
                     out.append(_mk("assessments", "", doc, name + (" ({})".format(m.group(2)) if m.group(2) else ""), key, p, cell, ("공백·문장부호 제거",)))
             continue
+        if p.section == p.text or _looks_like_heading_break(p.text):
+            carry = 0
+            continue  # "4.3 평가 항목" 같은 절 제목은 평가항목이 아니다
         for s in _sentences(p):
-            if not _ASSESS_CTX.search(s):
+            if not _ASSESS_CTX.search(s) and carry <= 0:
+                if _ASSESS_LEADIN.search(s):
+                    carry = 3  # "다음 설문을 실시한다:" — 목록이 다음 문장·문단에 온다
                 continue
+            if not _ASSESS_CTX.search(s):
+                carry -= 1
+            elif _ASSESS_LEADIN.search(s):
+                carry = 3
             for m in _ASSESS_TOK.finditer(s):
                 name = _clean_assess_name(m.group(1).strip())
                 key = textnorm.squash(name)
