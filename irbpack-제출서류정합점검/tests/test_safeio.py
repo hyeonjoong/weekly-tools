@@ -125,3 +125,18 @@ def test_out_dir_symlink_with_trailing_slash_refused(tmp_path, clean_safeio):
         pytest.skip("symlink 불가")
     with pytest.raises(safeio.OutputError):
         safeio.prepare_out_dir(str(link) + "/")
+
+
+def test_directory_at_target_name_is_refused_with_clear_message(tmp_path, clean_safeio):
+    out = safeio.prepare_out_dir(str(tmp_path / "out"))
+    os.mkdir(os.path.join(out, "정합점검.md"))
+    with pytest.raises(safeio.OutputError) as exc:
+        safeio.write_text(out, "정합점검.md", "x")
+    assert "폴더" in str(exc.value)
+
+
+def test_surrogate_text_is_written_without_partial_file(tmp_path, clean_safeio):
+    out = safeio.prepare_out_dir(str(tmp_path / "out"))
+    bad = "abc" + b"\xff".decode("utf-8", "surrogateescape") + "def"
+    p = safeio.write_text(out, "a.md", bad)
+    assert os.path.getsize(p) > 0 and "abc" in open(p, encoding="utf-8").read()

@@ -286,3 +286,31 @@ def test_mc_fallback_is_not_duplicated(tmp_path):
     p = write_docx(str(tmp_path / "m.docx"), [], raw_body=raw)
     doc = readers.load(p)
     assert doc.paras[0].text == "본문 상자 문장"
+
+
+def test_nobreakhyphen_softhyphen_sym(tmp_path):
+    raw = ('<w:p><w:r><w:t>만 5</w:t><w:noBreakHyphen/><w:t>12세</w:t></w:r></w:p>'
+           '<w:p><w:r><w:t>v1</w:t><w:softHyphen/><w:t>.2</w:t></w:r></w:p>'
+           '<w:p><w:r><w:t>a</w:t><w:sym w:font="Symbol" w:char="F0B7"/><w:t>b</w:t></w:r></w:p>')
+    p = write_docx(str(tmp_path / "h.docx"), [], raw_body=raw)
+    doc = readers.load(p)
+    assert [x.text for x in doc.paras] == ["만 5-12세", "v1.2", "a·b"]
+
+
+def test_unread_reason_has_no_absolute_path(tmp_path):
+    d = tmp_path / "deep" / "dir"
+    d.mkdir(parents=True)
+    f = d / "x.docx"
+    f.write_bytes(b"junk")
+    doc = readers.load(str(f))
+    assert not doc.readable and str(tmp_path) not in doc.unread_reason
+
+
+def test_pdf_cumulative_bomb_is_refused(tmp_path):
+    import zlib
+    one = zlib.compress(b"BT (x) Tj ET " * 2_500_000)  # ~30MB inflated
+    body = b"".join(b"%d 0 obj << /Length %d /Filter /FlateDecode >>\nstream\n" % (i, len(one)) + one + b"\nendstream\nendobj\n" for i in range(1, 4))
+    p = tmp_path / "bomb2.pdf"
+    p.write_bytes(b"%PDF-1.4\n" + body + b"%%EOF")
+    doc = readers.load(str(p))
+    assert not doc.readable and "넘습니다" in doc.unread_reason

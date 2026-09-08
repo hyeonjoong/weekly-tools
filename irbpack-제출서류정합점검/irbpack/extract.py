@@ -33,8 +33,18 @@ def _sentences(p: Para) -> Iterable[str]:
 def _mk(item: str, sub: str, doc: Doc, raw: str, norm: str, p: Para, sentence: str,
         rules: Tuple[str, ...] = (), source: str = "") -> Extraction:
     return Extraction(item=item, sub=sub, doc=doc.name, label=doc.label, raw=raw.strip(),
-                      norm=norm, para=p.idx, where=p.where(), sentence=sentence.strip()[:240],
+                      norm=norm, para=p.idx, where=p.where(), sentence=_cut(sentence.strip()),
                       norm_rules=rules, source=(source or raw).strip())
+
+
+def _cut(text: str, limit: int = 240) -> str:
+    """근거 문장 절단 — 전화번호 한가운데를 자르지 않도록 공백 경계까지 늘립니다 (마스킹 전 부분 노출 방지)."""
+    if len(text) <= limit:
+        return text
+    cut = text.find(" ", limit)
+    if cut < 0 or cut > limit + 80:
+        cut = limit + 80
+    return text[:cut] + "…"
 
 
 def _dedupe(items: List[Extraction]) -> List[Extraction]:

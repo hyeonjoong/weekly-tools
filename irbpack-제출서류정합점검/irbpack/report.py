@@ -68,7 +68,7 @@ def _issue_lines(no: int, issue: Issue) -> List[str]:
         mark = "  ← 다름" if ev.differs else ""
         lines.append("       {} {}  {}{}".format(_pad(_s(ev.label), 14), _s(ev.value), loc, mark))
         if ev.sentence:
-            sent = _s(ev.sentence)
+            sent = _s(ev.sentence).replace("\t", " │ ")
             if len(sent) > SENTENCE_MAX:
                 sent = sent[:SENTENCE_MAX] + "…"
             lines.append("       {} 「{}」".format(" " * 14, sent))
@@ -241,7 +241,7 @@ def extraction_rows(res: Result) -> List[List[str]]:
 
 
 def uncomparable_rows(res: Result) -> List[List[str]]:
-    return [[_s(n), _s(w)] for n, w in res.coverage.items_uncomparable] + [[_s(n), _s(w)] for n, w in res.coverage.sub_gaps]
+    return [["항목", _s(n), _s(w)] for n, w in res.coverage.items_uncomparable] + [["하위 항목", _s(n), _s(w)] for n, w in res.coverage.sub_gaps]
 
 
 def write_all(res: Result, out_dir: str, md_text: str) -> List[str]:
@@ -253,5 +253,5 @@ def write_all(res: Result, out_dir: str, md_text: str) -> List[str]:
                                     ["항목", "심각도", "제목", "문서A", "값A", "근거위치A", "문서B", "값B", "근거위치B"], issue_rows(res)))
     written.append(safeio.write_csv(out_dir, "항목추출표.csv",
                                     ["역할", "문서", "항목", "하위항목", "추출값", "정규화값", "문단번호", "근거위치", "원문문장"], extraction_rows(res)))
-    written.append(safeio.write_csv(out_dir, "대조불가.csv", ["항목", "사유"], uncomparable_rows(res)))
+    written.append(safeio.write_csv(out_dir, "대조불가.csv", ["구분", "항목", "사유"], uncomparable_rows(res)))
     return written

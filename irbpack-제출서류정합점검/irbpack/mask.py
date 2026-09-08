@@ -20,13 +20,16 @@ from __future__ import annotations
 
 import re
 
+_INVIS = set("\u00ad\u2060\u200b\u200c\u200d")
+_DASH_BETWEEN_DIGITS = re.compile(r"(?<=[0-9])\s*[‐‑‒–—―−﹣]\s*(?=[0-9])")
+
 #: 주민등록번호 형태. 전화번호보다 **먼저** 가려야 합니다
 #: (`900101-1234567` 이 전화번호 정규식에 걸리지 않도록 자리수를 고정).
 _RRN = re.compile(r"(?<![0-9])([0-9]{6})\s*[-‑–—]?\s*([0-9][0-9]{6})(?![0-9])")
 
 #: 한국 전화번호. 지역번호 2~3자리 + 국번 3~4자리 + 4자리.
 _PHONE = re.compile(
-    r"(?<![0-9])(?:\+\s*82\s*[-‑–—.\s]?\s*0?|\(?0)([0-9]{1,2})\)?\s*[-‑–—.\s]?\s*([0-9]{3,4})\s*[-‑–—.\s]?\s*([0-9]{4})(?![0-9])"
+    r"(?<![0-9])(?:\+\s*82\s*[-‑–—.\s]?\s*(?:\(0\)\s*|0)?|\(?0)([0-9]{1,2})\)?\s*[-‑–—.\s]?\s*([0-9]{3,4})\s*[-‑–—.\s]?\s*([0-9]{4})(?![0-9])"
     r"|(?<![0-9])(1[5-8][0-9]{2})\s*[-‑–—.]\s*([0-9]{4})(?![0-9])")
 
 #: 이메일. 로컬파트 첫 글자만 남깁니다.
@@ -57,6 +60,8 @@ def mask(text: str) -> str:
     if not text:
         return text
     text = "".join(chr(ord(ch) - 0xFEE0) if "！" <= ch <= "～" else ch for ch in text)  # 전각 숫자·기호 → 반각
+    text = "".join(ch for ch in text if ch not in _INVIS)  # 소프트하이픈·워드조이너 제거
+    text = _DASH_BETWEEN_DIGITS.sub("-", text)  # 숫자 사이의 ‐‒–—− 만 - 로 (문장 속 대시는 건드리지 않음)
     out = _RRN.sub(lambda m: "*" * 6 + "-" + "*" * 7, text)
     out = _PHONE.sub(_mask_phone, out)
     out = _EMAIL.sub(_mask_email, out)

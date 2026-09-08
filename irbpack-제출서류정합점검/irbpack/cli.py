@@ -27,7 +27,11 @@ def _collect(paths: Sequence[str]) -> Tuple[List[str], List[str]]:
     errors: List[str] = []
     for p in paths:
         if os.path.isdir(p):
-            names = sorted(os.listdir(p))
+            try:
+                names = sorted(os.listdir(p))
+            except OSError as exc:
+                errors.append("폴더를 읽을 수 없습니다: {} ({})".format(os.path.basename(p.rstrip(os.sep)) or p, exc.__class__.__name__))
+                continue
             for n in names:
                 if n.startswith(_SKIP_PREFIX):
                     continue
@@ -69,12 +73,19 @@ def _clean(text: object) -> str:
 
 
 def _print(text: str) -> None:
+    """화면 출력 — 콘솔 인코딩·닫힌 파이프·없는 stdout 어느 것도 종료코드를 바꾸지 못합니다."""
+    stream = sys.stdout
+    if stream is None:
+        return
     try:
-        sys.stdout.write(text)
-    except UnicodeEncodeError:
-        enc = getattr(sys.stdout, "encoding", None) or "utf-8"
-        sys.stdout.write(text.encode(enc, errors="replace").decode(enc, errors="replace"))
-    sys.stdout.flush()
+        try:
+            stream.write(text)
+        except UnicodeEncodeError:
+            enc = getattr(stream, "encoding", None) or "utf-8"
+            stream.write(text.encode(enc, errors="replace").decode(enc, errors="replace"))
+        stream.flush()
+    except (BrokenPipeError, OSError, ValueError, AttributeError):
+        pass
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -98,6 +109,14 @@ def _load_packet(files: Sequence[str], forced: List[Tuple[str, str]]) -> Tuple[L
         if counts[d.name] > 1:
             parent = readers.sanitize_name(os.path.basename(os.path.dirname(os.path.abspath(d.path))))
             d.name = "{}/{}".format(parent, d.name)
+    seen: dict = {}
+    for d in docs:  # 상위 폴더 이름까지 같으면 번호로 구분 (추출값이 한 문서로 뭉치는 사고 방지)
+        seen[d.name] = seen.get(d.name, 0) + 1
+    seq: dict = {}
+    for d in docs:
+        if seen[d.name] > 1:
+            seq[d.name] = seq.get(d.name, 0) + 1
+            d.name = "{} #{}".format(d.name, seq[d.name])
     errors = roles.assign(docs, forced)
     return docs, errors
 
@@ -165,7 +184,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     try:
         forced = roles.parse_role_args(args.role)
     except ValueError as exc:
-        _print("[중단] {}\n".format(exc))
+        _print("[중단] {}\n".format(_clean(exc)))
         return 2
     files, errors = _collect(args.paths)
     if errors:
@@ -175,6 +194,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         _print("[중단] 읽을 문서가 없습니다 (.docx .md .txt .pdf)\n")
         return 2
     baseline_files: Optional[List[str]] = None
+    if args.baseline is not None and not args.baseline.strip():
+        _print("[중단] --baseline 이 비어 있습니다\n")
+        return 2
+    if args.out_dir is not None and not args.out_dir.strip():
+        _print("[중단] --out-dir 이 비어 있습니다\n")
+        return 2
     if args.baseline:
         baseline_files, berr = _collect([args.baseline])
         if berr or not baseline_files:
@@ -212,12 +237,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     except report.ReportIntegrityError as exc:
         _print("[중단] 리포트 무결성 오류 — 커버리지 자백 없이는 리포트를 내지 않습니다: {}\n".format(_clean(exc)))
         return 2
-    except (safeio.OutputError, OSError) as exc:
+    except (safeio.OutputError, OSError, ValueError) as exc:
         _print("[중단] 출력 실패 — 리포트를 쓰지 못해 판정을 내지 않습니다: {}\n".format(_clean(exc)))
         return 2
     _print(console)
     if out_dir:
-        _print("\n출력: {}\n".format(_clean(out_dir)))
+        _print("\n출력: {}\n".format(_clean(args.out_dir)))
         for w in written:
             _print("  · {}\n".format(_clean(os.path.basename(w))))
     return res.exit_code

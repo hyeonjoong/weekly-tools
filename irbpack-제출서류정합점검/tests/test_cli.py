@@ -196,3 +196,66 @@ def test_internal_error_is_exit_2_not_1(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(c.extract, "extract_all", lambda d: (_ for _ in ()).throw(RuntimeError("boom")))
     assert c.main([full_packet(tmp_path)]) == 2
     assert "내부 오류" in capsys.readouterr().out
+
+
+# ------------------------------------------------------------ 라운드 2
+
+def test_broken_stdout_does_not_change_exit_code(tmp_path, monkeypatch):
+    class Broken(io.TextIOBase):
+        def write(self, s):
+            raise BrokenPipeError()
+        def flush(self):
+            pass
+    monkeypatch.setattr(sys, "stdout", Broken())
+    assert cli.main([full_packet(tmp_path)]) == 0
+    monkeypatch.setattr(sys, "stdout", None)
+    assert cli.main([full_packet(tmp_path)]) == 0
+
+
+def test_unreadable_directory_is_exit_2(tmp_path, capsys):
+    if os.geteuid() == 0:
+        pytest.skip("root 는 권한 무시")
+    p = full_packet(tmp_path)
+    os.chmod(p, 0)
+    try:
+        assert cli.main([p]) == 2
+        assert "읽을 수 없습니다" in capsys.readouterr().out
+    finally:
+        os.chmod(p, 0o700)
+
+
+def test_same_basename_same_parent_name_still_separate(tmp_path):
+    for sub, n in (("p/a", "총 90명"), ("q/a", "총 80명")):
+        d = tmp_path / sub
+        d.mkdir(parents=True)
+        (d / "ICF_성인용_v1.2.md").write_text(md_icf(n=n), encoding="utf-8")
+    proto = tmp_path / "proto"
+    proto.mkdir()
+    (proto / "연구계획서.md").write_text(md_protocol(n="총 90명"), encoding="utf-8")
+    code = cli.main([str(proto), str(tmp_path / "p/a/ICF_성인용_v1.2.md"), str(tmp_path / "q/a/ICF_성인용_v1.2.md")])
+    assert code == 1
+
+
+def test_surrogate_filename_with_out_dir_is_not_exit_1(tmp_path, capsys):
+    p = full_packet(tmp_path)
+    bad = os.path.join(p, b"ICF_\xff\xfe_v1.2.md".decode("utf-8", "surrogateescape"))
+    try:
+        with open(bad, "w", encoding="utf-8") as fh:
+            fh.write(md_icf(kind="보호자용"))
+    except (OSError, UnicodeEncodeError):
+        pytest.skip("파일시스템이 서로게이트 이름을 거부")
+    out = str(tmp_path / "out")
+    code = cli.main([p, "--out-dir", out])
+    assert code in (0, 2, 3)
+    if code == 0:
+        assert os.path.getsize(os.path.join(out, "정합점검.md")) > 0
+
+
+def test_empty_out_dir_arg_is_exit_2(tmp_path, capsys):
+    assert cli.main([full_packet(tmp_path), "--out-dir", ""]) == 2
+    assert "비어" in capsys.readouterr().out
+
+
+def test_role_value_with_pii_masked_in_error(tmp_path, capsys):
+    assert cli.main([full_packet(tmp_path), "--role", "010-1234-5678=x"]) == 2
+    assert "1234-5678" not in capsys.readouterr().out

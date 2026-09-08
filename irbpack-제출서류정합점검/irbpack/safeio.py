@@ -61,7 +61,7 @@ def prepare_out_dir(path: str) -> str:
 def sanitize_cell(value: object) -> str:
     """CSV 셀 — 제어문자 제거, 수식 인젝션 방어(= + - @ 탭 CR 앞에 '), 길이 제한."""
     s = "" if value is None else str(value)
-    s = unicodedata.normalize("NFC", s)
+    s = unicodedata.normalize("NFC", s).encode("utf-8", "replace").decode("utf-8")
     s = _CTRL.sub("�", s).replace("\r", " ").replace("\n", " ").replace("\t", " ")
     if len(s) > MAX_CELL:
         s = s[:MAX_CELL] + " …(잘림)"
@@ -73,7 +73,7 @@ def sanitize_cell(value: object) -> str:
 def sanitize_line(value: object) -> str:
     """리포트 한 줄 — 개행·제어문자를 가시 문자로 (가짜 [치명] 줄 방지)."""
     s = "" if value is None else str(value)
-    s = unicodedata.normalize("NFC", s)
+    s = unicodedata.normalize("NFC", s).encode("utf-8", "replace").decode("utf-8")
     s = s.replace("\r\n", "␤").replace("\n", "␤").replace("\r", "␤")
     return _CTRL.sub("�", s)
 
@@ -86,6 +86,8 @@ def _target(out_dir: str, name: str) -> str:
         raise OutputError("출력 대상이 심볼릭 링크입니다 — 덮어쓰지 않습니다: {}".format(target))
     if _canon(target) in _PROTECTED:
         raise OutputError("출력 대상이 입력 파일입니다 — 덮어쓰지 않습니다: {}".format(target))
+    if os.path.isdir(target):
+        raise OutputError("출력 대상 이름의 폴더가 이미 있습니다: {}".format(target))
     if os.path.exists(target):
         st = os.stat(target)
         if st.st_nlink > 1:
@@ -103,8 +105,9 @@ def _open_write(target: str):
 
 def write_text(out_dir: str, name: str, text: str) -> str:
     target = _target(out_dir, name)
+    data = text.encode("utf-8", "replace").decode("utf-8")  # 파일을 열기 전에 인코딩 문제를 걸러 0바이트 파일이 남지 않게
     with _open_write(target) as fh:
-        fh.write(text)
+        fh.write(data)
     return target
 
 

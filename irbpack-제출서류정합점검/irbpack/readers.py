@@ -81,6 +81,12 @@ def _para_text(p: ET.Element) -> Tuple[str, bool]:
             parts.append(" ")
         elif tag in (W + "br", W + "cr"):
             parts.append(" ")
+        elif tag == W + "noBreakHyphen":
+            parts.append("-")
+        elif tag == W + "softHyphen":
+            pass
+        elif tag == W + "sym":
+            parts.append("·")
         elif tag == W + "delText":
             pass
     return "".join(parts), tracked
@@ -283,15 +289,20 @@ def read_pdf(path: str) -> List[Para]:
     if b"/Identity-H" in raw or b"/CIDFontType" in raw or b"/Identity-V" in raw:
         raise ValueError("CID 폰트(Identity-H) PDF — 텍스트 레이어가 글리프 번호라 읽을 수 없습니다. docx 로 변환해 주세요")
     chunks: List[str] = []
+    total = 0
+    n_lines = 0
     for m in _PDF_STREAM.finditer(raw):
         data = m.group(1)
         try:
             d = zlib.decompressobj()
-            data = d.decompress(data, MAX_BYTES)
+            data = d.decompress(data, MAX_BYTES - total)
             if d.unconsumed_tail:
-                raise ValueError("PDF 스트림이 {}MB 를 넘습니다 (압축 해제 후)".format(MAX_BYTES // (1024 * 1024)))
+                raise ValueError("PDF 스트림이 누적 {}MB 를 넘습니다 (압축 해제 후)".format(MAX_BYTES // (1024 * 1024)))
         except zlib.error:
             pass
+        total += len(data)
+        if total > MAX_BYTES:
+            raise ValueError("PDF 스트림이 누적 {}MB 를 넘습니다 (압축 해제 후)".format(MAX_BYTES // (1024 * 1024)))
         for tobj in _PDF_TEXTOBJ.finditer(data):
             line: List[bytes] = []
             for s in _PDF_STR.finditer(tobj.group(1)):
@@ -306,6 +317,9 @@ def read_pdf(path: str) -> List[Para]:
                         txt = ""
                 if txt:
                     chunks.append(txt)
+                    n_lines += txt.count("\n") + 1
+                    if n_lines > MAX_PARAS:
+                        raise ValueError("문단이 {}개를 넘습니다".format(MAX_PARAS))
     text = "\n".join(chunks)
     good = sum(1 for ch in text if ch.isalnum())
     words = len(re.findall(r"[가-힣]{2,}|[A-Za-z]{3,}", text))
@@ -356,6 +370,8 @@ def load(path: str) -> Doc:
             NotImplementedError, zlib.error, MemoryError, RecursionError) as exc:
         # RuntimeError = 암호 걸린 zip 멤버, NotImplementedError = 미지원 압축, zlib.error = 깨진 스트림
         doc.readable = False
-        doc.unread_reason = sanitize_name(str(exc))[:200] or exc.__class__.__name__
+        reason = str(exc).replace(os.path.abspath(path), name).replace(path, name)
+        reason = re.sub(r"(?:/[^/\s'\"]+){2,}/", "…/", reason)  # 절대경로(홈 디렉터리 사용자명)가 리포트에 새지 않게
+        doc.unread_reason = sanitize_name(reason)[:200] or exc.__class__.__name__
         doc.paras = []
     return doc

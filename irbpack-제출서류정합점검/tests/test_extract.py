@@ -299,3 +299,20 @@ def test_pi_cover_cell_and_paren_org():
     assert _norms(exts, "책임자") == {"김가상"} and _norms(exts, "기관") == {"가상대학교병원"}
     exts = X.extract_pi(_doc("연구책임자\t김가상 (가상대학교병원 재활의학과 교수)"))
     assert _norms(exts, "책임자") == {"김가상"} and _norms(exts, "기관") == {"가상대학교병원"}
+
+
+@pytest.mark.parametrize("raw", ["010‐5555‐6666", "+82 (0)10-7777-8888", "010­1234­9999", "010‒1234‒5678", "010−1234−5678"])
+def test_mask_unicode_dashes_and_plus82_zero(raw):
+    from irbpack import mask
+    out = mask.mask("문의 " + raw)
+    assert "5555" not in out and "7777" not in out and "1234" not in out and "****" in out
+
+
+def test_sentence_cut_does_not_split_phone():
+    line = "연구 대상자는 총 90명 이며 " + "가" * 210 + " 담당 010-9876-5432 입니다."
+    exts = X.extract_n(_doc(line))
+    assert exts and "010-9876-5432" in exts[0].sentence
+
+
+def test_dashlike_normalised_in_age():
+    assert _norms(X.extract_age(_doc("만 5‐12세 소아"))) == {"5~12"}
