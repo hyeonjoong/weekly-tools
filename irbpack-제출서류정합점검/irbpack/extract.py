@@ -31,10 +31,10 @@ def _sentences(p: Para) -> Iterable[str]:
 
 
 def _mk(item: str, sub: str, doc: Doc, raw: str, norm: str, p: Para, sentence: str,
-        rules: Tuple[str, ...] = ()) -> Extraction:
+        rules: Tuple[str, ...] = (), source: str = "") -> Extraction:
     return Extraction(item=item, sub=sub, doc=doc.name, label=doc.label, raw=raw.strip(),
                       norm=norm, para=p.idx, where=p.where(), sentence=sentence.strip()[:240],
-                      norm_rules=rules)
+                      norm_rules=rules, source=(source or raw).strip())
 
 
 def _dedupe(items: List[Extraction]) -> List[Extraction]:
@@ -90,29 +90,28 @@ def extract_version(doc: Doc) -> List[Extraction]:
             continue
         for s in _sentences(p):
             if not found_ver and re.search(r"version|ver\b|\bv\s*[0-9]|버전|판번호|개정번호|[0-9]\.[0-9]\s*판", s, re.IGNORECASE):
-                v = textnorm.version(s)
-                if v:
-                    out.append(_mk("version", "버전", doc, "v" + v, v, p, s, ("버전 통일",)))
+                vm = textnorm.version_match(s)
+                if vm:
+                    out.append(_mk("version", "버전", doc, "v" + vm[0], vm[0], p, s, ("버전 통일",), source=vm[1]))
                     found_ver = True
             if not found_date and re.search(r"version|버전|작성일|승인일|개정일|date|날짜|일자", s, re.IGNORECASE):
-                ds = textnorm.find_dates(s)
+                ds = textnorm.find_dates_with_text(s)
                 if ds:
-                    out.append(_mk("version", "날짜", doc, ds[0], ds[0], p, s, ("날짜 통일",)))
+                    out.append(_mk("version", "날짜", doc, ds[0][0], ds[0][0], p, s, ("날짜 통일",), source=ds[0][1]))
                     found_date = True
     if not found_ver:
-        v = textnorm.version(fname)
-        if not v:
+        vm = textnorm.version_match(fname)
+        if not vm:
             m = re.search(r"(?<![0-9.])(?:v|ver)?([0-9]\.[0-9](?:\.[0-9])?)(?![0-9])", fname, re.IGNORECASE)
-            v = m.group(1) if m else None
-        if v:
-            fake = Para(idx=-1, text=fname)
-            out.append(Extraction(item="version", sub="버전", doc=doc.name, label=doc.label, raw="v" + v, norm=v,
-                                  para=-1, where="파일명", sentence=fname, norm_rules=("버전 통일",)))
+            vm = (m.group(1), m.group(0)) if m else None
+        if vm:
+            out.append(Extraction(item="version", sub="버전", doc=doc.name, label=doc.label, raw="v" + vm[0], norm=vm[0],
+                                  para=-1, where="파일명", sentence=fname, norm_rules=("버전 통일",), source=vm[1]))
     if not found_date:
-        ds = textnorm.find_dates(fname)
+        ds = textnorm.find_dates_with_text(fname)
         if ds:
-            out.append(Extraction(item="version", sub="날짜", doc=doc.name, label=doc.label, raw=ds[0], norm=ds[0],
-                                  para=-1, where="파일명", sentence=fname, norm_rules=("날짜 통일",)))
+            out.append(Extraction(item="version", sub="날짜", doc=doc.name, label=doc.label, raw=ds[0][0], norm=ds[0][0],
+                                  para=-1, where="파일명", sentence=fname, norm_rules=("날짜 통일",), source=ds[0][1]))
     return _dedupe(out)
 
 
@@ -199,11 +198,11 @@ def extract_age(doc: Doc) -> List[Extraction]:
         for s in _sentences(p):
             if "세" not in s:
                 continue
-            for pair in textnorm.age_ranges(s):
+            for pair, token in textnorm.age_ranges_with_text(s):
                 if pair[1] > 130:
                     continue
                 out.append(_mk("age", "", doc, textnorm.fmt_age(pair), "{}~{}".format(*pair), p, s,
-                               ("물결 통일", "전각→반각")))
+                               ("물결 통일", "전각→반각"), source=token))
     return _dedupe(out)
 
 

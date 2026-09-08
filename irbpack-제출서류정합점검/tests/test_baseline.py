@@ -50,3 +50,21 @@ def test_baseline_only_changed_items_listed(tmp_path):
     res, _ = run(cur, baseline=base)
     note = res.coverage.baseline_note
     assert "보관기간" in note and "방문" not in note.split("(")[1].split(")")[0]
+
+
+def test_stale_defect_reported_once_not_twice(tmp_path):
+    """같은 결함(동의서가 옛 방문횟수)이 '값 충돌'과 '개정 미반영'으로 두 번 세이지 않는다."""
+    base = _v11(tmp_path)
+    cur = write_packet(tmp_path, {"연구계획서_v1.2.md": md_protocol(visits="3"), "ICF_v1.2.md": md_icf(), "CRF_v1.2.md": md_crf()}, sub="v12")
+    res, _ = run(cur, baseline=base)
+    visits = [i for i in by_sev(res, CRITICAL) if i.item == "visits"]
+    assert all("개정 미반영" in i.title for i in visits) and len(visits) == 2
+
+
+def test_plain_conflict_kept_when_a_third_doc_differs_for_another_reason(tmp_path):
+    base = _v11(tmp_path)
+    cur = write_packet(tmp_path, {"연구계획서_v1.2.md": md_protocol(visits="3"), "ICF_v1.2.md": md_icf(),
+                                  "CRF_v1.2.md": md_crf(visits=5)}, sub="v12")
+    res, _ = run(cur, baseline=base)
+    visits = [i for i in by_sev(res, CRITICAL) if i.item == "visits"]
+    assert any("개정 미반영" not in i.title for i in visits)  # CRF 5회는 옛 값도 새 값도 아니라 일반 충돌로 남는다

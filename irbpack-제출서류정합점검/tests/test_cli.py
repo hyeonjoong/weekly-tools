@@ -112,3 +112,52 @@ def test_role_forced_counts_in_coverage(tmp_path, capsys):
     p = full_packet(tmp_path)
     assert cli.main([p, "--role", "프로토콜=연구계획서_v1.2.md"]) == 0
     assert "--role 지정 1개" in capsys.readouterr().out
+
+
+def test_tex_in_folder_triggers_manuscript_exit_2(tmp_path, capsys):
+    p = full_packet(tmp_path)
+    (tmp_path / "packet" / "paper.tex").write_text("\\documentclass{article}", encoding="utf-8")
+    assert cli.main([p]) == 2
+    assert "draftcheck" in capsys.readouterr().out
+
+
+def test_symlink_in_folder_does_not_shadow_real_doc(tmp_path):
+    p = full_packet(tmp_path)
+    real = os.path.join(p, "CRF_v1.2.md")
+    link = os.path.join(p, "AAA_link.md")
+    try:
+        os.symlink(real, link)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink 불가")
+    files, _ = cli._collect([p])
+    assert real in files and link not in files
+
+
+def test_explicit_symlink_arg_is_confessed_unread(tmp_path, capsys):
+    p = full_packet(tmp_path)
+    real = os.path.join(p, "CRF_v1.2.md")
+    link = str(tmp_path / "link.md")
+    try:
+        os.symlink(real, link)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink 불가")
+    files = [os.path.join(p, f) for f in os.listdir(p) if f != "CRF_v1.2.md"] + [link]
+    code = cli.main(files)
+    assert code == 3 and "심볼릭" in capsys.readouterr().out
+
+
+def test_fatal_path_survives_ascii_console(tmp_path, monkeypatch):
+    class Ascii(io.TextIOBase):
+        def __init__(self):
+            self.buf = []
+        def write(self, s):
+            s.encode("ascii")
+            self.buf.append(s)
+            return len(s)
+        def flush(self):
+            pass
+        encoding = "ascii"
+    stream = Ascii()
+    monkeypatch.setattr(sys, "stdout", stream)
+    p = write_packet(tmp_path, {"연구계획서.md": md_protocol()})
+    assert cli.main([p]) == 2 and stream.buf

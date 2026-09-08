@@ -33,7 +33,9 @@ def _collect(paths: Sequence[str]) -> Tuple[List[str], List[str]]:
                     continue
                 full = os.path.join(p, n)
                 ext = os.path.splitext(n)[1].lower()
-                if os.path.isfile(full) and (ext in readers.READABLE_EXT or ext in readers.UNREADABLE_EXT):
+                if os.path.islink(full):
+                    continue  # 링크가 실물을 가리는 사고 방지 — 폴더 안의 링크는 문서로 세지 않습니다
+                if os.path.isfile(full) and (ext in readers.READABLE_EXT or ext in readers.UNREADABLE_EXT or ext in readers.MANUSCRIPT_EXT):
                     files.append(full)
         elif os.path.exists(p):
             files.append(p)
@@ -41,12 +43,13 @@ def _collect(paths: Sequence[str]) -> Tuple[List[str], List[str]]:
             errors.append("경로가 없습니다: {}".format(p))
     seen = set()
     uniq: List[str] = []
-    for f in files:
+    for f in sorted(files, key=lambda x: (os.path.islink(x), x)):  # 실물이 링크보다 먼저
         key = os.path.realpath(f)
         if key in seen:
             continue
         seen.add(key)
         uniq.append(f)
+    uniq.sort()
     return uniq, errors
 
 
@@ -126,6 +129,7 @@ def run_packet(files: Sequence[str], forced: List[Tuple[str, str]], baseline_fil
             for d in bdocs:
                 bext.extend(extract.extract_all(d))
             res.issues.extend(compare.compare_baseline(res.extractions, docs, bext, bdocs, cov))
+            res.issues = compare.fold_baseline(res.issues)
     n_crit = sum(1 for i in res.issues if i.severity == "치명")
     if cov.unread:
         res.exit_code, res.exit_reason = 3, "읽지 못한 문서 {}개 — 다 읽지 못했으면 '치명 {}건'은 판정이 아닙니다".format(len(cov.unread), n_crit)

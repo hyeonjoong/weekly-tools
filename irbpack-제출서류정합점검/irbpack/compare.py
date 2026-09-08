@@ -86,8 +86,8 @@ def _norm_equal_pairs(per_doc: "OrderedDict[str, List[Extraction]]") -> int:
     names = list(per_doc.keys())
     for i in range(len(names)):
         for j in range(i + 1, len(names)):
-            a = {e.norm: e.raw for e in per_doc[names[i]]}
-            b = {e.norm: e.raw for e in per_doc[names[j]]}
+            a = {e.norm: (e.source or e.raw) for e in per_doc[names[i]]}
+            b = {e.norm: (e.source or e.raw) for e in per_doc[names[j]]}
             for norm in set(a) & set(b):
                 if textnorm.basic(a[norm]).replace(" ", "") != textnorm.basic(b[norm]).replace(" ", ""):
                     count += 1
@@ -117,7 +117,7 @@ def _compare_sets(item: str, sub: str, table: Table, issues: List[Issue], cov: C
         ref = sets[names[0]]
         ev = [_evidence(per_doc[n], table, differs=(sets[n] != ref)) for n in names]
         n_diff = len({frozenset(s) for s in sets.values()})
-        issues.append(Issue(severity=ITEM_SEVERITY[item], item=item,
+        issues.append(Issue(severity=ITEM_SEVERITY[item], item=item, sub=sub,
                             title="{} — 문서 {}곳이 {}가지 다른 값".format(title, len(names), n_diff), evidence=ev))
         return ITEM_SEVERITY[item]
     biggest = max(sets.values(), key=len)
@@ -134,10 +134,10 @@ def _compare_sets(item: str, sub: str, table: Table, issues: List[Issue], cov: C
                     if e.norm in miss and mask.mask(e.raw) not in raws:
                         raws.append(mask.mask(e.raw))
             missing_desc.append("{}에 {} 없음".format(table.label(n), " / ".join(raws[:4])))
-        issues.append(Issue(severity=WARNING, item=item, title="{} 전파 누락 — {}".format(title, "; ".join(missing_desc)),
+        issues.append(Issue(severity=WARNING, item=item, sub=sub, title="{} 전파 누락 — {}".format(title, "; ".join(missing_desc)),
                             evidence=ev, note="값이 일부만 있습니다 (충돌은 아님)"))
         return WARNING
-    issues.append(Issue(severity=MATCH, item=item, title=title, evidence=[_evidence(per_doc[n], table) for n in names]))
+    issues.append(Issue(severity=MATCH, item=item, sub=sub, title=title, evidence=[_evidence(per_doc[n], table) for n in names]))
     return MATCH
 
 
@@ -256,6 +256,9 @@ def compare(extractions: Sequence[Extraction], docs: Sequence[Doc], cov: Coverag
     readable = [d for d in docs if d.readable]
     for item in ITEM_KEYS:
         with_docs = table.docs_with(item)
+        if item == "assessments" and not any(d.role == ROLE_CRF for d in readable):
+            cov.items_uncomparable.append((ITEM_NAMES[item], "CRF 문서 없음 — 평가항목은 CRF 폼 대 프로토콜·동의서로만 대조"))
+            continue
         if not with_docs:
             cov.items_uncomparable.append((ITEM_NAMES[item], "어느 문서에서도 추출되지 않음" + (" (서술형이라 정규식이 약함)" if item in NARRATIVE_ITEMS else "")))
             continue
@@ -352,8 +355,27 @@ def compare_baseline(cur: Sequence[Extraction], cur_docs: Sequence[Doc], base: S
                                    where=ct.per_doc(item, sub)[cur_proto[0]][0].where if cur_proto[0] in ct.per_doc(item, sub) else ""),
                           Evidence(doc=doc_name, label=ct.label(doc_name), value=_fmt_values(exts), where=exts[0].where,
                                    sentence=mask.mask(exts[0].sentence), differs=True)]
-                    issues.append(Issue(severity=CRITICAL, item=item, title="개정 미반영 — 프로토콜은 {} 이 바뀌었는데 {} 는 기준 패킷 값 그대로".format(name, ct.label(doc_name)),
+                    issues.append(Issue(severity=CRITICAL, item=item, sub=sub, title="개정 미반영 — 프로토콜은 {} 이 바뀌었는데 {} 는 기준 패킷 값 그대로".format(name, ct.label(doc_name)),
                                         evidence=ev, note="--baseline 개정 축"))
     cov.baseline_note = "프로토콜에서 값이 바뀐 항목 {}개 ({}) · 옛 값이 남은 부속문서 {}건 · 바뀌지 않은 항목은 보지 않음".format(
         len(changed), ", ".join(changed) if changed else "없음", stale)
     return issues
+
+
+def fold_baseline(issues: List[Issue]) -> List[Issue]:
+    """같은 결함의 이중 보고 억제 — (항목, 하위키)의 값 충돌에서 '다름'인 문서가 전부 개정 미반영으로
+    이미 잡혔으면, 일반 충돌 이슈는 빼고 개정 미반영 이슈만 남깁니다 (치명 건수를 부풀리지 않기 위해)."""
+    stale: Dict[Tuple[str, str], Set[str]] = {}
+    for i in issues:
+        if i.note == "--baseline 개정 축":
+            for e in i.evidence:
+                if e.differs:
+                    stale.setdefault((i.item, i.sub), set()).add(e.doc)
+    out: List[Issue] = []
+    for i in issues:
+        if i.note != "--baseline 개정 축" and i.severity == CRITICAL and (i.item, i.sub) in stale:
+            differing = {e.doc for e in i.evidence if e.differs}
+            if differing and differing <= stale[(i.item, i.sub)]:
+                continue
+        out.append(i)
+    return out

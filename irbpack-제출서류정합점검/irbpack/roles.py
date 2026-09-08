@@ -146,6 +146,9 @@ def assign(docs: List[Doc], forced: List[Tuple[str, str]]) -> List[str]:
             continue
         role, why = detect(doc)
         if role is None:
+            if not doc.readable:
+                doc.role_reason = why + " — 읽지 못한 문서라 역할 미판별 (커버리지에 자백)"
+                continue  # 못 읽은 문서는 exit 2 가 아니라 exit 3 쪽으로 (판정 불가)
             errors.append("{}: {} → --role 역할={} 로 지정해 주세요".format(doc.name, why, doc.name))
             doc.role_reason = why
             continue

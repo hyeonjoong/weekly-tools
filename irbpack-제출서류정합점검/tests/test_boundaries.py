@@ -35,7 +35,7 @@ def test_docx_packet_end_to_end(tmp_path):
 def test_huge_paragraph_does_not_crash(tmp_path):
     p = full_packet(tmp_path, icf=md_icf(extra="가" * 3_000_000))
     res, fatal = run(p)
-    assert fatal == [] and res.exit_code in (0, 1)
+    assert fatal == [] and res.exit_code == 0
 
 
 def test_weird_filename_with_brackets_and_spaces(tmp_path):

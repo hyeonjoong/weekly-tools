@@ -59,7 +59,7 @@ def test_exit_3_when_too_few_items_compared(tmp_path):
 def test_all_hwp_is_exit_2_not_3(tmp_path):
     p = write_packet(tmp_path, {"연구계획서.hwp": b"HWP", "ICF.hwp": b"HWP"})
     res, fatal = run(p)
-    assert fatal
+    assert fatal and "프로토콜을 읽지 못했습니다" in fatal[0] and "DOCX" in fatal[0]
 
 
 def test_nothing_extracted_packet(tmp_path):

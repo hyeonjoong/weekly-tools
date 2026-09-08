@@ -98,6 +98,7 @@ class Extraction:
     where: str         #: Para.where()
     sentence: str      #: 근거 문장 (마스킹 전)
     norm_rules: Tuple[str, ...] = ()   #: 이 값에 적용된 정규화 규칙 이름들
+    source: str = ""   #: 원문에서 실제로 매치된 토큰 (raw 가 표시용으로 다듬어졌을 때 정규화 쌍 계수에 씀)
 
 
 @dataclass
@@ -117,6 +118,7 @@ class Issue:
     title: str
     evidence: List[Evidence] = field(default_factory=list)
     note: str = ""
+    sub: str = ""   #: 하위키 (개정 축 이중 보고 억제에 씀)
 
     def __post_init__(self) -> None:
         if self.severity not in SEVERITIES:

@@ -36,5 +36,6 @@ def test_pyproject_has_no_dependencies():
     assert "dependencies = []" in text
 
 
-def test_python_version_floor():
-    assert sys.version_info >= (3, 9)
+def test_requires_python_floor_declared():
+    text = open(os.path.join(ROOT, "pyproject.toml"), encoding="utf-8").read()
+    assert 'requires-python = ">=3.9"' in text

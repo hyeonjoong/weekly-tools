@@ -191,3 +191,28 @@ def test_no_verdict_about_which_is_right(tmp_path):
     text = " ".join(i.title + " " + i.note for i in res.issues)
     for bad in ("이 맞", "가 맞", "틀렸", "오류입니다", "정정하"):
         assert bad not in text
+
+
+@pytest.mark.parametrize("kw,ad_kw,rule", [
+    ({"age": "만 19-45세"}, {"age": "만 １９∼４５세"}, "age"),
+    ({"date": "260825"}, {}, "date"),
+    ({"ver": "V1.2"}, {}, "version"),
+])
+def test_norm_equal_pairs_counted_per_rule(tmp_path, kw, ad_kw, rule):
+    """정규화 덕에 같다고 본 쌍이 연령·날짜·버전 각각에서 실제로 세어진다 (표시용 raw 가 아니라 원문 토큰으로)."""
+    res, _ = run(full_packet(tmp_path, icf=md_icf(**kw), ad=md_ad(**ad_kw)))
+    assert res.coverage.norm_equal_pairs >= 1
+    assert _issues(res, CRITICAL, rule if rule != "date" else "version") == []
+
+
+def test_norm_equal_pairs_counts_only_real_notation_differences(tmp_path):
+    """기본 패킷에서 표기가 다른데 같다고 본 쌍은 CRF 의 'Visit 1~2 칸' 대 '총 2회 방문' 3쌍뿐이어야 한다.
+    'Version' / '버전' / 'Version No' 같은 **라벨** 차이는 정규화 쌍으로 세지 않는다."""
+    res, _ = run(full_packet(tmp_path))
+    assert res.coverage.norm_equal_pairs == 3
+
+
+def test_assessments_without_crf_is_confessed(tmp_path):
+    res, _ = run(full_packet(tmp_path, drop=("CRF_v1.2.md",)))
+    assert any(n == "평가·검사 항목" and "CRF 문서 없음" in w for n, w in res.coverage.items_uncomparable)
+    assert "평가·검사 항목" not in res.coverage.items_compared

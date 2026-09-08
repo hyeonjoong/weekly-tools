@@ -157,8 +157,13 @@ def date(text: str) -> Optional[str]:
 
 def find_dates(text: str) -> List[str]:
     """문자열에 있는 날짜 전부 (순서 보존, 중복 제거)."""
+    return [d for d, _ in find_dates_with_text(text)]
+
+
+def find_dates_with_text(text: str) -> List[Tuple[str, str]]:
+    """[(ISO 날짜, 원문에서 매치된 토큰)]."""
     t = basic(text)
-    found: List[str] = []
+    found: List[Tuple[str, str]] = []
     for i, pat in enumerate(_DATE_PATTERNS):
         for m in pat.finditer(t):
             y, mo, d = m.group(1), int(m.group(2)), int(m.group(3))
@@ -166,8 +171,8 @@ def find_dates(text: str) -> List[str]:
                 y = "20" + y
             if 1 <= mo <= 12 and 1 <= d <= 31:
                 s = "{}-{:02d}-{:02d}".format(y, mo, d)
-                if s not in found:
-                    found.append(s)
+                if s not in [f for f, _ in found]:
+                    found.append((s, m.group(0)))
     return found
 
 
@@ -179,29 +184,52 @@ _VER_KO = re.compile(r"(?<![0-9.])([0-9]+\.[0-9]+)\s*판(?![0-9])")
 
 def version(text: str) -> Optional[str]:
     """`Version No: 1.0`·`v1.2`·`1.0판` → `1.0` (규칙: 버전 통일)."""
+    got = version_match(text)
+    return got[0] if got else None
+
+
+def version_match(text: str) -> Optional[Tuple[str, str]]:
+    """(버전, 원문에서 매치된 토큰)."""
     t = basic(text)
     m = _VER.search(t)
     if m:
-        return m.group(1)
+        token = re.sub(r"^(?:version\s*(?:no\.?|number)?|ver\.?|버전|판번호|개정번호)\s*[:：.]?\s*", "", m.group(0).strip(), flags=re.IGNORECASE)
+        return m.group(1), token or m.group(1)
     m = _VER_KO.search(t)
     if m:
-        return m.group(1)
+        return m.group(1), m.group(0).strip()
     return None
 
 
 def age_ranges(text: str) -> List[Tuple[int, int]]:
     """`만 5~12세`·`만 19세 이상 45세 이하`·`5-12세` → [(5, 12)]."""
-    t = tilde(basic(text)).replace(" ", "")
-    out: List[Tuple[int, int]] = []
-    for m in re.finditer(r"만?([0-9]{1,3})(?:세)?~([0-9]{1,3})세", t):
+    return [pair for pair, _ in age_ranges_with_text(text)]
+
+
+def age_ranges_with_text(text: str) -> List[Tuple[Tuple[int, int], str]]:
+    """[((하한, 상한), 원문 토큰)]. 원문 토큰은 정규화 전 표기 그대로 (정규화 쌍 계수용)."""
+    raw = basic(text)
+    t = tilde(raw)
+    out: List[Tuple[Tuple[int, int], str]] = []
+    seen: List[Tuple[int, int]] = []
+    for m in re.finditer(r"만?\s*([0-9]{1,3})\s*(?:세)?\s*~\s*([0-9]{1,3})\s*세", t):
         pair = (int(m.group(1)), int(m.group(2)))
-        if pair not in out and pair[0] <= pair[1]:
-            out.append(pair)
-    for m in re.finditer(r"만?([0-9]{1,3})세이상(?:,?|부터)?([0-9]{1,3})세(?:이하|미만|까지)", t):
+        if pair not in seen and pair[0] <= pair[1]:
+            seen.append(pair)
+            out.append((pair, _original_span(raw, t, m)))
+    for m in re.finditer(r"만?\s*([0-9]{1,3})\s*세\s*이상\s*(?:,?|부터)?\s*([0-9]{1,3})\s*세\s*(?:이하|미만|까지)", t):
         pair = (int(m.group(1)), int(m.group(2)))
-        if pair not in out and pair[0] <= pair[1]:
-            out.append(pair)
+        if pair not in seen and pair[0] <= pair[1]:
+            seen.append(pair)
+            out.append((pair, _original_span(raw, t, m)))
     return out
+
+
+def _original_span(raw: str, normalized: str, m: "re.Match") -> str:
+    """tilde() 는 길이를 바꿀 수 있으므로(공백 제거) 원문 토큰은 근사로 되찾습니다."""
+    if len(raw) == len(normalized):
+        return raw[m.start():m.end()]
+    return m.group(0)
 
 
 def fmt_age(pair: Tuple[int, int]) -> str:

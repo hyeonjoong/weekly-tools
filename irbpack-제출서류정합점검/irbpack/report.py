@@ -49,15 +49,31 @@ def _pad(text: str, width: int) -> str:
     return text + " " * max(0, width - w)
 
 
+SENTENCE_MAX = 120
+
+
 def _issue_lines(no: int, issue: Issue) -> List[str]:
     lines = ["  {}. {}".format(no, _s(issue.title))]
     for ev in issue.evidence:
         loc = "({})".format(_s(ev.where)) if ev.where else ""
         mark = "  ← 다름" if ev.differs else ""
         lines.append("       {} {}  {}{}".format(_pad(_s(ev.label), 14), _s(ev.value), loc, mark))
+        if ev.sentence:
+            sent = _s(ev.sentence)
+            if len(sent) > SENTENCE_MAX:
+                sent = sent[:SENTENCE_MAX] + "…"
+            lines.append("       {} 「{}」".format(" " * 14, sent))
     if issue.note:
         lines.append("       · {}".format(_s(issue.note)))
     return lines
+
+
+_ROLE_RANK = {"프로토콜": 0, "동의서": 1, "동의서(소아)": 2, "CRF": 3, "모집공고": 4, "등록정보": 5}
+
+
+def ordered_docs(docs: Sequence[Doc]) -> List[Doc]:
+    """[문서 역할] 표시 순서 — 프로토콜 → 동의서 → 승낙서 → CRF → 공고. 미판별·못 읽음은 뒤로."""
+    return sorted(docs, key=lambda d: (_ROLE_RANK.get(d.role, 9), not d.readable, d.name))
 
 
 def render_console(res: Result, input_label: str) -> str:
@@ -68,7 +84,7 @@ def render_console(res: Result, input_label: str) -> str:
     L.append("입력: {}  (문서 {}개)".format(_s(input_label), cov.n_docs))
     L.append("")
     L.append(ROLE_HEADER)
-    for d in res.docs:
+    for d in ordered_docs(res.docs):
         tag = ""
         if not d.readable:
             tag = "  [읽지 못함: {}]".format(_s(d.unread_reason))
@@ -92,8 +108,9 @@ def render_console(res: Result, input_label: str) -> str:
         L.extend(_issue_lines(no, i))
     L.append("")
     L.append("[정보] 일치 확인 {}건".format(len(match)))
-    if match:
-        L.append("  " + " · ".join(_s(i.title) for i in match))
+    for i in match:
+        vals = i.evidence[0].value if i.evidence else ""
+        L.append("  {} — {}".format(_s(i.title), _s(vals)) if vals else "  {}".format(_s(i.title)))
     L.append("")
     L.append(COVERAGE_HEADER)
     L.append("  문서       {}개 중 {}개 읽음 (읽지 못한 문서 {})".format(cov.n_docs, cov.n_read, len(cov.unread)))
@@ -115,6 +132,7 @@ def render_console(res: Result, input_label: str) -> str:
 
 
 def render_md(res: Result, input_label: str, console: str) -> str:
+    check_coverage(res.coverage, res.docs)
     cov = res.coverage
     L: List[str] = ["# irbpack 정합점검 리포트", ""]
     L.append("> {}".format(DISCLAIMER))
@@ -150,7 +168,7 @@ def render_md(res: Result, input_label: str, console: str) -> str:
     L.append("")
     L.append("## 문서 역할 판별 근거")
     L.append("")
-    for d in res.docs:
+    for d in ordered_docs(res.docs):
         L.append("- **{}** `{}` — {}{}".format(_md(d.label or "미판별"), _md(d.name), _md(d.role_reason),
                                             "" if d.readable else " — 읽지 못함: " + _md(d.unread_reason)))
     L.append("")
@@ -216,6 +234,9 @@ def uncomparable_rows(res: Result) -> List[List[str]]:
 
 
 def write_all(res: Result, out_dir: str, md_text: str) -> List[str]:
+    check_coverage(res.coverage, res.docs)
+    if COVERAGE_HEADER not in md_text:
+        raise ReportIntegrityError("정합점검.md 에 커버리지 자백 블록이 없습니다")
     written = [safeio.write_text(out_dir, "정합점검.md", md_text)]
     written.append(safeio.write_csv(out_dir, "불일치목록.csv",
                                     ["항목", "심각도", "제목", "문서A", "값A", "근거위치A", "문서B", "값B", "근거위치B"], issue_rows(res)))

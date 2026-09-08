@@ -148,7 +148,7 @@ def test_huge_single_paragraph_docx_is_handled(tmp_path):
 
 def test_pdf_text_layer(tmp_path):
     import zlib
-    content = b"BT /F1 12 Tf (Protocol version 1.0 total 2 visits about ninety minutes each visit) Tj ET"
+    content = b"BT /F1 12 Tf (Protocol version 1.0 total two visits about ninety minutes each visit for every enrolled adult subject in this study) Tj ET"
     stream = zlib.compress(content)
     pdf = (b"%PDF-1.4\n1 0 obj << /Length " + str(len(stream)).encode() + b" /Filter /FlateDecode >>\nstream\n"
            + stream + b"\nendstream\nendobj\n%%EOF")
@@ -174,3 +174,33 @@ def test_not_pdf_signature(tmp_path):
 def test_missing_file(tmp_path):
     doc = readers.load(str(tmp_path / "none.md"))
     assert not doc.readable
+
+
+def test_pdf_cid_font_is_unreadable(tmp_path):
+    import zlib
+    content = b"BT /F1 12 Tf <00350036003700380039> Tj <00410042004300440045> Tj ET " * 20
+    stream = zlib.compress(content)
+    pdf = (b"%PDF-1.4\n1 0 obj << /Type /Font /Subtype /Type0 /Encoding /Identity-H /DescendantFonts [2 0 R] >> endobj\n"
+           b"2 0 obj << /Type /Font /Subtype /CIDFontType2 >> endobj\n3 0 obj << /Length " + str(len(stream)).encode()
+           + b" /Filter /FlateDecode >>\nstream\n" + stream + b"\nendstream\nendobj\n%%EOF")
+    p = tmp_path / "cid.pdf"
+    p.write_bytes(pdf)
+    doc = readers.load(str(p))
+    assert not doc.readable and "CID" in doc.unread_reason
+
+
+def test_pdf_glyph_garbage_without_marker_is_unreadable(tmp_path):
+    import zlib
+    content = b"BT (" + bytes(range(0x30, 0x7a)) * 3 + b") Tj ET"
+    stream = zlib.compress(content)
+    pdf = b"%PDF-1.4\n1 0 obj << /Length " + str(len(stream)).encode() + b" /Filter /FlateDecode >>\nstream\n" + stream + b"\nendstream\n%%EOF"
+    p = tmp_path / "g.pdf"
+    p.write_bytes(pdf)
+    assert not readers.load(str(p)).readable
+
+
+def test_tex_is_collected_but_unreadable(tmp_path):
+    p = tmp_path / "paper.tex"
+    p.write_text("\\documentclass{article}", encoding="utf-8")
+    doc = readers.load(str(p))
+    assert not doc.readable and "원고" in doc.unread_reason

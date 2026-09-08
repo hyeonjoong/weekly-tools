@@ -23,6 +23,8 @@ from .model import Doc, Para
 W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 READABLE_EXT = (".docx", ".md", ".txt", ".pdf")
 UNREADABLE_EXT = (".hwp", ".hwpx", ".doc", ".rtf", ".odt", ".pages")
+#: 원고 확장자 — 읽지 않지만 폴더에서 **수집은** 해서 강제 장치 1(원고 감지 → exit 2)이 발동되게 합니다.
+MANUSCRIPT_EXT = (".tex",)
 #: 이 크기를 넘는 문서는 읽지 않습니다 (10MB 단일 문단 방어).
 MAX_BYTES = 50 * 1024 * 1024
 MAX_PARAS = 200_000
@@ -259,6 +261,8 @@ def read_pdf(path: str) -> List[Para]:
         raw = fh.read()
     if not raw.startswith(b"%PDF"):
         raise ValueError("PDF 서명이 없습니다")
+    if b"/Identity-H" in raw or b"/CIDFontType" in raw or b"/Identity-V" in raw:
+        raise ValueError("CID 폰트(Identity-H) PDF — 텍스트 레이어가 글리프 번호라 읽을 수 없습니다. docx 로 변환해 주세요")
     chunks: List[str] = []
     for m in _PDF_STREAM.finditer(raw):
         data = m.group(1)
@@ -285,7 +289,8 @@ def read_pdf(path: str) -> List[Para]:
                     chunks.append(txt)
     text = "\n".join(chunks)
     good = sum(1 for ch in text if ch.isalnum())
-    if good < 50:
+    words = len(re.findall(r"[가-힣]{2,}|[A-Za-z]{3,}", text))
+    if good < 50 or words < 10:
         raise ValueError("텍스트 레이어를 읽지 못했습니다 (스캔 PDF 이거나 CID 폰트 인코딩) — docx 로 변환해 주세요")
     paras: List[Para] = []
     section = ""
@@ -311,6 +316,8 @@ def load(path: str) -> Doc:
             raise ValueError("심볼릭 링크는 읽지 않습니다")
         if not os.path.isfile(path):
             raise ValueError("파일이 아닙니다")
+        if ext in MANUSCRIPT_EXT:
+            raise ValueError(".tex 는 논문 원고 형식 — irbpack 은 원고를 읽지 않습니다")
         if ext in UNREADABLE_EXT:
             hint = "한글(HWP)은 v1 에서 읽지 않습니다 — 한글에서 '다른 이름으로 저장 → DOCX' 후 다시 실행" if ext in (".hwp", ".hwpx") else "지원하지 않는 형식 — DOCX/MD/TXT/PDF 로 변환"
             raise ValueError(hint)

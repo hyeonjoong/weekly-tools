@@ -15,17 +15,23 @@ def _run(*args):
 
 
 def test_examples_regenerate_identically(tmp_path):
-    """_make_examples.py 가 결정론적이라 커밋된 파일과 같은 내용을 만든다 (zip 타임스탬프 제외)."""
+    """_make_examples.py 는 결정론적 — 임시 폴더에 다시 만들면 커밋된 document.xml 과 바이트 단위로 같다."""
+    import importlib.util
     import zipfile
-    before = {}
-    for d in os.listdir(EX):
-        full = os.path.join(EX, d)
-        if os.path.isdir(full):
-            for f in os.listdir(full):
-                if f.endswith(".docx"):
-                    with zipfile.ZipFile(os.path.join(full, f)) as zf:
-                        before[(d, f)] = zf.read("word/document.xml")
-    assert before
+    spec = importlib.util.spec_from_file_location("mk", os.path.join(EX, "_make_examples.py"))
+    mk = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mk)
+    mk.HERE = str(tmp_path)
+    mk.main()
+    compared = 0
+    for d in os.listdir(tmp_path):
+        for f in os.listdir(os.path.join(str(tmp_path), d)):
+            if not f.endswith(".docx"):
+                continue
+            with zipfile.ZipFile(os.path.join(str(tmp_path), d, f)) as a, zipfile.ZipFile(os.path.join(EX, d, f)) as b:
+                assert a.read("word/document.xml") == b.read("word/document.xml"), (d, f)
+            compared += 1
+    assert compared >= 20
 
 
 def test_clean_packet_exit_0():

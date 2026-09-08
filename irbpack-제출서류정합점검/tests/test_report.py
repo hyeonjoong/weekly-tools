@@ -109,7 +109,7 @@ def test_write_all_four_files(tmp_path):
 def test_csv_injection_guard(tmp_path):
     res = _res(tmp_path, icf=md_icf(title="=HYPERLINK(\"http://x\") 성인 불면증 환자 대상 소리 기반 수면 앱의 유효성 연구"))
     out = safeio.prepare_out_dir(str(tmp_path / "out"))
-    report.write_all(res, out, "x")
+    report.write_all(res, out, report.render_md(res, "p", report.render_console(res, "p")))
     with open(os.path.join(out, "항목추출표.csv"), encoding="utf-8-sig", newline="") as fh:
         for row in csv.reader(fh):
             for cell in row:
@@ -149,3 +149,49 @@ def test_no_home_path_leaks(tmp_path):
     console = report.render_console(res, os.path.basename(str(tmp_path)))
     md = report.render_md(res, "p", console)
     assert str(tmp_path) not in console and str(tmp_path) not in md
+
+
+def test_render_md_and_write_all_also_enforce_coverage(tmp_path):
+    res = _res(tmp_path)
+    console = report.render_console(res, "p")
+    res.coverage.items_compared = res.coverage.items_compared[1:]
+    with pytest.raises(report.ReportIntegrityError):
+        report.render_md(res, "p", console)
+    out = safeio.prepare_out_dir(str(tmp_path / "out"))
+    with pytest.raises(report.ReportIntegrityError):
+        report.write_all(res, out, "커버리지 없는 본문")
+
+
+def test_write_all_refuses_md_without_coverage_block(tmp_path):
+    res = _res(tmp_path)
+    out = safeio.prepare_out_dir(str(tmp_path / "out"))
+    with pytest.raises(report.ReportIntegrityError):
+        report.write_all(res, out, "# 리포트\n본문만")
+
+
+def test_evidence_sentence_printed_in_console(tmp_path):
+    res = _res(tmp_path, icf=md_icf(visits="총 3회 방문"))
+    console = report.render_console(res, "p")
+    assert "「" in console and "총 3회 방문을 하게 되며" in console
+
+
+def test_evidence_sentence_truncated(tmp_path):
+    res = _res(tmp_path, icf=md_icf(visits="총 3회 방문", extra=""))
+    for i in res.issues:
+        for e in i.evidence:
+            e.sentence = "가" * 500
+    console = report.render_console(res, "p")
+    assert "가" * 121 not in console and "…" in console
+
+
+def test_roles_block_ordered_protocol_first(tmp_path):
+    res = _res(tmp_path)
+    console = report.render_console(res, "p")
+    block = console.split(report.ROLE_HEADER)[1].split("\n\n")[0].strip().splitlines()
+    assert block[0].strip().startswith("프로토콜") and block[-1].strip().startswith("모집공고")
+
+
+def test_match_block_shows_values(tmp_path):
+    console = report.render_console(_res(tmp_path), "p")
+    block = console.split("[정보] 일치 확인")[1].split(report.COVERAGE_HEADER)[0]
+    assert "만 19~45세" in block and "36개월" not in block and "3년" in block
