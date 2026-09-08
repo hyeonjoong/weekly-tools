@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "irbpack"
+version = "0.1.0"
+description = "IRB·식약처 제출 서류 묶음(연구계획서·동의서·승낙서·CRF·모집공고)을 폴더째 읽어 문서 *사이*에서 말이 다른 곳만 찍어 주는 정합점검 — 12개 항목(제목·버전·책임자·연락처·대상자 수·연령·방문횟수·소요시간·보상·보관기간·선정제외·평가항목)을 결정론적 규칙으로 대조하고, 근거 문단과 커버리지 자백을 항상 인쇄합니다. 표준 라이브러리만 사용, 네트워크 0, 원본 읽기 전용"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "hyeonjoong", email = "hyeonjoongk@gmail.com" }]
+keywords = ["irb", "clinical-trial", "protocol", "informed-consent", "crf", "consistency", "docx", "korean", "offline", "audit"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Healthcare Industry",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+    "Environment :: Console",
+    "Natural Language :: Korean",
+]
+
+# 외부 의존성 없음 — .docx 는 zipfile+ElementTree 로 직접 파싱합니다.
+# (tests/test_offline.py 가 이 줄과 소스의 import 를 정적으로 검사합니다.)
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.urls]
+Homepage = "https://github.com/hyeonjoong/weekly-tools"
+
+[project.scripts]
+irbpack = "irbpack.cli:run"
+
+[tool.setuptools.packages.find]
+include = ["irbpack*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

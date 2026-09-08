@@ -1,0 +1,22 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.venv/
+venv/
+.DS_Store
+
+# 실행 산출물 — 절대 커밋하지 않습니다.
+정합점검_*/
+개정점검*/
+점검결과/
+out/
+
+# 실제 IRB 서류는 이 저장소에 들어오면 안 됩니다.
+# (examples/ 안의 .docx 만 예외 — 전부 합성입니다.)
+*.hwp
+*.hwpx
+*.pdf

@@ -1,0 +1,208 @@
+"""정규화 규칙 — 전부 리포트 부록에 인쇄됩니다. 조용히 같다고 하지 않습니다.
+
+규칙 이름(`RULES` 의 키)이 그대로 커버리지 블록의 "정규화 적용" 줄과 `정합점검.md`
+부록에 나갑니다. 새 규칙을 추가하면 반드시 여기에 설명을 함께 적으십시오.
+"""
+from __future__ import annotations
+
+import re
+import unicodedata
+from typing import List, Optional, Tuple
+
+#: 규칙 이름 → 사람이 읽는 설명.
+RULES = {
+    "유니코드 NFC": "NFD 로 저장된 한글(macOS 파일명 등)을 NFC 로 합칩니다.",
+    "전각→반각": "전각 숫자·영문·괄호·콜론(１２３ＡＢ（）：)을 반각으로 바꿉니다.",
+    "물결 통일": "범위 기호 `~` `∼` `〜` `-` `–` `—` `부터…까지` 를 모두 `~` 로 봅니다 (만 5~12세 ≡ 만 5-12세).",
+    "공백·문장부호 제거": "제목·이름 비교에서 공백과 문장부호를 지우고 대소문자를 무시합니다.",
+    "금액 통일": "`10,000원`·`1만원`·`1만 원`·`만원` 을 모두 원 단위 정수(10000)로 봅니다.",
+    "횟수 통일": "`2회`·`두 번`·`2번`·`2차례`·`2 회기` 를 같은 횟수로 봅니다.",
+    "시간→분": "`1시간 30분`·`90분`·`1.5시간` 을 분 단위 정수(90)로 봅니다.",
+    "날짜 통일": "`260518`·`2026.05.18`·`2026-05-18`·`2026년 5월 18일` 을 ISO 날짜로 봅니다.",
+    "버전 통일": "`Version No: 1.0`·`v1.0`·`V1.0`·`ver 1.0`·`1.0판` 을 `1.0` 으로 봅니다.",
+    "기간 통일": "`3년`·`3 년간`·`삼년`·`36개월` 을 개월 단위 정수로 봅니다.",
+}
+
+_FULL2HALF = {chr(0xFF01 + i): chr(0x21 + i) for i in range(94)}
+_FULL2HALF["　"] = " "
+_TILDES = "~∼〜～–—―‐−-"
+_KNUM = {"영": 0, "한": 1, "일": 1, "두": 2, "이": 2, "세": 3, "삼": 3, "네": 4, "사": 4,
+         "다섯": 5, "오": 5, "여섯": 6, "육": 6, "일곱": 7, "칠": 7, "여덟": 8, "팔": 8,
+         "아홉": 9, "구": 9, "열": 10, "십": 10}
+
+
+def nfc(text: str) -> str:
+    """유니코드 NFC 정규화 (규칙: 유니코드 NFC)."""
+    return unicodedata.normalize("NFC", text or "")
+
+
+def halfwidth(text: str) -> str:
+    """전각 → 반각 (규칙: 전각→반각)."""
+    return "".join(_FULL2HALF.get(ch, ch) for ch in text or "")
+
+
+def basic(text: str) -> str:
+    """모든 문서 텍스트에 공통으로 먼저 적용되는 정규화."""
+    t = halfwidth(nfc(text))
+    t = t.replace(" ", " ").replace("​", "")
+    return t
+
+
+def tilde(text: str) -> str:
+    """범위 기호 통일 (규칙: 물결 통일)."""
+    out = text
+    for ch in _TILDES:
+        out = out.replace(ch, "~")
+    out = re.sub(r"\s*~\s*", "~", out)
+    return out
+
+
+def squash(text: str) -> str:
+    """공백·문장부호 제거 + 소문자 (규칙: 공백·문장부호 제거)."""
+    t = basic(text).lower()
+    t = re.sub(r"[\s　·•\-–—_,.:;'\"“”‘’()\[\]{}<>《》「」『』〈〉/\\|!?]+", "", t)
+    return t
+
+
+def money(text: str) -> Optional[int]:
+    """금액 문자열 → 원 단위 정수 (규칙: 금액 통일). 못 읽으면 None."""
+    t = basic(text).replace(" ", "")
+    m = re.search(r"([0-9]{1,3}(?:,[0-9]{3})+|[0-9]+)(?:\.([0-9]+))?(만)?원", t)
+    if m:
+        whole = int(m.group(1).replace(",", ""))
+        frac = m.group(2)
+        val = whole
+        if m.group(3):
+            val = whole * 10000
+            if frac:
+                val += int(round(float("0." + frac) * 10000))
+        return val
+    m = re.search(r"(?<![0-9])만원", t)
+    if m:
+        return 10000
+    return None
+
+
+def count(text: str) -> Optional[int]:
+    """`2회`·`두 번`·`2차례` → 2 (규칙: 횟수 통일)."""
+    t = basic(text).replace(" ", "")
+    m = re.search(r"([0-9]+)(?:회기|회|번|차례|차)", t)
+    if m:
+        return int(m.group(1))
+    m = re.search(r"(한|두|세|네|다섯|여섯|일곱|여덟|아홉|열)(?:번|차례|회)", t)
+    if m:
+        return _KNUM[m.group(1)]
+    return None
+
+
+def minutes(text: str) -> Optional[int]:
+    """`1시간 30분`·`90분`·`1.5시간` → 분 (규칙: 시간→분)."""
+    t = basic(text).replace(" ", "")
+    h = re.search(r"([0-9]+(?:\.[0-9]+)?)시간", t)
+    mn = re.search(r"([0-9]+)분", t)
+    if not h and not mn:
+        half = re.search(r"(한|두|세|네)시간(반)?", t)
+        if half:
+            val = _KNUM[half.group(1)] * 60
+            if half.group(2):
+                val += 30
+            return val
+        return None
+    total = 0
+    if h:
+        total += int(round(float(h.group(1)) * 60))
+        if re.search(r"시간반", t):
+            total += 30
+    if mn:
+        total += int(mn.group(1))
+    return total
+
+
+def months(text: str) -> Optional[int]:
+    """`3년`·`36개월`·`삼년` → 개월 (규칙: 기간 통일)."""
+    t = basic(text).replace(" ", "")
+    m = re.search(r"([0-9]+)년", t)
+    if m:
+        return int(m.group(1)) * 12
+    m = re.search(r"([0-9]+)개월", t)
+    if m:
+        return int(m.group(1))
+    m = re.search(r"(일|이|삼|사|오|육|칠|팔|구|십)년", t)
+    if m:
+        return _KNUM[m.group(1)] * 12
+    return None
+
+
+_DATE_PATTERNS = [
+    re.compile(r"(?<![0-9])(20[0-9]{2})[.\-/년]\s*([0-9]{1,2})[.\-/월]\s*([0-9]{1,2})일?(?![0-9])"),
+    re.compile(r"(?<![0-9])(20[0-9]{2})([01][0-9])([0-3][0-9])(?![0-9])"),
+    re.compile(r"(?<![0-9])(2[0-9])([01][0-9])([0-3][0-9])(?![0-9])"),
+]
+
+
+def date(text: str) -> Optional[str]:
+    """`260518`·`2026.05.18`·`2026년 5월 18일` → `2026-05-18` (규칙: 날짜 통일)."""
+    t = basic(text)
+    for i, pat in enumerate(_DATE_PATTERNS):
+        m = pat.search(t)
+        if not m:
+            continue
+        y, mo, d = m.group(1), int(m.group(2)), int(m.group(3))
+        if i == 2:
+            y = "20" + y
+        if 1 <= mo <= 12 and 1 <= d <= 31:
+            return "{}-{:02d}-{:02d}".format(y, mo, d)
+    return None
+
+
+def find_dates(text: str) -> List[str]:
+    """문자열에 있는 날짜 전부 (순서 보존, 중복 제거)."""
+    t = basic(text)
+    found: List[str] = []
+    for i, pat in enumerate(_DATE_PATTERNS):
+        for m in pat.finditer(t):
+            y, mo, d = m.group(1), int(m.group(2)), int(m.group(3))
+            if i == 2:
+                y = "20" + y
+            if 1 <= mo <= 12 and 1 <= d <= 31:
+                s = "{}-{:02d}-{:02d}".format(y, mo, d)
+                if s not in found:
+                    found.append(s)
+    return found
+
+
+_VER = re.compile(
+    r"(?:version\s*(?:no\.?|number)?|ver\.?|v|버전|판번호|개정번호)\s*[:：.]?\s*([0-9]+(?:\.[0-9]+)*)(?![0-9.])",
+    re.IGNORECASE)
+_VER_KO = re.compile(r"(?<![0-9.])([0-9]+\.[0-9]+)\s*판(?![0-9])")
+
+
+def version(text: str) -> Optional[str]:
+    """`Version No: 1.0`·`v1.2`·`1.0판` → `1.0` (규칙: 버전 통일)."""
+    t = basic(text)
+    m = _VER.search(t)
+    if m:
+        return m.group(1)
+    m = _VER_KO.search(t)
+    if m:
+        return m.group(1)
+    return None
+
+
+def age_ranges(text: str) -> List[Tuple[int, int]]:
+    """`만 5~12세`·`만 19세 이상 45세 이하`·`5-12세` → [(5, 12)]."""
+    t = tilde(basic(text)).replace(" ", "")
+    out: List[Tuple[int, int]] = []
+    for m in re.finditer(r"만?([0-9]{1,3})(?:세)?~([0-9]{1,3})세", t):
+        pair = (int(m.group(1)), int(m.group(2)))
+        if pair not in out and pair[0] <= pair[1]:
+            out.append(pair)
+    for m in re.finditer(r"만?([0-9]{1,3})세이상(?:,?|부터)?([0-9]{1,3})세(?:이하|미만|까지)", t):
+        pair = (int(m.group(1)), int(m.group(2)))
+        if pair not in out and pair[0] <= pair[1]:
+            out.append(pair)
+    return out
+
+
+def fmt_age(pair: Tuple[int, int]) -> str:
+    return "만 {}~{}세".format(pair[0], pair[1])
