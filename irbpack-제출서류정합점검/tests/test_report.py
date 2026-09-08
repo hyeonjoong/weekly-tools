@@ -195,3 +195,27 @@ def test_match_block_shows_values(tmp_path):
     console = report.render_console(_res(tmp_path), "p")
     block = console.split("[정보] 일치 확인")[1].split(report.COVERAGE_HEADER)[0]
     assert "만 19~45세" in block and "36개월" not in block and "3년" in block
+
+
+def test_filename_pii_masked_in_md_and_console(tmp_path):
+    p = full_packet(tmp_path)
+    os.rename(os.path.join(p, "ICF_성인용_v1.2.md"), os.path.join(p, "ICF_담당자010-9278-6844_hong@snuh.org.md"))
+    res, fatal = run(p)
+    assert fatal == []
+    console = report.render_console(res, "p")
+    md = report.render_md(res, "p", console)
+    assert "9278" not in console and "9278" not in md and "hong@" not in md
+
+
+def test_coverage_counts_add_up_to_12(tmp_path):
+    res = _res(tmp_path)
+    cov = res.coverage
+    assert len(cov.items_compared) + len(cov.items_uncomparable) == 12
+    assert not (set(cov.items_compared) & {n for n, _ in cov.items_uncomparable})
+
+
+def test_check_coverage_rejects_non_item_names(tmp_path):
+    res = _res(tmp_path)
+    res.coverage.items_uncomparable.append(("참여 기간", "x"))
+    with pytest.raises(report.ReportIntegrityError):
+        report.render_console(res, "p")

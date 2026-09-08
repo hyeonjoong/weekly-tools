@@ -106,13 +106,12 @@ def _compare_sets(item: str, sub: str, table: Table, issues: List[Issue], cov: C
     names = _order(table, list(per_doc.keys()))
     sets = {n: _norms(per_doc[n]) for n in names}
     title = ITEM_NAMES[item] + (" — {}".format(sub) if sub else "")
-    # 값 충돌: 서로 부분집합이 아닌 쌍이 하나라도 있으면
-    conflict = False
-    for i in range(len(names)):
-        for j in range(i + 1, len(names)):
-            a, b = sets[names[i]], sets[names[j]]
-            if not (a <= b or b <= a):
-                conflict = True
+    # 값 충돌: 모든 문서의 값을 다 말하는 문서가 하나도 없으면 (어떤 문서도 합집합이 아니면).
+    # 프로토콜 {90,45} · 동의서 {90} · 공고 {45} 는 충돌이 아니라 전파 누락이다.
+    union: Set[str] = set()
+    for v in sets.values():
+        union |= v
+    conflict = not any(sets[n] == union for n in names)
     if conflict:
         ref = sets[names[0]]
         ev = [_evidence(per_doc[n], table, differs=(sets[n] != ref)) for n in names]
@@ -166,7 +165,7 @@ def _compare_contact(table: Table, issues: List[Issue], cov: Coverage) -> Option
                 worst = WARNING
                 flagged = True
                 break
-    for sub, per_doc in (("전화", phones), ("이메일", emails)):
+    for sub, per_doc in (("전화", phones),):  # 이메일은 기관마다 다른 창구(IRB 사무국·책임자)를 적는 게 정상이라 경고하지 않음
         if len(per_doc) < 2:
             continue
         names = _order(table, list(per_doc.keys()))
@@ -282,7 +281,7 @@ def compare(extractions: Sequence[Extraction], docs: Sequence[Doc], cov: Coverag
                 verdicts.append(v)
                 if v is None and sub and len(table.per_doc(item, sub)) == 1:
                     only = next(iter(table.per_doc(item, sub)))
-                    cov.items_uncomparable.append(("{} — {}".format(ITEM_NAMES[item], sub), "한 문서에만 존재 ({})".format(table.label(only))))
+                    cov.sub_gaps.append(("{} — {}".format(ITEM_NAMES[item], sub), "한 문서에만 존재 ({})".format(table.label(only))))
         if all(v is None for v in verdicts):
             cov.items_uncomparable.append((ITEM_NAMES[item], "같은 하위 항목을 2개 이상 문서가 말하지 않음"))
             if item in NARRATIVE_ITEMS:
@@ -310,7 +309,7 @@ def _compare_period(table: Table, issues: List[Issue], cov: Coverage) -> Optiona
     for u in units.values():
         all_units |= u
     if len(all_units) > 1:
-        cov.items_uncomparable.append(("참여 기간", "단위가 달라(주/개월/일) 환산하지 않고 대조하지 않음"))
+        cov.sub_gaps.append((ITEM_NAMES["visits"] + " — 참여기간", "단위가 달라(주/개월/일) 환산하지 않고 대조하지 않음"))
         return None
     return _compare_sets("visits", "참여기간", table, issues, cov)
 

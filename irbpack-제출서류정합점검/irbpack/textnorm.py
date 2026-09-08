@@ -64,29 +64,32 @@ def squash(text: str) -> str:
     return t
 
 
+_KUNIT = {"천": 1000, "만": 10000, "억": 100000000}
+
+
 def money(text: str) -> Optional[int]:
-    """금액 문자열 → 원 단위 정수 (규칙: 금액 통일). 못 읽으면 None."""
+    """금액 문자열 → 원 단위 정수 (규칙: 금액 통일). `10,000원`·`1만원`·`3만5천원`·`1억 2천만원`. 못 읽으면 None."""
     t = basic(text).replace(" ", "")
-    m = re.search(r"([0-9]{1,3}(?:,[0-9]{3})+|[0-9]+)(?:\.([0-9]+))?(만)?원", t)
-    if m:
-        whole = int(m.group(1).replace(",", ""))
-        frac = m.group(2)
-        val = whole
-        if m.group(3):
-            val = whole * 10000
-            if frac:
-                val += int(round(float("0." + frac) * 10000))
-        return val
-    m = re.search(r"(?<![0-9])만원", t)
-    if m:
-        return 10000
-    return None
+    m = re.search(r"((?:[0-9]{1,3}(?:,[0-9]{3}){0,4}|[0-9]{1,12})(?:\.[0-9]{1,2})?(?:천|만|억){0,2}(?:[0-9]{1,4}(?:천|만|억){1,2})*)원", t)
+    if not m:
+        if re.search(r"(?<![0-9])만원", t):
+            return 10000
+        return None
+    body = m.group(1)
+    total = 0.0
+    for num, units in re.findall(r"([0-9][0-9,]*(?:\.[0-9]+)?)((?:천|만|억)*)", body):
+        val = float(num.replace(",", ""))
+        for u in units:
+            val *= _KUNIT[u]
+        total += val
+    total = int(round(total))
+    return total if total > 0 else None
 
 
 def count(text: str) -> Optional[int]:
     """`2회`·`두 번`·`2차례` → 2 (규칙: 횟수 통일)."""
     t = basic(text).replace(" ", "")
-    m = re.search(r"([0-9]+)(?:회기|회|번|차례|차)", t)
+    m = re.search(r"([0-9]{1,3})(?:회기|회|번|차례|차)", t)
     if m:
         return int(m.group(1))
     m = re.search(r"(한|두|세|네|다섯|여섯|일곱|여덟|아홉|열)(?:번|차례|회)", t)
@@ -98,8 +101,8 @@ def count(text: str) -> Optional[int]:
 def minutes(text: str) -> Optional[int]:
     """`1시간 30분`·`90분`·`1.5시간` → 분 (규칙: 시간→분)."""
     t = basic(text).replace(" ", "")
-    h = re.search(r"([0-9]+(?:\.[0-9]+)?)시간", t)
-    mn = re.search(r"([0-9]+)분", t)
+    h = re.search(r"([0-9]{1,3}(?:\.[0-9]+)?)시간", t)
+    mn = re.search(r"([0-9]{1,4})분", t)
     if not h and not mn:
         half = re.search(r"(한|두|세|네)시간(반)?", t)
         if half:
@@ -119,18 +122,20 @@ def minutes(text: str) -> Optional[int]:
 
 
 def months(text: str) -> Optional[int]:
-    """`3년`·`36개월`·`삼년` → 개월 (규칙: 기간 통일)."""
+    """`3년`·`36개월`·`삼년`·`1년 6개월` → 개월 (규칙: 기간 통일)."""
     t = basic(text).replace(" ", "")
-    m = re.search(r"([0-9]+)년", t)
+    total = 0
+    m = re.search(r"([0-9]{1,3})년", t)
     if m:
-        return int(m.group(1)) * 12
-    m = re.search(r"([0-9]+)개월", t)
+        total += int(m.group(1)) * 12
+    else:
+        m = re.search(r"(일|이|삼|사|오|육|칠|팔|구|십)년", t)
+        if m:
+            total += _KNUM[m.group(1)] * 12
+    m = re.search(r"([0-9]{1,4})개월", t)
     if m:
-        return int(m.group(1))
-    m = re.search(r"(일|이|삼|사|오|육|칠|팔|구|십)년", t)
-    if m:
-        return _KNUM[m.group(1)] * 12
-    return None
+        total += int(m.group(1))
+    return total or None
 
 
 _DATE_PATTERNS = [
@@ -177,9 +182,9 @@ def find_dates_with_text(text: str) -> List[Tuple[str, str]]:
 
 
 _VER = re.compile(
-    r"(?:version\s*(?:no\.?|number)?|ver\.?|v|버전|판번호|개정번호)\s*[:：.]?\s*([0-9]+(?:\.[0-9]+)*)(?![0-9.])",
+    r"(?:version\s*(?:no\.?|number)?|ver\.?|v|버전|판번호|개정번호)\s*[:：.]?\s*([0-9]{1,4}(?:\.[0-9]{1,4}){0,3})(?![0-9]|\.[0-9])",
     re.IGNORECASE)
-_VER_KO = re.compile(r"(?<![0-9.])([0-9]+\.[0-9]+)\s*판(?![0-9])")
+_VER_KO = re.compile(r"(?<![0-9.])([0-9]{1,4}(?:\.[0-9]{1,4}){1,3})\s*판(?![0-9])")
 
 
 def version(text: str) -> Optional[str]:
@@ -191,14 +196,31 @@ def version(text: str) -> Optional[str]:
 def version_match(text: str) -> Optional[Tuple[str, str]]:
     """(버전, 원문에서 매치된 토큰)."""
     t = basic(text)
-    m = _VER.search(t)
-    if m:
+    for m in _VER.finditer(t):
+        ver = canon_version(m.group(1))
+        if ver is None:
+            continue  # `Version 2026.05.18` 같은 날짜형은 버전이 아니다
         token = re.sub(r"^(?:version\s*(?:no\.?|number)?|ver\.?|버전|판번호|개정번호)\s*[:：.]?\s*", "", m.group(0).strip(), flags=re.IGNORECASE)
-        return m.group(1), token or m.group(1)
+        return ver, token or m.group(1)
     m = _VER_KO.search(t)
     if m:
-        return m.group(1), m.group(0).strip()
+        ver = canon_version(m.group(1))
+        if ver:
+            return ver, m.group(0).strip()
     return None
+
+
+def canon_version(ver: str) -> Optional[str]:
+    """`2.0`≡`2`≡`2.0.0` → `2`, `1.2`→`1.2`. 첫 자리가 1900 이상이면 날짜형이라 None."""
+    parts = ver.split(".")
+    try:
+        if int(parts[0]) >= 1900:
+            return None
+    except ValueError:
+        return None
+    while len(parts) > 1 and re.fullmatch(r"0+", parts[-1]):
+        parts.pop()
+    return ".".join(str(int(x)) if x.isdigit() else x for x in parts)
 
 
 def age_ranges(text: str) -> List[Tuple[int, int]]:
@@ -207,21 +229,23 @@ def age_ranges(text: str) -> List[Tuple[int, int]]:
 
 
 def age_ranges_with_text(text: str) -> List[Tuple[Tuple[int, int], str]]:
-    """[((하한, 상한), 원문 토큰)]. 원문 토큰은 정규화 전 표기 그대로 (정규화 쌍 계수용)."""
+    """[((하한, 상한), 원문 토큰)]. 원문 토큰은 정규화 전 표기 그대로 (정규화 쌍 계수용).
+    `45세 미만` 은 상한 44 로 봅니다 — `45세 이하` 와 같지 않습니다."""
     raw = basic(text)
     t = tilde(raw)
     out: List[Tuple[Tuple[int, int], str]] = []
     seen: List[Tuple[int, int]] = []
-    for m in re.finditer(r"만?\s*([0-9]{1,3})\s*(?:세)?\s*~\s*([0-9]{1,3})\s*세", t):
-        pair = (int(m.group(1)), int(m.group(2)))
+
+    def push(lo: str, hi: str, exclusive: bool, m: "re.Match") -> None:
+        pair = (int(lo), int(hi) - (1 if exclusive else 0))
         if pair not in seen and pair[0] <= pair[1]:
             seen.append(pair)
             out.append((pair, _original_span(raw, t, m)))
-    for m in re.finditer(r"만?\s*([0-9]{1,3})\s*세\s*이상\s*(?:,?|부터)?\s*([0-9]{1,3})\s*세\s*(?:이하|미만|까지)", t):
-        pair = (int(m.group(1)), int(m.group(2)))
-        if pair not in seen and pair[0] <= pair[1]:
-            seen.append(pair)
-            out.append((pair, _original_span(raw, t, m)))
+
+    for m in re.finditer(r"만?\s*([0-9]{1,3})\s*(?:세)?\s*~\s*만?\s*([0-9]{1,3})\s*세(\s*미만)?", t):
+        push(m.group(1), m.group(2), bool(m.group(3)), m)
+    for m in re.finditer(r"만?\s*([0-9]{1,3})\s*세\s*(?:이상|부터|에서)\s*(?:,?|부터)?\s*만?\s*([0-9]{1,3})\s*세\s*(이하|미만|까지|사이)", t):
+        push(m.group(1), m.group(2), m.group(3) == "미만", m)
     return out
 
 

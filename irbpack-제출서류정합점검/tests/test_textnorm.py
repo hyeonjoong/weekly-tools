@@ -7,7 +7,7 @@ from irbpack import textnorm as T
 @pytest.mark.parametrize("a,b", [
     ("만 5~12세", "만 5-12세"), ("만 5~12세", "만 5∼12세"), ("만 5~12세", "만 5〜12세"),
     ("만 5 ~ 12세", "만5~12세"), ("만 ５~１２세", "만 5~12세"), ("만 5–12세", "만 5~12세"),
-    ("5세 이상 12세 이하", "만 5~12세"), ("만 19세 이상 45세 미만", "만 19~45세"),
+    ("5세 이상 12세 이하", "만 5~12세"), ("만 19세 이상 45세 이하", "만 19~45세"),
 ])
 def test_age_equivalents(a, b):
     assert T.age_ranges(a) == T.age_ranges(b) != []
@@ -28,6 +28,27 @@ def test_money(text, won):
 
 def test_money_none():
     assert T.money("실비") is None
+
+
+@pytest.mark.parametrize("text,won", [("5천원", 5000), ("3만5천원", 35000), ("2만 5천원", 25000), ("1억원", 100000000), ("1억 2천만원", 120000000), ("12,000,000원", 12000000)])
+def test_money_korean_units(text, won):
+    assert T.money(text) == won
+
+
+def test_money_huge_digits_do_not_crash():
+    assert T.money("1" * 5000 + "원") in (None, int("1" * 12))
+
+
+def test_months_years_and_months():
+    assert T.months("1년 6개월") == 18
+
+
+@pytest.mark.parametrize("text,pairs", [
+    ("만 19세 이상 45세 미만", [(19, 44)]), ("만 19세 ~ 만 45세", [(19, 45)]), ("만 19세 이상 만 45세 이하", [(19, 45)]),
+    ("만 19세부터 45세까지", [(19, 45)]), ("만 19세에서 45세 사이", [(19, 45)]), ("만 5~12세 미만", [(5, 11)]),
+])
+def test_age_more_forms(text, pairs):
+    assert T.age_ranges(text) == pairs
 
 
 @pytest.mark.parametrize("text,n", [("2회", 2), ("두 번", 2), ("2번", 2), ("2차례", 2), ("2 회기", 2), ("세 번", 3), ("10회", 10), ("한 번", 1)])
@@ -59,11 +80,24 @@ def test_date_invalid_month():
 
 @pytest.mark.parametrize("text", ["Version No: 1.0", "v1.0", "V1.0", "ver 1.0", "1.0판", "버전 1.0", "Version 1.0", "Ver.1.0"])
 def test_version(text):
-    assert T.version(text) == "1.0"
+    assert T.version(text) == "1"
 
 
 def test_version_multi_part():
     assert T.version("v1.2.3") == "1.2.3"
+
+
+@pytest.mark.parametrize("a,b", [("v2.0", "버전 2"), ("Version No: 1.0", "v1"), ("1.0.0판", "v1"), ("Ver 1.2.0", "v1.2")])
+def test_version_canonical_equivalents(a, b):
+    assert T.version(a) == T.version(b)
+
+
+def test_version_date_like_is_not_version():
+    assert T.version("Version 2026.05.18") is None
+
+
+def test_version_with_trailing_period():
+    assert T.version("Version 1.2.") == "1.2"
 
 
 def test_squash_ignores_space_punct_case():

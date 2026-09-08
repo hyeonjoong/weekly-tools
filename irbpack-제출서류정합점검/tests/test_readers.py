@@ -204,3 +204,85 @@ def test_tex_is_collected_but_unreadable(tmp_path):
     p.write_text("\\documentclass{article}", encoding="utf-8")
     doc = readers.load(str(p))
     assert not doc.readable and "원고" in doc.unread_reason
+
+
+def _zip_flag_encrypted(path):
+    data = bytearray(open(path, "rb").read())
+    i = 0
+    while True:
+        i = data.find(b"PK\x03\x04", i)
+        if i < 0:
+            break
+        data[i + 6] |= 1
+        i += 4
+    i = 0
+    while True:
+        i = data.find(b"PK\x01\x02", i)
+        if i < 0:
+            break
+        data[i + 8] |= 1
+        i += 4
+    open(path, "wb").write(bytes(data))
+
+
+def test_encrypted_docx_is_unreadable_not_crash(tmp_path):
+    p = write_docx(str(tmp_path / "enc.docx"), ["연구계획서", "총 2회 방문"])
+    _zip_flag_encrypted(p)
+    doc = readers.load(p)
+    assert not doc.readable and doc.unread_reason
+
+
+def test_corrupted_deflate_is_unreadable_not_crash(tmp_path):
+    p = write_docx(str(tmp_path / "bad.docx"), ["연구계획서 " * 200, "총 2회 방문 " * 200])
+    data = bytearray(open(p, "rb").read())
+    start = data.find(b"word/document.xml") + len(b"word/document.xml")
+    for k in range(start + 10, start + 40):
+        data[k] ^= 0xFF
+    open(p, "wb").write(bytes(data))
+    doc = readers.load(p)
+    assert not doc.readable
+
+
+def test_pdf_decompression_bomb_is_refused(tmp_path):
+    import zlib
+    payload = zlib.compress(b"BT (x) Tj ET " * 6_000_000)
+    pdf = b"%PDF-1.4\n1 0 obj << /Length " + str(len(payload)).encode() + b" /Filter /FlateDecode >>\nstream\n" + payload + b"\nendstream\n%%EOF"
+    p = tmp_path / "bomb.pdf"
+    p.write_bytes(pdf)
+    doc = readers.load(str(p))
+    assert not doc.readable and ("넘습니다" in doc.unread_reason or "레이어" in doc.unread_reason)
+
+
+def test_sdt_wrapped_rows_and_cells_are_read(tmp_path):
+    from tests.docx_builder import p_xml
+    raw = ('<w:tbl><w:tr><w:tc>{}</w:tc><w:tc>{}</w:tc></w:tr>'
+           '<w:sdt><w:sdtContent><w:tr><w:tc>{}</w:tc><w:tc>{}</w:tc></w:tr></w:sdtContent></w:sdt>'
+           '<w:tr><w:tc>{}</w:tc><w:sdt><w:sdtContent><w:tc>{}</w:tc></w:sdtContent></w:sdt></w:tr></w:tbl>'
+           '<w:customXml>{}</w:customXml>').format(p_xml("연구제목"), p_xml("일반 셀"), p_xml("Version"), p_xml("1.0"),
+                                                   p_xml("대상자 수"), p_xml("총 90명"), p_xml("총 3회 방문"))
+    p = write_docx(str(tmp_path / "s.docx"), [], raw_body=raw)
+    doc = readers.load(p)
+    texts = [x.text for x in doc.paras]
+    assert texts == ["연구제목\t일반 셀", "Version\t1.0", "대상자 수\t총 90명", "총 3회 방문"]
+
+
+def test_tracked_deleted_row_and_movefrom_are_dropped(tmp_path):
+    from tests.docx_builder import p_xml
+    raw = ('<w:tbl><w:tr><w:trPr><w:del w:id="9" w:author="x"/></w:trPr><w:tc>{}</w:tc></w:tr>'
+           '<w:tr><w:tc>{}</w:tc></w:tr></w:tbl>'
+           '<w:p><w:moveFrom w:id="3" w:author="x"><w:r><w:t>옮겨간 옛 문장</w:t></w:r></w:moveFrom><w:r><w:t>남는 문장</w:t></w:r></w:p>').format(
+        p_xml("Version 0.9"), p_xml("Version 1.2"))
+    p = write_docx(str(tmp_path / "t.docx"), [], raw_body=raw)
+    doc = readers.load(p)
+    assert [x.text for x in doc.paras] == ["Version 1.2", "남는 문장"]
+    assert doc.tracked_changes
+
+
+def test_mc_fallback_is_not_duplicated(tmp_path):
+    raw = ('<w:p><w:r><w:t>본문 </w:t></w:r>'
+           '<mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006">'
+           '<mc:Choice><w:r><w:t>상자 문장</w:t></w:r></mc:Choice><mc:Fallback><w:r><w:t>상자 문장</w:t></w:r></mc:Fallback>'
+           '</mc:AlternateContent></w:p>')
+    p = write_docx(str(tmp_path / "m.docx"), [], raw_body=raw)
+    doc = readers.load(p)
+    assert doc.paras[0].text == "본문 상자 문장"

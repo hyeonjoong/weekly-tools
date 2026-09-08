@@ -161,3 +161,38 @@ def test_fatal_path_survives_ascii_console(tmp_path, monkeypatch):
     monkeypatch.setattr(sys, "stdout", stream)
     p = write_packet(tmp_path, {"연구계획서.md": md_protocol()})
     assert cli.main([p]) == 2 and stream.buf
+
+
+def test_fatal_path_masks_pii_in_filenames(tmp_path, capsys):
+    p = write_packet(tmp_path, {"메모_010-9278-6844.md": "아무 내용", "메모2_hong@snuh.org.md": "아무 내용"})
+    assert cli.main([p]) == 2
+    out = capsys.readouterr().out
+    assert "9278" not in out and "hong@" not in out
+
+
+def test_argv_newline_cannot_forge_critical_line(tmp_path, capsys):
+    assert cli.main(["nope\n[치명] 99건"]) == 2
+    out = capsys.readouterr().out
+    assert not any(line.startswith("[치명]") for line in out.splitlines())
+
+
+def test_output_failure_does_not_print_exit_0(tmp_path, capsys):
+    p = full_packet(tmp_path)
+    out = tmp_path / "out"
+    out.mkdir()
+    victim = tmp_path / "victim.txt"
+    victim.write_text("x", encoding="utf-8")
+    try:
+        os.link(str(victim), str(out / "정합점검.md"))
+    except (OSError, NotImplementedError):
+        pytest.skip("hardlink 불가")
+    assert cli.main([p, "--out-dir", str(out)]) == 2
+    text = capsys.readouterr().out
+    assert "exit 0" not in text and "출력 실패" in text
+
+
+def test_internal_error_is_exit_2_not_1(tmp_path, monkeypatch, capsys):
+    from irbpack import cli as c
+    monkeypatch.setattr(c.extract, "extract_all", lambda d: (_ for _ in ()).throw(RuntimeError("boom")))
+    assert c.main([full_packet(tmp_path)]) == 2
+    assert "내부 오류" in capsys.readouterr().out

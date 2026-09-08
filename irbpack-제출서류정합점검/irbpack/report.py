@@ -40,6 +40,15 @@ def check_coverage(cov: Coverage, docs: Sequence[Doc]) -> None:
     missing = [ITEM_NAMES[k] for k in ITEM_KEYS if ITEM_NAMES[k] not in accounted]
     if missing:
         raise ReportIntegrityError("행방이 설명되지 않은 항목: {}".format(", ".join(missing)))
+    valid = set(ITEM_NAMES.values())
+    for name in list(cov.items_compared) + [n for n, _ in cov.items_uncomparable]:
+        if name not in valid:
+            raise ReportIntegrityError("12항목이 아닌 이름이 항목 집계에 섞임: {}".format(name))
+    both = set(cov.items_compared) & {n for n, _ in cov.items_uncomparable}
+    if both:
+        raise ReportIntegrityError("대조 성립과 대조 불가에 동시에 있는 항목: {}".format(", ".join(sorted(both))))
+    if len(cov.items_compared) + len(cov.items_uncomparable) != len(ITEM_KEYS):
+        raise ReportIntegrityError("대조 성립 {} + 대조 불가 {} ≠ 12".format(len(cov.items_compared), len(cov.items_uncomparable)))
     if len(docs) != cov.n_docs:
         raise ReportIntegrityError("문서 목록과 커버리지 문서 수가 다릅니다")
 
@@ -118,6 +127,8 @@ def render_console(res: Result, input_label: str) -> str:
         L.append("             · {} — {}".format(_s(name), _s(why)))
     L.append("  대조 항목  12개 중 {}개를 2개 이상 문서에서 찾아 대조".format(len(cov.items_compared)))
     L.append("  대조 불가  {}개".format(len(cov.items_uncomparable)) + (" — " + " / ".join("{}({})".format(_s(n), _s(w)) for n, w in cov.items_uncomparable) if cov.items_uncomparable else ""))
+    if cov.sub_gaps:
+        L.append("  하위 항목 빠짐  {}".format(" / ".join("{}({})".format(_s(n), _s(w)) for n, w in cov.sub_gaps)))
     if cov.manual_only:
         L.append("  사람이 볼 것  {} — 서술형이라 항목추출표.csv 를 눈으로 대조".format(", ".join(_s(x) for x in cov.manual_only)))
     L.append("  정규화 적용 {} — 정규화 덕에 같다고 본 쌍 {}개 (규칙은 정합점검.md 부록)".format(
@@ -195,7 +206,7 @@ def render_md(res: Result, input_label: str, console: str) -> str:
 
 
 def _md(text: object) -> str:
-    return safeio.sanitize_line(str(text)).replace("|", "\\|").replace("`", "'")
+    return _s(text).replace("|", "\\|").replace("`", "'")
 
 
 def issue_rows(res: Result) -> List[List[str]]:
@@ -230,7 +241,7 @@ def extraction_rows(res: Result) -> List[List[str]]:
 
 
 def uncomparable_rows(res: Result) -> List[List[str]]:
-    return [[_s(n), _s(w)] for n, w in res.coverage.items_uncomparable]
+    return [[_s(n), _s(w)] for n, w in res.coverage.items_uncomparable] + [[_s(n), _s(w)] for n, w in res.coverage.sub_gaps]
 
 
 def write_all(res: Result, out_dir: str, md_text: str) -> List[str]:

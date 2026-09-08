@@ -164,7 +164,7 @@ def test_criteria_count_differs_is_warning(tmp_path):
 
 def test_period_unit_mismatch_is_uncomparable(tmp_path):
     res, _ = run(full_packet(tmp_path, protocol=md_protocol(extra="참여 기간은 약 8주입니다."), icf=md_icf(extra="참여 기간은 약 2개월입니다.")))
-    assert any(n == "참여 기간" and "단위" in w for n, w in res.coverage.items_uncomparable)
+    assert any("참여기간" in n and "단위" in w for n, w in res.coverage.sub_gaps)
     assert _issues(res, CRITICAL, "visits") == []
 
 
@@ -216,3 +216,62 @@ def test_assessments_without_crf_is_confessed(tmp_path):
     res, _ = run(full_packet(tmp_path, drop=("CRF_v1.2.md",)))
     assert any(n == "평가·검사 항목" and "CRF 문서 없음" in w for n, w in res.coverage.items_uncomparable)
     assert "평가·검사 항목" not in res.coverage.items_compared
+
+
+def test_two_docs_with_different_subsets_of_protocol_is_not_conflict(tmp_path):
+    """프로토콜 {90,45} · 동의서 {90} · 공고 {45} — 충돌이 아니라 전파 누락."""
+    res, _ = run(full_packet(tmp_path, icf=md_icf(n="총 90명"), ad=md_ad(n="각 군 45명")))
+    assert _issues(res, CRITICAL, "n") == []
+    assert len(_issues(res, WARNING, "n")) == 1
+
+
+def test_email_disjoint_is_not_warning(tmp_path):
+    res, _ = run(full_packet(tmp_path, protocol=md_protocol(extra="연락처 pi@example.org"), icf=md_icf(extra="IRB 사무국 irb@example.org")))
+    assert not any("이메일" in i.title for i in _issues(res, WARNING, "contact"))
+
+
+def test_insurance_limit_does_not_become_compensation(tmp_path):
+    icf = md_icf(extra="연구 관련 손상 시 보상을 위해 임상시험보험에 가입하였으며 보상 한도는 1인당 100,000,000원입니다.")
+    res, _ = run(full_packet(tmp_path, icf=icf))
+    assert [i for i in res.issues if i.item == "compensation" and i.severity != MATCH] == []
+
+
+def test_pi_mention_with_particle_does_not_warn(tmp_path):
+    res, _ = run(full_packet(tmp_path, icf=md_icf(extra="궁금한 점이 있으면 연구책임자에게 문의하십시오.")))
+    assert [i for i in res.issues if i.item == "pi" and i.severity != MATCH] == []
+
+
+def test_revision_history_row_does_not_conflict(tmp_path):
+    icf = md_icf().replace("| 버전 | 1.2 |", "| 개정 이력 | 버전 1.0 (2026.05.18) 최초 작성; 버전 1.2 (2026.08.25) 개정 |\n| 버전 | 1.2 |")
+    res, _ = run(full_packet(tmp_path, icf=icf))
+    assert _issues(res, CRITICAL, "version") == []
+
+
+def test_study_period_vs_participation_period_not_conflict(tmp_path):
+    res, _ = run(full_packet(tmp_path, protocol=md_protocol(extra="총 연구 기간은 IRB 승인 후 2년이다."), icf=md_icf(extra="귀하의 참여 기간은 약 1년입니다.")))
+    assert _issues(res, CRITICAL, "visits") == []
+
+
+def test_compensation_none_vs_amount_is_conflict(tmp_path):
+    res, _ = run(full_packet(tmp_path, protocol=md_protocol(comp="금전적 보상은 없으며 교통비만 지급"), icf=md_icf(comp="회당 3만원의 사례비"), ad=md_ad(comp="회당 3만원의 사례비")))
+    assert _issues(res, CRITICAL, "compensation")
+
+
+def test_age_exclusive_upper_bound_differs(tmp_path):
+    res, _ = run(full_packet(tmp_path, icf=md_icf(age="만 19세 이상 45세 미만")))
+    assert items_of(by_sev(res, CRITICAL)) == ["age"]
+
+
+def test_same_basename_in_two_folders_are_separate_docs(tmp_path):
+    a = tmp_path / "v1"
+    b = tmp_path / "v2"
+    a.mkdir(); b.mkdir()
+    (a / "동의서.md").write_text(md_icf(visits="총 2회 방문"), encoding="utf-8")
+    (b / "동의서.md").write_text(md_icf(visits="총 3회 방문"), encoding="utf-8")
+    (b / "연구계획서.md").write_text(md_protocol(), encoding="utf-8")
+    from irbpack import cli, safeio
+    files = [str(a / "동의서.md"), str(b / "동의서.md"), str(b / "연구계획서.md")]
+    safeio.clear_protected(); safeio.protect_inputs(files)
+    res, fatal = cli.run_packet(files, [], None)
+    assert fatal == [] and "visits" in items_of(by_sev(res, CRITICAL))
+    assert len({d.name for d in res.docs}) == 3

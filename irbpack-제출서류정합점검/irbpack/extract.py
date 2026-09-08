@@ -17,7 +17,7 @@ from .model import (Doc, Extraction, Para, ROLE_AD, ROLE_ASSENT, ROLE_CRF, ROLE_
                     ROLE_PROTOCOL)
 
 #: 문장 분리 — 마침표·물음표·느낌표·줄바꿈. 표 행은 통째로 한 문장.
-_SENT_SPLIT = re.compile(r"(?<=[.!?。])\s+|(?<=다\.)\s*|(?<=요\.)\s*")
+_SENT_SPLIT = re.compile(r"(?<=[^0-9][.!?。])\s+|(?<=다\.)\s*|(?<=요\.)\s*")  # `2026. 8. 25.` 은 쪼개지 않음
 
 
 def _sentences(p: Para) -> Iterable[str]:
@@ -52,7 +52,7 @@ def _dedupe(items: List[Extraction]) -> List[Extraction]:
 # ----------------------------------------------------------------- 1. 연구제목
 
 _TITLE_RX = re.compile(
-    r"(?:^|\t)\s*(?:연구\s*(?:의\s*)?제목|연구\s*과제명|과제명|임상시험\s*제목|연구명|임상시험명|연구\s*명칭|study\s*title|title|protocol\s*title)"
+    r"(?:^|\t)\s*(?:[0-9]{1,2}[.)]\s*|[①-⑳]\s*|[가-힣][.)]\s*)?(?:연구\s*(?:의\s*)?제목|연구\s*과제명|과제명|임상시험\s*제목|연구명|임상시험명|연구\s*명칭|study\s*title|title|protocol\s*title)"
     r"\s*(?:\((국문|영문|한글|영어|kor|eng)\))?\s*[:：\t]\s*(.+?)\s*$", re.IGNORECASE)
 
 
@@ -77,6 +77,12 @@ def extract_title(doc: Doc) -> List[Extraction]:
 # ----------------------------------------------------------------- 2. 버전·날짜
 
 _VER_CTX = re.compile(r"version|ver\b|\bv[0-9]|버전|판번호|개정|작성일|승인일|날짜|date", re.IGNORECASE)
+_VER_HISTORY = re.compile(r"개정\s*이력|변경\s*이력|이력|history|최초\s*작성|에서\s*[0-9.]+\s*(?:판|으?로)\s*개정|이전\s*버전|구\s*버전|revision\s*history", re.IGNORECASE)
+
+
+def _vdisp(token: str) -> str:
+    t = token.strip()
+    return t if re.match(r"^[vV]", t) else "v" + t
 
 
 def extract_version(doc: Doc) -> List[Extraction]:
@@ -89,10 +95,12 @@ def extract_version(doc: Doc) -> List[Extraction]:
         if not _VER_CTX.search(p.text):
             continue
         for s in _sentences(p):
+            if _VER_HISTORY.search(s) or len(textnorm._VER.findall(s)) > 1:
+                continue  # 개정 이력 줄이나 버전이 둘 이상 적힌 문장은 이 문서의 버전이 아니다
             if not found_ver and re.search(r"version|ver\b|\bv\s*[0-9]|버전|판번호|개정번호|[0-9]\.[0-9]\s*판", s, re.IGNORECASE):
                 vm = textnorm.version_match(s)
                 if vm:
-                    out.append(_mk("version", "버전", doc, "v" + vm[0], vm[0], p, s, ("버전 통일",), source=vm[1]))
+                    out.append(_mk("version", "버전", doc, _vdisp(vm[1]), vm[0], p, s, ("버전 통일",), source=vm[1]))
                     found_ver = True
             if not found_date and re.search(r"version|버전|작성일|승인일|개정일|date|날짜|일자", s, re.IGNORECASE):
                 ds = textnorm.find_dates_with_text(s)
@@ -103,9 +111,9 @@ def extract_version(doc: Doc) -> List[Extraction]:
         vm = textnorm.version_match(fname)
         if not vm:
             m = re.search(r"(?<![0-9.])(?:v|ver)?([0-9]\.[0-9](?:\.[0-9])?)(?![0-9])", fname, re.IGNORECASE)
-            vm = (m.group(1), m.group(0)) if m else None
+            vm = (textnorm.canon_version(m.group(1)), m.group(0)) if m else None
         if vm:
-            out.append(Extraction(item="version", sub="버전", doc=doc.name, label=doc.label, raw="v" + vm[0], norm=vm[0],
+            out.append(Extraction(item="version", sub="버전", doc=doc.name, label=doc.label, raw=_vdisp(vm[1]), norm=vm[0],
                                   para=-1, where="파일명", sentence=fname, norm_rules=("버전 통일",), source=vm[1]))
     if not found_date:
         ds = textnorm.find_dates_with_text(fname)
@@ -123,6 +131,8 @@ _PI_RX = re.compile(
 _ORG_RX = re.compile(
     r"(?:연구\s*기관|실시\s*기관|시험\s*기관|소속\s*기관|기관명|소속|institution|site)\s*(?:명)?\s*[:：\t]\s*([^\t\n,;(]{2,40}?)\s*(?:$|\t|,|;|\()", re.IGNORECASE)
 _NOT_NAME = {"이름", "성명", "소속", "연락처", "서명", "직위", "직책", "전화", "이메일", "기관", "날짜", "확인", "담당", "정보", "연구자"}
+#: 라벨 바로 뒤에 붙는 두 글자 이상 조사·접속어 — 한 글자 조사(가·는·의…)는 이름 최소 길이(2)에 걸려 애초에 안 잡힙니다.
+_PARTICLE_START = re.compile(r"^(?:에게|로부터|또는|께서|이며|에게서|에서|한테|으로|이다|입니다|이고|이나|이라|그리고|혹은)")
 
 
 def extract_pi(doc: Doc) -> List[Extraction]:
@@ -132,7 +142,7 @@ def extract_pi(doc: Doc) -> List[Extraction]:
             m = _PI_RX.search(s)
             if m:
                 name = m.group(1).strip()
-                if name not in _NOT_NAME and not re.match(r"^(?:이름|성명|소속)", name):
+                if name not in _NOT_NAME and not re.match(r"^(?:이름|성명|소속)", name) and not _PARTICLE_START.match(name):
                     out.append(_mk("pi", "책임자", doc, name, textnorm.squash(name), p, s, ("공백·문장부호 제거",)))
             m2 = _ORG_RX.search(s)
             if m2:
@@ -151,7 +161,9 @@ def extract_contact(doc: Doc) -> List[Extraction]:
             for m in mask._PHONE.finditer(s):
                 raw = m.group(0)
                 digits = re.sub(r"[^0-9]", "", raw)
-                if len(digits) < 9 or len(digits) > 11:
+                if digits.startswith("82"):
+                    digits = "0" + digits[2:].lstrip("0")
+                if len(digits) < 8 or len(digits) > 11:
                     continue
                 out.append(_mk("contact", "전화", doc, raw, digits, p, s))
             for m in mask._EMAIL.finditer(s):
@@ -164,7 +176,9 @@ def extract_contact(doc: Doc) -> List[Extraction]:
 
 _N_CTX = re.compile(r"대상자|참여자|참가자|피험자|모집|표본|인원|환자|군|명\s*을|명\s*이|명\s*으로|subjects?|participants?", re.IGNORECASE)
 _N_STAFF = re.compile(r"연구자|연구원|간호사|담당자|연구진|심사위원|위원|평가자|검사자|의사\s*[0-9]")
-_N_NUM = re.compile(r"(?:총\s*)?(?<![0-9.,])([0-9]{1,3}(?:,[0-9]{3})*)\s*명(?![0-9])")
+_N_STAFF_ADJ = re.compile(r"(?:연구자|연구원|간호사|담당자|위원|평가자|검사자|의사)\s*(?:은|는|이|가|을|를|약)?\s*$")
+_N_BACKGROUND = re.compile(r"선행\s*연구|기존\s*연구|문헌|보고(?:되|된|하였)|메타\s*분석|연구에서는|에서\s*[0-9,]+\s*명을?\s*(?:분석|보고|대상으로\s*한\s*연구)|유병률|추정된다")
+_N_NUM = re.compile(r"(?:총\s*)?(?<![0-9.,])([0-9]{1,3}(?:,[0-9]{3}){0,3})\s*명(?![0-9])")
 
 
 def extract_n(doc: Doc) -> List[Extraction]:
@@ -175,15 +189,22 @@ def extract_n(doc: Doc) -> List[Extraction]:
                 continue
             if _N_STAFF.search(s) and not re.search(r"대상자|참여자|피험자|참가자", s):
                 continue
+            if _N_BACKGROUND.search(s):
+                continue  # 배경·선행연구의 인원은 이 연구의 표본수가 아니다
             last_end = 0
             for m in _N_NUM.finditer(s):
                 n = int(m.group(1).replace(",", ""))
                 prefix = s[max(last_end, m.start() - 12):m.start()]
+                tail = s[m.end():m.end() + 8]
                 last_end = m.end()
-                if n <= 0 or n > 100000:
-                    continue
-                if re.search(r"연구자|연구원|간호사|담당자|위원", prefix):
-                    continue  # "연구간호사 2명" — 대상자가 아니다
+                if n <= 1 or n > 100000:
+                    continue  # 1명은 표본수가 아니라 비율·단위 표현("보호자 1명", "1명당")이다
+                if re.match(r"\s*의\s*(?:대상자|참여자|피험자|참가자|환자)", tail):
+                    pass  # "30명의 참여자" — 뒤의 명사가 대상자면 앞에 연구자가 있어도 표본수
+                elif _N_STAFF_ADJ.search(prefix) or re.match(r"\s*(?:의|인)\s*(?:연구자|연구원|간호사|담당자|위원|평가자)", tail):
+                    continue  # "연구간호사 2명" · "1명의 연구자" — 대상자가 아니다
+                if re.match(r"\s*(?:당|씩|마다|별)", tail):
+                    continue  # "대상자 1명당" — 인원이 아니라 단위
                 out.append(_mk("n", "", doc, m.group(0).strip(), str(n), p, s))
     return _dedupe(out)
 
@@ -211,10 +232,11 @@ def extract_age(doc: Doc) -> List[Extraction]:
 _VISIT_MULTI = re.compile(r"1\s*회\s*또는\s*다\s*회기|단회\s*또는\s*다회기|다회기")
 _VISIT_COUNT = re.compile(
     r"(?:총\s*)?([0-9]{1,2}|한|두|세|네|다섯|여섯|일곱|여덟|아홉|열)\s*(?:회|번|차례)\s*(?:의\s*)?(?:방문|내원|회기|세션|session)"
-    r"|(?:방문|내원|회기|세션|session)\s*(?:은|는|횟수는|횟수|:|총)?\s*(?:총\s*)?([0-9]{1,2}|한|두|세|네|다섯|여섯)\s*(?:회|번|차례)"
+    r"|(?:방문|내원|회기|세션|session)\s*(?:은|는|횟수는|횟수|수는|수|:|：|총)?\s*[:：]?\s*(?:총\s*)?([0-9]{1,2}|한|두|세|네|다섯|여섯)\s*(?:회|번|차례)"
     r"|(?:총\s*)?([0-9]{1,2})\s*회기(?:로|의|를|에)", re.IGNORECASE)
 _VISIT_ENUM = re.compile(r"(?:\bVisit|\bV|방문|내원|회기)\s*[-#]?\s*([0-9]{1,2})(?![0-9])", re.IGNORECASE)
-_PERIOD = re.compile(r"(?:참여\s*기간|연구\s*기간|참여하시는\s*기간|총\s*참여|참여\s*예상\s*기간)[^0-9]{0,20}?(?:약\s*)?([0-9]{1,3})\s*(주|개월|일|년)")
+#: `연구 기간`(전체 연구 창)은 대상자 참여 기간이 아니므로 잡지 않습니다.
+_PERIOD = re.compile(r"(?:참여\s*기간|참여하시는\s*기간|총\s*참여|참여\s*예상\s*기간|참여\s*하게\s*되는\s*기간)[^0-9]{0,20}?(?:약\s*)?([0-9]{1,3})\s*(주|개월|일|년)")
 
 
 def extract_visits(doc: Doc) -> List[Extraction]:
@@ -230,8 +252,11 @@ def extract_visits(doc: Doc) -> List[Extraction]:
                 if c is None or c <= 0 or c > 60:
                     continue
                 tail = s[m.end():m.end() + 4]
-                if c == 1 and (re.match(r"\s*(?:시|당|마다|별|에|의|당시)", tail) or re.search(r"매\s*$", s[max(0, m.start() - 3):m.start()])):
+                head = s[max(0, m.start() - 4):m.start()]
+                if c == 1 and (re.match(r"\s*(?:시|당|마다|별|에|의|당시)", tail) or re.search(r"매\s*$", head)):
                     continue  # "1회 방문 시 90분" — 횟수가 아니라 '방문당'
+                if re.search(r"(?:주|월|일|매주|매월|격주)\s*$", head) or re.search(r"제\s*$", head) or re.match(r"\s*차", tail):
+                    continue  # "주 1회 방문" 은 빈도, "제2회 방문"·"3회차 방문" 은 서수
                 out.append(_mk("visits", "방문횟수", doc, m.group(0).strip(), str(c), p, s, ("횟수 통일",)))
             for m in _VISIT_ENUM.finditer(s):
                 n = int(m.group(1))
@@ -252,7 +277,8 @@ def extract_visits(doc: Doc) -> List[Extraction]:
 
 _DUR_CTX = re.compile(r"소요|걸리|걸립|정도\s*(?:가\s*)?(?:소요|걸|필요)|약\s*[0-9]+\s*(?:분|시간)|시간이\s*(?:필요|걸)|분\s*(?:정도|가량|내외)|시간\s*(?:정도|가량|내외)")
 _DUR_TOK = re.compile(r"(?<![0-9])(?:[0-9]+(?:\.[0-9]+)?\s*시간\s*(?:반|[0-9]+\s*분)?|[0-9]+\s*분|(?:한|두|세|네)\s*시간\s*반?)(?![0-9])")
-_DUR_EXCL = re.compile(r"보관|이내에|이전에|이후에|간격|주\s*[0-9]|일\s*[0-9]+\s*시간|하루|매일|수면|취침|착용")
+_DUR_EXCL = re.compile(r"보관|이내에|이전에|이후에|간격|주\s*[0-9]|일\s*[0-9]+\s*시간|수면|취침|착용")
+_DUR_TOK_EXCL = re.compile(r"(?:매일|하루|일일|매주|주\s*[0-9]+\s*회)\s*$")
 
 
 def extract_duration(doc: Doc) -> List[Extraction]:
@@ -265,6 +291,8 @@ def extract_duration(doc: Doc) -> List[Extraction]:
                 mins = textnorm.minutes(m.group(0))
                 if mins is None or mins <= 0 or mins > 480:
                     continue
+                if _DUR_TOK_EXCL.search(s[max(0, m.start() - 8):m.start()]):
+                    continue  # "매일 30분씩 훈련" 은 회기 소요시간이 아니다
                 out.append(_mk("duration", "", doc, m.group(0).strip(), str(mins), p, s, ("시간→분",)))
     return _dedupe(out)
 
@@ -272,7 +300,8 @@ def extract_duration(doc: Doc) -> List[Extraction]:
 # ----------------------------------------------------------------- 9. 보상
 
 _COMP_CTX = re.compile(r"보상|사례비|사례금|교통비|답례|기념품|지급|reimburse|compensat", re.IGNORECASE)
-_COMP_NONE = re.compile(r"(?:보상|사례비|금전적\s*(?:보상|대가))\s*(?:은|는|이)?\s*(?:제공되지|지급되지|지급하지|없습니다|없음|드리지)")
+_COMP_NONE = re.compile(r"(?:보상금?|사례비|사례금|금전적\s*(?:보상|대가))\s*(?:은|는|이|:|：)?\s*(?:제공되지|지급되지|지급하지|없습니다|없음|없으며|없고|드리지|따로\s*없)")
+_COMP_EXCL = re.compile(r"보험|손상|피해\s*보상|배상|예산|연구비|한도|보상\s*범위|치료비|위탁|용역|인건비")
 _COMP_UNIT = re.compile(r"(시간당|시간\s*당|방문\s*당|방문별|회당|회\s*당|1회\s*당|1회당|총|일괄|1인당|인당)")
 
 
@@ -280,14 +309,14 @@ def extract_compensation(doc: Doc) -> List[Extraction]:
     out: List[Extraction] = []
     for p in doc.paras:
         for s in _sentences(p):
-            if not _COMP_CTX.search(s):
-                continue
+            if not _COMP_CTX.search(s) or _COMP_EXCL.search(s):
+                continue  # 임상시험보험 보상 한도·연구비 예산은 대상자 보상이 아니다
             if _COMP_NONE.search(s):
                 out.append(_mk("compensation", "", doc, _COMP_NONE.search(s).group(0), "없음", p, s))
                 continue
             if re.search(r"실비", s):
                 out.append(_mk("compensation", "", doc, "실비", "실비", p, s))
-            for m in re.finditer(r"(?<![0-9])([0-9]{1,3}(?:,[0-9]{3})+|[0-9]+(?:\.[0-9]+)?\s*만|[0-9]+)\s*원", s):
+            for m in re.finditer(r"(?<![0-9])((?:[0-9]{1,3}(?:,[0-9]{3}){0,4}|[0-9]{1,9})(?:\.[0-9]{1,2})?\s*(?:천|만|억){0,2}(?:\s*[0-9]{1,4}\s*(?:천|만|억){1,2})*)\s*원", s):
                 amt = textnorm.money(m.group(0))
                 if amt is None or amt <= 0:
                     continue
@@ -304,7 +333,7 @@ def extract_compensation(doc: Doc) -> List[Extraction]:
 # ----------------------------------------------------------------- 10. 보관기간
 
 _RET_CTX = re.compile(r"보관|보존|폐기|파기|retain|retention", re.IGNORECASE)
-_RET_TOK = re.compile(r"(?<![0-9])(?:[0-9]{1,2}\s*년|[0-9]{1,3}\s*개월|(?:일|이|삼|사|오|육|칠|팔|구|십)\s*년)(?:간|동안|\s*후|\s*이후|\s*까지|\s*이상)?")
+_RET_TOK = re.compile(r"(?<![0-9])(?:[0-9]{1,2}\s*년(?:\s*[0-9]{1,2}\s*개월)?|[0-9]{1,3}\s*개월|(?:일|이|삼|사|오|육|칠|팔|구|십)\s*년)(?:간|동안|\s*후|\s*이후|\s*까지|\s*이상)?")
 
 
 def extract_retention(doc: Doc) -> List[Extraction]:
@@ -403,13 +432,14 @@ def _looks_like_heading_break(text: str) -> bool:
 
 _ASSESS_SUFFIX = r"(?:검사|척도|설문지|설문|질문지|지수|일지|평가지|평가|측정|Index|Scale|Inventory|Questionnaire|Test|Diary|Assessment)"
 _FORM_LINE = re.compile(r"^(?:[0-9]{1,2}[.)]\s*|[①-⑳]\s*|[-•·]\s*)?([A-Za-z가-힣0-9][A-Za-z가-힣0-9\-\s()/]{1,38}?" + _ASSESS_SUFFIX + r")\s*(?:\(([A-Za-z][A-Za-z0-9\- ]{1,24})\))?\s*$")
-_ASSESS_CTX = re.compile(r"평가\s*항목|검사\s*항목|측정\s*항목|평가\s*변수|평가\s*도구|측정\s*도구|평가는|검사는|측정은|다음\s*(?:검사|평가|측정)|다음과\s*같은\s*(?:검사|평가|설문)|(?:검사|평가|설문)를?\s*(?:실시|시행|수행)", re.IGNORECASE)
+_ASSESS_CTX = re.compile(r"평가\s*항목|검사\s*항목|측정\s*항목|평가\s*변수|평가\s*도구|측정\s*도구|평가는|검사는|측정은|다음\s*(?:검사|평가|측정)|다음과\s*같은\s*(?:검사|평가|설문)|(?:검사|평가|설문|척도|지수|설문지|일지)\s*(?:\([^)]{1,24}\))?\s*[)）]?\s*(?:를|을|와|과|및|,)?\s*(?:실시|시행|수행|평가|측정|작성)(?:한다|합니다|하며|하고|됩니다|하게)", re.IGNORECASE)
 _ASSESS_TOK = re.compile(r"([A-Za-z가-힣0-9][A-Za-z가-힣0-9\- ]{1,30}?" + _ASSESS_SUFFIX + r")(?:\s*\(([A-Za-z][A-Za-z0-9\- ]{1,24})\))?")
 _ASSESS_LEAD = re.compile(r"^(?:다음|아래|위|해당|이|그|각|모든|본|재|전|후|주요|기타|같은|등의|위한|및|또는|그리고|필요한|추가|관련)$")
 
 
 def _clean_assess_name(name: str) -> str:
     """'다음과 같은 검사' → '' / '삶의질 설문지' → '삶의질 설문지'. 앞쪽 조사·지시어 토큰을 떼어 냅니다."""
+    name = re.sub(r"^.*?(?:방문|회기|내원|Visit\s*[0-9]+)\s*(?:시|에|때|마다|에는)?\s*", "", name)  # "제2회 방문 시 혈액검사" → "혈액검사"
     toks = name.split()
     while toks and (_ASSESS_LEAD.match(toks[0]) or re.search(r"(?:은|는|이|가|을|를|의|과|와|로|으로|에서|에)$", toks[0]) and len(toks) > 1):
         toks = toks[1:]

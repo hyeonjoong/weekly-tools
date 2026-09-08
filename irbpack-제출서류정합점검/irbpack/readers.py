@@ -21,6 +21,8 @@ from . import textnorm
 from .model import Doc, Para
 
 W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+MC = "{http://schemas.openxmlformats.org/markup-compatibility/2006}"
+_WRAPPERS = (W + "sdt", W + "sdtContent", W + "customXml", W + "smartTag", W + "fldSimple", W + "hyperlink")
 READABLE_EXT = (".docx", ".md", ".txt", ".pdf")
 UNREADABLE_EXT = (".hwp", ".hwpx", ".doc", ".rtf", ".odt", ".pages")
 #: 원고 확장자 — 읽지 않지만 폴더에서 **수집은** 해서 강제 장치 1(원고 감지 → exit 2)이 발동되게 합니다.
@@ -85,11 +87,30 @@ def _para_text(p: ET.Element) -> Tuple[str, bool]:
 
 
 def _strip_deleted(root: ET.Element) -> None:
-    """w:del 아래의 텍스트를 제거합니다 (수락 상태로 읽기)."""
+    """변경 추적을 '모두 수락' 상태로 만듭니다 — w:del 텍스트, 삭제 표시된 표 행(w:trPr/w:del),
+    이동 원본(w:moveFrom), 그리고 mc:Fallback(텍스트상자 등의 중복 사본)을 제거합니다."""
     for parent in root.iter():
         for child in list(parent):
-            if child.tag == W + "del":
+            if child.tag in (W + "del", W + "moveFrom", MC + "Fallback"):
                 parent.remove(child)
+            elif child.tag == W + "tr":
+                trpr = child.find(W + "trPr")
+                if trpr is not None and trpr.find(W + "del") is not None:
+                    parent.remove(child)
+            elif child.tag == W + "tc":
+                tcpr = child.find(W + "tcPr")
+                if tcpr is not None and tcpr.find(W + "cellDel") is not None:
+                    parent.remove(child)
+
+
+def _direct(el: ET.Element, tag: str):
+    """el 의 직계 tag 자식들 — 단, sdt/customXml 같은 래퍼는 투과합니다 (중첩 표 안으로는 안 들어감)."""
+    for c in el:
+        if c.tag == tag:
+            yield c
+        elif c.tag in _WRAPPERS:
+            for x in _direct(c, tag):
+                yield x
 
 
 def read_docx(path: str) -> Tuple[List[Para], bool]:
@@ -133,9 +154,9 @@ def read_docx(path: str) -> Tuple[List[Para], bool]:
             elif child.tag == W + "tbl":
                 table_no += 1
                 my_no = table_no
-                for r_i, tr in enumerate(child.findall(W + "tr"), start=1):
+                for r_i, tr in enumerate(_direct(child, W + "tr"), start=1):
                     cells: List[str] = []
-                    for tc in tr.findall(W + "tc"):
+                    for tc in _direct(tr, W + "tc"):
                         cell_parts: List[str] = []
                         for p in tc.iter(W + "p"):
                             text, _ = _para_text(p)
@@ -144,10 +165,8 @@ def read_docx(path: str) -> Tuple[List[Para], bool]:
                         cell = cell.replace("\t", " ").replace("\n", " ").strip()
                         cells.append(cell)
                     add("\t".join(cells), table=my_no, row=r_i)
-            elif child.tag in (W + "sdt",):
-                content = child.find(W + "sdtContent")
-                if content is not None:
-                    walk(content)
+            elif child.tag in _WRAPPERS:
+                walk(child)
     walk(body)
     return paras, tracked
 
@@ -267,12 +286,12 @@ def read_pdf(path: str) -> List[Para]:
     for m in _PDF_STREAM.finditer(raw):
         data = m.group(1)
         try:
-            data = zlib.decompress(data)
+            d = zlib.decompressobj()
+            data = d.decompress(data, MAX_BYTES)
+            if d.unconsumed_tail:
+                raise ValueError("PDF 스트림이 {}MB 를 넘습니다 (압축 해제 후)".format(MAX_BYTES // (1024 * 1024)))
         except zlib.error:
-            try:
-                data = zlib.decompressobj().decompress(data)
-            except zlib.error:
-                pass
+            pass
         for tobj in _PDF_TEXTOBJ.finditer(data):
             line: List[bytes] = []
             for s in _PDF_STR.finditer(tobj.group(1)):
@@ -298,6 +317,8 @@ def read_pdf(path: str) -> List[Para]:
         t = textnorm.basic(line).strip()
         if not t:
             continue
+        if len(paras) >= MAX_PARAS:
+            raise ValueError("문단이 {}개를 넘습니다".format(MAX_PARAS))
         if _is_heading(t, ""):
             section = t[:40]
         paras.append(Para(idx=len(paras), text=t, section=section))
@@ -331,7 +352,9 @@ def load(path: str) -> Doc:
             raise ValueError("지원하지 않는 확장자 {}".format(ext or "(없음)"))
         if not doc.paras:
             raise ValueError("본문이 비어 있습니다")
-    except (ValueError, zipfile.BadZipFile, ET.ParseError, OSError, KeyError) as exc:
+    except (ValueError, zipfile.BadZipFile, ET.ParseError, OSError, KeyError, RuntimeError,
+            NotImplementedError, zlib.error, MemoryError, RecursionError) as exc:
+        # RuntimeError = 암호 걸린 zip 멤버, NotImplementedError = 미지원 압축, zlib.error = 깨진 스트림
         doc.readable = False
         doc.unread_reason = sanitize_name(str(exc))[:200] or exc.__class__.__name__
         doc.paras = []

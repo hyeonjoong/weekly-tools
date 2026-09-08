@@ -8,7 +8,7 @@
 
 마스킹 규칙(리포트에도 인쇄됩니다):
 
-- 전화번호 `010-9278-6844` → `010-****-6844` (**가운데 자리만** 가림)
+- 전화번호 `010-0000-1234` → `010-****-1234` (**가운데 자리만** 가림)
   — 어느 번호인지 사람이 알아보되, 그대로 복사해 쓸 수는 없게.
 - 주민등록번호 형태 `900101-1234567` → `******-*******` (**전부** 가림)
 - 이메일 `snubhirb@snubh.org` → `s*******@snubh.org` (앞 한 글자만 남김)
@@ -22,25 +22,30 @@ import re
 
 #: 주민등록번호 형태. 전화번호보다 **먼저** 가려야 합니다
 #: (`900101-1234567` 이 전화번호 정규식에 걸리지 않도록 자리수를 고정).
-_RRN = re.compile(r"(?<![0-9])([0-9]{6})[-‑–—]([1-4][0-9]{6})(?![0-9])")
+_RRN = re.compile(r"(?<![0-9])([0-9]{6})\s*[-‑–—]?\s*([0-9][0-9]{6})(?![0-9])")
 
 #: 한국 전화번호. 지역번호 2~3자리 + 국번 3~4자리 + 4자리.
-_PHONE = re.compile(r"(?<![0-9])(0[0-9]{1,2})[-‑–—.\s]?([0-9]{3,4})[-‑–—.\s]?([0-9]{4})(?![0-9])")
+_PHONE = re.compile(
+    r"(?<![0-9])(?:\+\s*82\s*[-‑–—.\s]?\s*0?|\(?0)([0-9]{1,2})\)?\s*[-‑–—.\s]?\s*([0-9]{3,4})\s*[-‑–—.\s]?\s*([0-9]{4})(?![0-9])"
+    r"|(?<![0-9])(1[5-8][0-9]{2})\s*[-‑–—.]\s*([0-9]{4})(?![0-9])")
 
 #: 이메일. 로컬파트 첫 글자만 남깁니다.
-_EMAIL = re.compile(r"([A-Za-z0-9._%+\-])([A-Za-z0-9._%+\-]*)@([A-Za-z0-9.\-]+\.[A-Za-z]{2,})")
+#: 앞쪽 lookbehind 로 토큰 중간에서 시작하지 못하게 — 긴 ASCII 문자열에서 O(n²) 백트래킹이 나던 사고 방지.
+_EMAIL = re.compile(r"(?<![\w.%+\-])([\w.%+\-])([\w.%+\-]{0,63})@([A-Za-z0-9.\-]+\.[A-Za-z]{2,})")
 
 #: 리포트 부록에 그대로 인쇄되는 규칙 설명.
 RULES = (
-    "전화번호: 가운데 자리를 `*` 로 가림 (010-9278-6844 → 010-****-6844)",
+    "전화번호: 가운데 자리를 `*` 로 가림 (010-0000-1234 → 010-****-1234)",
     "주민등록번호 형태: 전부 가림 (900101-1234567 → ******-*******)",
     "이메일: 로컬파트 첫 글자만 남김 (irb@snubh.org → i**@snubh.org)",
 )
 
 
 def _mask_phone(m: "re.Match") -> str:
+    if m.group(4):  # 1588-xxxx 대표번호
+        return "{}-{}".format(m.group(4), "*" * 4)
     head, mid, tail = m.group(1), m.group(2), m.group(3)
-    return "{}-{}-{}".format(head, "*" * len(mid), tail)
+    return "0{}-{}-{}".format(head, "*" * len(mid), tail)
 
 
 def _mask_email(m: "re.Match") -> str:
@@ -48,9 +53,10 @@ def _mask_email(m: "re.Match") -> str:
 
 
 def mask(text: str) -> str:
-    """리포트로 나가는 문자열 하나를 마스킹합니다."""
+    """리포트로 나가는 문자열 하나를 마스킹합니다. 전각 숫자(０１０)는 반각으로 바꾼 뒤 가립니다."""
     if not text:
         return text
+    text = "".join(chr(ord(ch) - 0xFEE0) if "！" <= ch <= "～" else ch for ch in text)  # 전각 숫자·기호 → 반각
     out = _RRN.sub(lambda m: "*" * 6 + "-" + "*" * 7, text)
     out = _PHONE.sub(_mask_phone, out)
     out = _EMAIL.sub(_mask_email, out)
@@ -60,4 +66,6 @@ def mask(text: str) -> str:
 def looks_personal_mobile(number: str) -> bool:
     """`010-…` 계열 개인 휴대전화로 보이는지. 대표번호(02·031…)는 False."""
     digits = re.sub(r"[^0-9]", "", number or "")
+    if digits.startswith("82"):
+        digits = "0" + digits[2:]
     return digits.startswith("01") and len(digits) in (10, 11)

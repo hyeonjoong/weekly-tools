@@ -45,7 +45,7 @@ def prepare_out_dir(path: str) -> str:
     if not path or not path.strip():
         raise OutputError("--out-dir 이 비어 있습니다")
     ap = os.path.abspath(path)
-    if os.path.islink(path):
+    if os.path.islink(path.rstrip("/\\")) or os.path.islink(ap):
         raise OutputError("--out-dir 이 심볼릭 링크입니다: {}".format(path))
     canon = _canon(ap)
     if canon in _PROTECTED:

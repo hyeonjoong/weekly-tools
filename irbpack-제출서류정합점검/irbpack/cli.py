@@ -14,7 +14,7 @@ import os
 import sys
 from typing import List, Optional, Sequence, Tuple
 
-from . import __version__, compare, extract, guards, readers, report, roles, safeio
+from . import __version__, compare, extract, guards, mask, readers, report, roles, safeio
 from .model import Coverage, Doc, ROLE_PROTOCOL, Result
 
 MIN_COMPARED = 4
@@ -63,6 +63,11 @@ def _stdout_safe() -> None:
             pass
 
 
+def _clean(text: object) -> str:
+    """사용자 인자·파일명 등 바깥에서 온 문자열을 화면에 낼 때 — 마스킹 + 개행 새니타이즈."""
+    return safeio.sanitize_line(mask.mask(str(text)))
+
+
 def _print(text: str) -> None:
     try:
         sys.stdout.write(text)
@@ -85,6 +90,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _load_packet(files: Sequence[str], forced: List[Tuple[str, str]]) -> Tuple[List[Doc], List[str]]:
     docs = [readers.load(f) for f in files]
+    # 같은 파일명이 두 폴더에서 오면 추출값이 한 문서로 뭉쳐 충돌이 사라진다 — 이름을 상위 폴더로 구분
+    counts: dict = {}
+    for d in docs:
+        counts[d.name] = counts.get(d.name, 0) + 1
+    for d in docs:
+        if counts[d.name] > 1:
+            parent = readers.sanitize_name(os.path.basename(os.path.dirname(os.path.abspath(d.path))))
+            d.name = "{}/{}".format(parent, d.name)
     errors = roles.assign(docs, forced)
     return docs, errors
 
@@ -156,7 +169,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 2
     files, errors = _collect(args.paths)
     if errors:
-        _print("[중단] " + "\n       ".join(errors) + "\n")
+        _print("[중단] " + "\n       ".join(_clean(e) for e in errors) + "\n")
         return 2
     if not files:
         _print("[중단] 읽을 문서가 없습니다 (.docx .md .txt .pdf)\n")
@@ -165,7 +178,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.baseline:
         baseline_files, berr = _collect([args.baseline])
         if berr or not baseline_files:
-            _print("[중단] --baseline: " + ("; ".join(berr) if berr else "문서가 없습니다") + "\n")
+            _print("[중단] --baseline: " + _clean("; ".join(berr) if berr else "문서가 없습니다") + "\n")
             return 2
     safeio.clear_protected()
     safeio.protect_inputs(list(files) + list(baseline_files or []))
@@ -174,34 +187,39 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         try:
             out_dir = safeio.prepare_out_dir(args.out_dir)
         except (safeio.OutputError, OSError) as exc:
-            _print("[중단] {}\n".format(exc))
+            _print("[중단] {}\n".format(_clean(exc)))
             return 2
-    res, fatal = run_packet(files, forced, baseline_files)
+    try:
+        res, fatal = run_packet(files, forced, baseline_files)
+    except Exception as exc:  # noqa: BLE001 — 내부 오류가 '치명 발견'(exit 1) 로 둔갑하지 않게
+        _print("[중단] 내부 오류로 판정하지 않음 → exit 2\n  {}: {}\n".format(exc.__class__.__name__, safeio.sanitize_line(str(exc))[:300]))
+        return 2
     label = ", ".join(safeio.relpath_for_display(p) for p in args.paths)
     if fatal:
-        _print("irbpack {} — 제출서류 정합점검\n입력: {}  (문서 {}개)\n\n".format(__version__, safeio.sanitize_line(label), len(files)))
+        _print("irbpack {} — 제출서류 정합점검\n입력: {}  (문서 {}개)\n\n".format(__version__, _clean(label), len(files)))
         for d in res.docs:
-            _print("  {}  {}\n".format(readers.sanitize_name(d.label or d.role or "역할 미판별").ljust(12), d.name))
+            _print("  {}  {}\n".format(_clean(d.label or d.role or "역할 미판별").ljust(12), _clean(d.name)))
         _print("\n[중단] 판정하지 않음 → exit 2\n")
         for f in fatal:
-            _print("  " + safeio.sanitize_line(f).replace("␤", "\n  ") + "\n")
+            _print("  " + _clean(f).replace("␤", "\n  ") + "\n")
         return 2
     try:
         console = report.render_console(res, label)
+        written: List[str] = []
+        if out_dir:
+            md_text = report.render_md(res, label, console)
+            written = report.write_all(res, out_dir, md_text)   # 화면에 'exit 0' 을 찍기 전에 먼저 쓴다
     except report.ReportIntegrityError as exc:
-        _print("[중단] 리포트 무결성 오류 — 커버리지 자백 없이는 리포트를 내지 않습니다: {}\n".format(exc))
+        _print("[중단] 리포트 무결성 오류 — 커버리지 자백 없이는 리포트를 내지 않습니다: {}\n".format(_clean(exc)))
+        return 2
+    except (safeio.OutputError, OSError) as exc:
+        _print("[중단] 출력 실패 — 리포트를 쓰지 못해 판정을 내지 않습니다: {}\n".format(_clean(exc)))
         return 2
     _print(console)
     if out_dir:
-        try:
-            md_text = report.render_md(res, label, console)
-            written = report.write_all(res, out_dir, md_text)
-        except (safeio.OutputError, OSError) as exc:
-            _print("[중단] 출력 실패: {}\n".format(exc))
-            return 2
-        _print("\n출력: {}\n".format(out_dir))
+        _print("\n출력: {}\n".format(_clean(out_dir)))
         for w in written:
-            _print("  · {}\n".format(os.path.basename(w)))
+            _print("  · {}\n".format(_clean(os.path.basename(w))))
     return res.exit_code
 
 

@@ -132,7 +132,8 @@ class Coverage:
     n_read: int = 0
     unread: List[Tuple[str, str]] = field(default_factory=list)          #: (문서, 사유)
     items_compared: List[str] = field(default_factory=list)              #: 2개 이상 문서에서 대조 성립
-    items_uncomparable: List[Tuple[str, str]] = field(default_factory=list)  #: (항목, 사유)
+    items_uncomparable: List[Tuple[str, str]] = field(default_factory=list)  #: (항목, 사유) — 12항목 단위만
+    sub_gaps: List[Tuple[str, str]] = field(default_factory=list)            #: (항목 — 하위, 사유) — 항목은 대조됐지만 하위키 하나가 빠진 경우
     norm_equal_pairs: int = 0                                            #: 정규화 덕에 같다고 본 쌍 수
     norm_rules_used: List[str] = field(default_factory=list)
     auto_roles: int = 0

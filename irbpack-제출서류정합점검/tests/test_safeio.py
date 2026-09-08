@@ -113,3 +113,15 @@ def test_nfd_and_case_variants_are_protected(tmp_path, clean_safeio):
     nfd = os.path.join(str(tmp_path), unicodedata.normalize("NFD", "동의서.md"))
     with pytest.raises(safeio.OutputError):
         safeio.prepare_out_dir(nfd)
+
+
+def test_out_dir_symlink_with_trailing_slash_refused(tmp_path, clean_safeio):
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    try:
+        os.symlink(str(real), str(link))
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink 불가")
+    with pytest.raises(safeio.OutputError):
+        safeio.prepare_out_dir(str(link) + "/")
