@@ -1,0 +1,23 @@
+# 실측 생리 데이터는 어디에 있든 커밋 금지 — 합성 예시(examples/)만 허용
+*.csv
+*.edf
+*.zip
+!examples/**/*.csv
+
+# 산출물 폴더
+결과/
+결과*/
+out/
+output/
+
+# Python 캐시 / 빌드
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+.eggs/
+
+# OS
+.DS_Store

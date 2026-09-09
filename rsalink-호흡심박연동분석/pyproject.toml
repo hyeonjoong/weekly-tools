@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rsalink"
+version = "0.1.0"
+description = "호흡 신호 + RR 간격 연동 분석 CLI — RSA peak-valley, 고정 HF vs 호흡중심 대역, 결맞음, 페이싱 동조, 조건 비교 (stdlib only)"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "hyeonjoong" }]
+dependencies = []
+
+[project.scripts]
+rsalink = "rsalink.cli:main"
+
+[tool.setuptools]
+packages = ["rsalink"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
