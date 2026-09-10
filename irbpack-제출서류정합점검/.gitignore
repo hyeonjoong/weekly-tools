@@ -1,0 +1,42 @@
+# --- 파이썬 ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.venv/
+venv/
+
+# --- macOS ---
+.DS_Store
+
+# --- 이 툴의 산출물 (리포트는 저장소에 올리지 않는다) ---
+정합점검결과/
+정합점검_*/
+점검_*/
+개정점검*/
+irbpack_결과*/
+정합점검.md
+불일치목록.csv
+항목추출표.csv
+대조불가.csv
+
+# --- 실제 제출 서류는 절대 커밋하지 않는다 ------------------------------
+# 이 폴더는 실제 IRB 패킷을 끌어다 놓기 좋은 자리라서, 문서 파일 자체를 통째로 막는다.
+# 번들 예제(examples/)는 전부 합성이므로 아래 예외로 다시 허용한다.
+*.docx
+*.doc
+*.pdf
+*.hwp
+*.hwpx
+*.xlsx
+*.xls
+*.csv
+*.zip
+
+# 합성 예제만 예외 (실제 환자·실제 기관 정보 없음)
+!examples/**/*.docx
+!examples/**/*.hwp
+!tests/**/*.docx

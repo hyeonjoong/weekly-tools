@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "irbpack"
+version = "0.1.0"
+description = "IRB·식약처에 한 봉투로 같이 내는 서류들(연구계획서·동의서/Assent·CRF·모집공고·등록정보)을 폴더째 읽어, 서류들끼리 말이 다른 곳만 찍어 주는 오프라인 CLI — 12개 항목(제목·버전/날짜·연구책임자·연락처·대상자수·연령·방문횟수·소요시간·보상·보관기간·선정기준·평가항목)을 문서 사이에서 대조하고, 값 충돌·전파 누락·동의 범위 밖·공고 개인 연락처를 근거 문장과 함께 인쇄한다. 커버리지 자백을 반드시 출력하며, 프로토콜을 못 찾거나 원고가 섞이면 추측하지 않고 멈춘다. 문서를 고치지 않고, 표본수를 재계산하지 않고, 규정 준수 여부도 판정하지 않는다. 외부 의존성 0, 네트워크 0, 원본 읽기 전용"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "hyeonjoong", email = "hyeonjoongk@gmail.com" }]
+keywords = ["irb", "ethics-committee", "clinical-trial", "protocol", "informed-consent",
+            "crf", "recruitment-ad", "document-consistency", "regulatory-submission",
+            "docx", "offline", "korean", "study-startup"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Healthcare Industry",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Text Processing :: Markup",
+    "Environment :: Console",
+    "Natural Language :: Korean",
+]
+
+# 외부 의존성 없음 — .docx 는 표준 라이브러리 zipfile + xml.etree 로 직접 읽고(표 셀 포함),
+# .pdf 텍스트 레이어도 zlib 로 직접 푼다. 네트워크 호출은 0건이며,
+# tests/test_guardrails.py 가 소스에 socket/urllib/http/scipy/numpy import 가 없음을 정적으로 검증한다.
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.scripts]
+irbpack = "irbpack.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["irbpack*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
