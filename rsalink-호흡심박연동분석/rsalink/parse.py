@@ -10,6 +10,7 @@
 - 호흡 이벤트: `timestamp` 한 열(흡기 시작 시각).
 - RR: 값 열 하나(hrvkit 호환) — 단위 자동(중앙값 <10 → 초, <300 → bpm, else ms),
   `--rr-col NAME|IDX` 로 열 지정. 300–2000 ms 밖은 제외하고 개수를 자백.
+  빈칸/NA/문자/nan/inf 셀도 "제외"로 세고(n_unparsed 별도 자백) 시간축은 중앙값 RR 로 진행.
   보정은 하지 않는다(제외만).
 - 역행 타임스탬프는 거부(추측 정렬 금지), 중복은 개수 자백 후 첫 값만 사용.
 """
@@ -103,6 +104,7 @@ def _looks_value(cell: str) -> bool:
 class TimeInfo:
     kind: str                 # "iso" | "hms" | "epoch" | "seconds"
     t0_abs: Optional[float]   # epoch 초 (iso/epoch 일 때), 아니면 None
+    tz_aware: Optional[bool] = None   # iso 일 때 타임존 유무(epoch 은 True 로 본다), 아니면 None
 
 
 def _parse_iso(s: str) -> Tuple[float, bool]:
@@ -138,7 +140,7 @@ def parse_timestamps(cells: Sequence[str], label: str) -> Tuple[List[float], Tim
         t0 = vals[0]
         out = [v - t0 for v in vals]
         _check_monotonic(out, label)
-        return out, TimeInfo("iso", t0)
+        return out, TimeInfo("iso", t0, tz_aware=(True in tz_flags))
     if _HMS_RE.match(first):
         vals = []
         prev = None
@@ -171,7 +173,7 @@ def parse_timestamps(cells: Sequence[str], label: str) -> Tuple[List[float], Tim
             t0 = nums[0]
             out = [x - t0 for x in nums]
             _check_monotonic(out, label)
-            return out, TimeInfo("epoch", t0)
+            return out, TimeInfo("epoch", t0, tz_aware=True)
         t0 = nums[0]
         out = [x - t0 for x in nums]
         _check_monotonic(out, label)
@@ -210,6 +212,7 @@ class RespWaveform:
     dup_ts: int
     time: TimeInfo
     source: str = "waveform"
+    n_bad_values: int = 0          # nan/inf/비숫자 값 셀 — 제외하고 자백(라운드 1 D11)
 
     @property
     def duration_s(self) -> float:
@@ -258,16 +261,21 @@ def parse_resp(path: str):
         v_idx = 1 if t_idx == 0 else 0
     ts_cells: List[str] = []
     vals: List[float] = []
+    n_bad = 0
     for r in rows:
-        if len(r) <= max(t_idx, v_idx) or not r[t_idx] or not r[v_idx]:
+        if len(r) <= max(t_idx, v_idx) or not r[t_idx]:
             continue
         try:
-            vals.append(float(r[v_idx]))
+            x = float(r[v_idx])
+            if not math.isfinite(x):
+                raise ValueError
         except ValueError:
+            n_bad += 1          # 빈칸·NA·nan/inf — 샘플에서 제외하고 개수를 자백
             continue
+        vals.append(x)
         ts_cells.append(r[t_idx])
     if len(vals) < 10:
-        raise RsalinkError(f"{label}: 유효 샘플이 10개 미만입니다")
+        raise RsalinkError(f"{label}: 유효 샘플이 10개 미만입니다 (값 셀 제외 {n_bad}건)")
     t, info = parse_timestamps(ts_cells, label)
     dup = _check_monotonic(t, label)
     if dup:
@@ -278,6 +286,8 @@ def parse_resp(path: str):
                 keep_v.append(b)
             last = a
         t, vals = keep_t, keep_v
+    if len(t) < 10:
+        raise RsalinkError(f"{label}: 서로 다른 타임스탬프가 10개 미만입니다(전부 같은 값? 중복 {dup}건)")
     dts = [t[i] - t[i - 1] for i in range(1, len(t))]
     med = _median(dts)
     if med <= 0:
@@ -286,7 +296,7 @@ def parse_resp(path: str):
     gaps = [d for d in dts if d > 3 * med]
     return RespWaveform(
         t=t, v=vals, fs_est=1.0 / med, irregular_frac=irregular,
-        n_gaps=len(gaps), gap_total_s=sum(gaps), dup_ts=dup, time=info)
+        n_gaps=len(gaps), gap_total_s=sum(gaps), dup_ts=dup, time=info, n_bad_values=n_bad)
 
 
 # ---------------------------------------------------------------- RR
@@ -302,10 +312,17 @@ class RRSeries:
     excluded_frac: float
     col_used: str
     time: TimeInfo
+    n_unparsed: int = 0            # 빈칸/NA/문자/nan/inf 셀 — n_excluded 에 포함됨
 
     @property
     def duration_s(self) -> float:
         return self.t_beat[-1] if self.t_beat else 0.0
+
+    @property
+    def t_mid(self) -> List[float]:
+        """각 RR 간격의 중점 시각(초) = 박동 시각 − RR/2. RSA peak-valley 창 배정에 쓴다
+        (끝 박동 시각에 배정하면 RR/2 ≈ 0.45 s 의 기계적 지연이 생긴다). 단조 증가."""
+        return [tb - x / 2000.0 for tb, x in zip(self.t_beat, self.rr_ms)]
 
 
 def _median(xs: Sequence[float]) -> float:
@@ -334,7 +351,8 @@ def _pick_rr_col(header: List[str], rows: List[List[str]], rr_col: Optional[str]
     numeric = []
     for j in range(ncol):
         col = [r[j] for r in rows[:50] if len(r) > j and r[j]]
-        if col and all(_NUM_RE.match(c) for c in col):
+        # NA/빈칸이 섞여도 열은 숫자 열 — 비어 있지 않은 셀의 80% 이상이 숫자면 채택(라운드 1 A4)
+        if col and sum(1 for c in col if _NUM_RE.match(c)) >= 0.8 * len(col):
             numeric.append(j)
     if not numeric:
         raise RsalinkError("RR: 숫자 열을 찾지 못했습니다 — --rr-col 로 지정하세요")
@@ -346,21 +364,27 @@ def parse_rr(path: str, rr_col: Optional[str] = None) -> RRSeries:
     header, rows = read_rows(path)
     label = f"RR({os.path.basename(path)})"
     j, name = _pick_rr_col(header, rows, rr_col)
-    raw: List[float] = []
+    # 파싱 실패 셀(빈칸·NA·문자·nan/inf)은 None 으로 남겨 "제외"로 세고 시간축은 중앙값으로 진행(라운드 1 A4).
+    raw: List[Optional[float]] = []
+    n_unparsed = 0
     for r in rows:
-        if len(r) <= j or not r[j]:
-            continue
+        cell = r[j] if len(r) > j else ""
         try:
-            raw.append(float(r[j]))
+            x = float(cell)
+            if not math.isfinite(x):
+                raise ValueError
+            raw.append(x)
         except ValueError:
-            continue
-    if len(raw) < 3:
-        raise RsalinkError(f"{label}: RR 값이 3개 미만입니다")
-    med = _median(raw)
+            raw.append(None)
+            n_unparsed += 1
+    parsed = [x for x in raw if x is not None]
+    if len(parsed) < 3:
+        raise RsalinkError(f"{label}: RR 값이 3개 미만입니다 (파싱 실패 셀 {n_unparsed}건)")
+    med = _median(parsed)
     if med < 10:
-        unit, ms = "s", [x * 1000.0 for x in raw]
+        unit, ms = "s", [x * 1000.0 if x is not None else None for x in raw]
     elif med < 300:
-        unit, ms = "bpm", [60000.0 / x if x > 0 else 0.0 for x in raw]
+        unit, ms = "bpm", [(60000.0 / x if x > 0 else 0.0) if x is not None else None for x in raw]
     else:
         unit, ms = "ms", list(raw)
     t_idx = _find_col(header, ("timestamp", "time", "t", "시각", "시간"))
@@ -371,46 +395,63 @@ def parse_rr(path: str, rr_col: Optional[str] = None) -> RRSeries:
             _, info = parse_timestamps(cells, label)
         except RsalinkError:
             info = TimeInfo("seconds", None)
-    fill_ms = _median([x for x in ms if RR_MIN_MS <= x <= RR_MAX_MS] or [1000.0])
+    fill_ms = _median([x for x in ms if x is not None and RR_MIN_MS <= x <= RR_MAX_MS] or [1000.0])
     rr_ok: List[float] = []
     t_beat: List[float] = []
     t = 0.0
     excluded = 0
     for x in ms:
-        if RR_MIN_MS <= x <= RR_MAX_MS:
+        if x is not None and RR_MIN_MS <= x <= RR_MAX_MS:
             t += x / 1000.0
             rr_ok.append(x)
             t_beat.append(t)
         else:
             excluded += 1
-            # 제외된 박동만큼도 시간은 흘러야 한다 — 값은 버리고 시간축만 중앙값으로 진행
+            # 제외된 박동(범위 밖·파싱 실패)만큼도 시간은 흘러야 한다 — 값은 버리고 시간축만 중앙값으로 진행
             t += fill_ms / 1000.0
     return RRSeries(
         rr_ms=rr_ok, t_beat=t_beat, unit_detected=unit, n_total=len(ms),
-        n_excluded=excluded, excluded_frac=excluded / len(ms), col_used=name, time=info)
+        n_excluded=excluded, excluded_frac=excluded / len(ms), col_used=name, time=info,
+        n_unparsed=n_unparsed)
 
 
 # ---------------------------------------------------------------- 시간 인자
 
 
 def parse_mmss(s: str) -> float:
-    """'M:SS' / 'H:MM:SS' / '초' → 초."""
+    """'M:SS' / 'H:MM:SS' / '초' → 초. 오형식·nan/inf·음수는 RsalinkError(exit 2)."""
     s = s.strip()
-    if _NUM_RE.match(s):
-        return float(s)
-    parts = s.split(":")
-    if len(parts) == 2:
-        return int(parts[0]) * 60 + float(parts[1])
-    if len(parts) == 3:
-        return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
-    raise RsalinkError(f"시간 형식을 인식하지 못했습니다: {s!r} (M:SS 또는 초)")
+    try:
+        if _NUM_RE.match(s):
+            v = float(s)
+        else:
+            parts = s.split(":")
+            if any(p.strip().startswith(("-", "+")) for p in parts):
+                raise ValueError
+            if len(parts) == 2:
+                v = int(parts[0]) * 60 + float(parts[1])
+            elif len(parts) == 3:
+                v = int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+            else:
+                raise ValueError
+    except ValueError:
+        raise RsalinkError(f"시간 형식을 인식하지 못했습니다: {s!r} (M:SS, H:MM:SS 또는 초)")
+    if not math.isfinite(v) or v < 0:
+        raise RsalinkError(f"시간은 0 이상 유한해야 합니다: {s!r}")
+    return v
 
 
 def parse_range(s: str) -> Tuple[float, float]:
-    """'0:00-5:00' → (0.0, 300.0)."""
+    """'0:00-5:00' → (0.0, 300.0). 부호로 시작('-1:00-5:00')하거나 한쪽이 비면('5:00-') 빈 문자열 ''
+    을 노출하지 않는 한국어 오류(exit 2, 라운드 2 #9)."""
+    s = s.strip()
+    if s.startswith(("-", "+")):
+        raise RsalinkError(f"구간이 부호로 시작합니다: {s!r} — 음수 시각은 쓸 수 없습니다. 형식은 M:SS-M:SS (예: 0:00-5:00)")
     if "-" not in s:
         raise RsalinkError(f"구간 형식은 M:SS-M:SS 입니다: {s!r}")
     a, b = s.split("-", 1)
+    if not a.strip() or not b.strip():
+        raise RsalinkError(f"구간 형식은 M:SS-M:SS 입니다(시작 또는 끝이 비어 있음): {s!r}")
     st, en = parse_mmss(a), parse_mmss(b)
     if en <= st:
         raise RsalinkError(f"구간 끝이 시작보다 앞입니다: {s!r}")
