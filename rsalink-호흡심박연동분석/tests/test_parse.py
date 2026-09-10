@@ -71,6 +71,30 @@ def test_rr_exclusion_and_beat_times(tmp_path):
     assert r.t_beat == pytest.approx([1.0, 3.0, 5.0])
 
 
+def test_rr_na_cells_counted_as_excluded(tmp_path):
+    # 라운드 1 A4: NA/빈칸/문자/nan/inf 셀은 조용히 사라지지 않고 제외로 세며 시간축은 중앙값으로 진행
+    # (한 열짜리 파일의 완전히 빈 줄은 행이 아니라서 세지 않는다 — 빈 셀은 아래 두 열 파일로 검사)
+    r = parse_rr(_w(tmp_path, "na.csv", "rr\n1000\nNA\n1000\n1000\nabc\n1000\nnan\ninf\n1000\n"))
+    assert r.n_total == 9 and r.n_unparsed == 4 and r.n_excluded == 4
+    assert r.excluded_frac == pytest.approx(4 / 9)
+    assert r.rr_ms == [1000.0] * 5
+    assert r.t_beat == pytest.approx([1.0, 3.0, 4.0, 6.0, 9.0])
+    r2 = parse_rr(_w(tmp_path, "blank.csv", "t,rr\n0,1000\n1,\n2,1000\n3,250\n4,1000\n"))
+    assert r2.n_total == 5 and r2.n_unparsed == 1 and r2.n_excluded == 2   # 빈 셀 1 + 범위 밖 1
+    assert r2.t_beat == pytest.approx([1.0, 3.0, 5.0])
+
+
+def test_rr_headerless_with_na_still_finds_column(tmp_path):
+    r = parse_rr(_w(tmp_path, "h.csv", "1000\n900\nNA\n1100\n1000\n"))
+    assert r.rr_ms == [1000.0, 900.0, 1100.0, 1000.0] and r.n_unparsed == 1
+
+
+def test_mmss_bad_formats():
+    for s in ("x:yy", "1:2:3:4", "nan", "inf", "-5", "1:-5"):
+        with pytest.raises(RsalinkError):
+            parse_mmss(s)
+
+
 def test_rr_col_override_and_cp949(tmp_path):
     text = "시각,RR간격\n0,1000\n1,900\n2,1100\n"
     p = _w(tmp_path, "k.csv", text, enc="cp949")

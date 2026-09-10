@@ -1,8 +1,10 @@
-# 실측 생리 데이터는 어디에 있든 커밋 금지 — 합성 예시(examples/)만 허용
+# 실측 생리 데이터는 어디에 있든 커밋 금지 — 합성 예시 두 폴더의 CSV 만 허용(폴더별 명시, 라운드 1 B3)
 *.csv
+*.tsv
 *.edf
 *.zip
-!examples/**/*.csv
+!examples/paced_6bpm/*.csv
+!examples/sham/*.csv
 
 # 산출물 폴더
 결과/

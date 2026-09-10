@@ -160,6 +160,14 @@ def band_power(sp: Spectrum, lo: float, hi: float) -> float:
     return sum(p for f, p in zip(sp.freqs, sp.pxx) if lo <= f < hi) * sp.df
 
 
+def band_bin_count(df: float, lo: float, hi: float) -> int:
+    """[lo, hi) 에 들어가는 Welch 빈 수(band_power 와 같은 규칙: f = k·df, lo ≤ f < hi).
+    nperseg 256(Δf 1/64) 의 HF 0.15–0.40 은 k = 10..25 → 16개; 128 → 8개; 64 → 4개. 잡음 마진(segments.py)에 쓴다."""
+    if df <= 0:
+        return 0
+    return sum(1 for k in range(int(hi / df) + 2) if lo <= k * df < hi)
+
+
 def value_at(freqs: Sequence[float], vals: Sequence[float], f: float) -> float:
     k = min(range(len(freqs)), key=lambda i: abs(freqs[i] - f))
     return vals[k]
@@ -190,17 +198,28 @@ class BandResult:
     duration_s: float
     rr_peak_freq: float           # RR 스펙트럼 0.04–0.40 최대 빈
     coherence_bias: Optional[float]   # 1/L
+    hf_n_bins: int = 0            # HF 고정 대역 안의 Welch 빈 수(잡음 마진용; 0 이면 df 로 계산)
 
     @property
     def resp_over_hf(self) -> float:
         return self.resp_centered / self.hf_fixed if self.hf_fixed > 0 else float("inf")
+
+    @property
+    def coherence_null95(self) -> Optional[float]:
+        """독립 신호 MSC 의 95% 분위 근사 1 − 0.05^(1/(L−1)) (L 세그먼트 Welch, 단일 빈) — 라운드 1 D6."""
+        if self.coherence_at_resp is None or self.n_segments < 2:
+            return None
+        return 1.0 - 0.05 ** (1.0 / (self.n_segments - 1))
 
 
 def analyze_segment(rr_t: Sequence[float], rr_ms: Sequence[float], t0: float, t1: float,
                     resp_freq: float, resp_t: Optional[Sequence[float]] = None,
                     resp_v: Optional[Sequence[float]] = None, resp_offset: float = 0.0,
                     half_width: float = RESP_HALF_WIDTH, nperseg: Optional[int] = None) -> BandResult:
-    """구간 [t0,t1) 의 대역 파워와(호흡 파형이 있으면) 결맞음."""
+    """구간 [t0,t1) 의 대역 파워와(호흡 파형이 있으면) 결맞음. 격자 상한은 RR 데이터 끝(끝값 홀드 금지)."""
+    t1 = min(t1, rr_t[-1]) if rr_t else t1
+    if t1 <= t0:
+        raise ValueError("구간이 RR 데이터 범위 밖")
     grid, x = resample_linear(rr_t, rr_ms, t0, t1)
     y = None
     if resp_t is not None and resp_v is not None and len(resp_t) > 1:
@@ -215,7 +234,8 @@ def analyze_segment(rr_t: Sequence[float], rr_ms: Sequence[float], t0: float, t1
         resp_centered=band_power(sp, lo, hi), resp_band=(lo, hi), resp_freq=resp_freq,
         coherence_at_resp=coh, n_segments=sp.n_segments, nperseg=sp.nperseg, df=sp.df,
         duration_s=len(x) / FS, rr_peak_freq=peak_freq(sp, 0.04, 0.40),
-        coherence_bias=(1.0 / sp.n_segments) if sp.coherence is not None else None)
+        coherence_bias=(1.0 / sp.n_segments) if sp.coherence is not None else None,
+        hf_n_bins=sum(1 for f in sp.freqs if HF_BAND[0] <= f < HF_BAND[1]))
 
 
 def suggest_offset(rr_t: Sequence[float], rr_ms: Sequence[float], resp_t: Sequence[float],
