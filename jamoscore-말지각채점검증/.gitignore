@@ -1,0 +1,56 @@
+# ---- 실제 임상 자료가 이 폴더에 떨어져도 절대 커밋되지 않도록 ----
+# 기본은 "모든 엑셀·CSV 차단", 번들 예제만 예외로 되살린다.
+*.xlsx
+*.xlsm
+*.xls
+*.csv
+*.tsv
+*.numbers
+*.hwp
+*.hwpx
+*.pdf
+*.docx
+!examples/*.xlsx
+!examples/*.csv
+
+# 산출물 폴더 (이름을 바꿔 쓰더라도 흔한 형태를 막는다)
+채점검증*/
+결과*/
+out/
+output/
+*_out/
+*_결과/
+# 산출물 파일 이름 자체
+채점검증.md
+문제목록.csv
+문항점수.csv
+규칙대조.csv
+동일쌍_다른채점.csv
+혼동행렬_*.csv
+임계차.csv
+Methods_초안.md
+statwise_longistat_입력/
+
+# 개인정보가 들어갈 만한 이름
+*개인정보*
+*환자*
+*명단*
+*연락처*
+
+# ---- 파이썬 ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+.tox/
+
+# ---- macOS ----
+.DS_Store
+._*
