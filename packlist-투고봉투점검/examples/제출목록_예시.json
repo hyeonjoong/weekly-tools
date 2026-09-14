@@ -1,0 +1,13 @@
+{
+  "required": [
+    "S1 Table",
+    "S2 Table",
+    "S3 Table",
+    "S1 Fig",
+    "S2 Fig",
+    "S3 Fig"
+  ],
+  "optional": [
+    "Cover Letter"
+  ]
+}

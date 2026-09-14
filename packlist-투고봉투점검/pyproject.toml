@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "packlist"
+version = "0.1.0"
+description = "투고 봉투 점검 — 원고가 약속한 첨부물이 봉투 안에 실제로 있고 docx 안에 앵커돼 있는지 대조한다"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "hyeonjoong", email = "hyeonjoongk@gmail.com" }]
+keywords = ["docx", "manuscript", "submission", "figures", "audit"]
+dependencies = []
+
+[project.scripts]
+packlist = "packlist.cli:main"
+
+[tool.setuptools]
+packages = ["packlist"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

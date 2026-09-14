@@ -1,0 +1,48 @@
+# 파이썬
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.venv/
+venv/
+
+# macOS
+.DS_Store
+
+# ── 실제 연구 자료 방어 ───────────────────────────────────────────────
+# 이 툴은 "점검할 봉투를 이 폴더에 끌어다 놓기" 쉬운 모양이다.
+# 원고·보충자료·리포트가 실수로라도 커밋되지 않도록 문서 확장자를 통째로 막는다.
+# examples/ 의 합성 봉투는 커밋하지 않고 _make_examples.py 로 언제든 다시 만든다.
+*.docx
+*.doc
+*.hwp
+*.hwpx
+*.pdf
+*.pptx
+*.ppt
+*.xlsx
+*.xls
+*.rtf
+*.png
+*.jpg
+*.jpeg
+*.tif
+*.tiff
+
+# 산출물
+봉투점검*/
+봉투점검.md
+자산목록.csv
+약속대조.csv
+회차대장.csv
+
+# 생성되는 합성 예제 봉투 (_make_examples.py 로 재생성)
+examples/01_정상봉투/
+examples/02_고아있음/
+examples/03_판정불가/
+examples/04_거절_원고만/
+examples/05_앵커회귀_지난회차/
+examples/05_앵커회귀_이번회차/
