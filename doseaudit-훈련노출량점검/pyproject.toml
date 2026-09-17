@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "doseaudit"
+version = "0.1.0"
+description = "훈련 노출량(dose) 점검 — 피험자별 앱 훈련 로그 워크북 묶음(.xlsx)을 통째로 펼쳐, '이 피험자가 처방된 훈련을 실제로 얼마나 받았는가'를 선언받은 정의로 다시 셉니다. 활동일의 정의(any-row/min-rows/min-modules/min-seconds)와 분모의 창을 반드시 선언받고, 미선언이면 판정 없이 exit 2. 소요시간 0초를 결측과 구분하지 않는 사고를 막기 위해 모든 평균을 '전체평균·0제외평균·0행비율' 세 값으로만 내보내고, 데이터가 0행인 모듈은 '평균 0'이 아니라 '데이터 없음'으로 보고합니다. 손으로 관리한 참여현황 트래커의 완료일수와 부호 붙은 차이로 대조하고, 정의를 바꾸면 중앙값이 몇 %p 움직이는지 민감도 표를 냅니다. 순응/비순응을 판정하지 않고 노출량과 결과의 관계도 보지 않습니다. 실명·Login ID 는 읽지 않으며 완전 오프라인·입력 읽기 전용, 표준 라이브러리만 사용"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "hyeonjoong", email = "hyeonjoongk@gmail.com" }]
+keywords = ["clinical-trial", "adherence", "exposure", "dose", "app-logs",
+            "digital-therapeutics", "hearing-rehabilitation", "audit",
+            "reproducible-research", "xlsx", "offline", "csr", "methods"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Healthcare Industry",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+    "Topic :: Scientific/Engineering :: Medical Science Apps.",
+    "Environment :: Console",
+    "Natural Language :: Korean",
+]
+
+# 외부 의존성 없음 — .xlsx 는 zipfile + xml.etree 로 직접 읽고, 나머지는
+# csv · datetime · statistics 로 충분합니다. 네트워크 호출 0회.
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.scripts]
+doseaudit = "doseaudit.cli:run"
+
+[tool.setuptools.packages.find]
+include = ["doseaudit*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
