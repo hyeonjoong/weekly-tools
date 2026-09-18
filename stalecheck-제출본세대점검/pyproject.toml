@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stalecheck"
+version = "1.0.0"
+description = "제출 봉투 안의 파일이 작업 폴더 원본과 같은 세대인지 내용 해시로 대조합니다 (stdlib 전용, 입력 읽기 전용)"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "hyeonjoong", email = "hyeonjoongk@gmail.com" }]
+keywords = ["manuscript", "submission", "reproducibility", "hash", "staleness"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: MacOS :: MacOS X",
+  "Topic :: Scientific/Engineering",
+]
+dependencies = []
+
+[project.scripts]
+stalecheck = "stalecheck.cli:run"
+
+[tool.setuptools]
+packages = ["stalecheck"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

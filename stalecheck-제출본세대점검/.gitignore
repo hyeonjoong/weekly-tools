@@ -1,0 +1,40 @@
+# ── 이 툴이 자기 폴더로 불러들이는 실데이터를 저장소 밖에 둔다 ──────────────
+# 리포트 산출물
+세대점검.md
+세대불일치.csv
+짝없음.csv
+일치목록.csv
+형제점검.csv
+세대점검_*/
+리포트/
+out/
+_out/
+
+# 예제 생성물 (examples/예제_만들기.py 가 만드는 것)
+examples/_생성/
+
+# 실제 논문 자료가 실수로 들어오는 것을 막는다
+*.docx
+*.xlsx
+*.pptx
+*.hwp
+*.pdf
+*.csv
+*.tsv
+*.sav
+*.dta
+!examples/**/*.csv
+
+# 파이썬
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.venv/
+venv/
+.coverage
+
+# macOS
+.DS_Store
